@@ -127,47 +127,30 @@ def main() -> None:
     ap.add_argument("action",
                     type=str,
                     help="action to perform with MetaCS-FL tool")
+    default_config_file = None
     if "launch_server" in argv:
-        ap.add_argument("--implementation",
-                        type=str,
-                        required=True,
-                        help=SUPPRESS)
+        default_config_file = __FLOWER_SERVER_CONFIG_FILE
         ap.add_argument("--id",
                         type=int,
-                        required=True,
-                        help=SUPPRESS)
-        ap.add_argument("--config-file",
-                        type=Path,
                         required=True,
                         help=SUPPRESS)
     elif "launch_client" in argv:
-        ap.add_argument("--implementation",
-                        type=str,
-                        required=True,
-                        help=SUPPRESS)
+        default_config_file = __FLOWER_CLIENT_CONFIG_FILE
         ap.add_argument("--id",
                         type=int,
                         required=True,
                         help=SUPPRESS)
-        ap.add_argument("--config-file",
-                        type=Path,
-                        required=True,
-                        help=SUPPRESS)
     elif "execute_fl_with_flower" in argv:
-        ap.add_argument("--config-file",
-                        type=Path,
-                        required=True,
-                        help=SUPPRESS)
+        default_config_file = __FLOWER_EXECUTOR_CONFIG_FILE
     elif "execute_fl_with_flower_simulation_engine" in argv:
-        ap.add_argument("--config-file",
-                        type=Path,
-                        required=True,
-                        help=SUPPRESS)
+        default_config_file = __FLOWER_SIMULATOR_CONFIG_FILE
     elif "analyze_results" in argv:
-        ap.add_argument("--config-file",
-                        type=Path,
-                        required=True,
-                        help=SUPPRESS)
+        default_config_file = __RESULT_ANALYZER_CONFIG_FILE
+    ap.add_argument("--config-file",
+                    type=Path,
+                    required=False,
+                    default=default_config_file,
+                    help=SUPPRESS)
     parsed_args = ap.parse_args()
     # Get the user-provided arguments.
     action = str(parsed_args.action)
@@ -180,19 +163,15 @@ def main() -> None:
         config_file = Path(parsed_args.config_file)
         # Verify if the user-provided config file is valid.
         _verify_if_config_file_is_valid(config_file)
-        implementation = str(parsed_args.implementation)
-        if implementation == "flower":
-            fs = FlowerServerLauncher(id_, config_file)
-            fs.launch_server()
+        fs = FlowerServerLauncher(id_, config_file)
+        fs.launch_server()
     elif action == "launch_client":
         id_ = int(parsed_args.id)
         config_file = Path(parsed_args.config_file)
         # Verify if the user-provided config file is valid.
         _verify_if_config_file_is_valid(config_file)
-        implementation = str(parsed_args.implementation)
-        if implementation == "flower":
-            fc = FlowerClientLauncher(id_, config_file)
-            fc.launch_client()
+        fc = FlowerClientLauncher(id_, config_file)
+        fc.launch_client()
     elif action == "execute_fl_with_flower":
         config_file = Path(parsed_args.config_file)
         # Verify if the user-provided config file is valid.
