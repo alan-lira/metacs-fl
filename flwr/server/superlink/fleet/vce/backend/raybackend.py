@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 # ==============================================================================
 """Ray backend for the Fleet API using the Simulation Engine."""
 
+
 import sys
 from logging import DEBUG, ERROR
 from typing import Callable, Optional, Union
@@ -25,7 +26,7 @@ from flwr.common.constant import PARTITION_ID_KEY
 from flwr.common.context import Context
 from flwr.common.logger import log
 from flwr.common.message import Message
-from flwr.common.typing import ConfigsRecordValues
+from flwr.common.typing import ConfigRecordValues
 from flwr.simulation.ray_transport.ray_actor import BasicActorPool, ClientAppActor
 from flwr.simulation.ray_transport.utils import enable_tf_gpu_growth
 
@@ -103,7 +104,7 @@ class RayBackend(Backend):
         if not ray.is_initialized():
             ray_init_args: dict[
                 str,
-                ConfigsRecordValues,
+                ConfigRecordValues,
             ] = {}
 
             if backend_config.get(self.init_args_key):
@@ -160,6 +161,7 @@ class RayBackend(Backend):
                 "Call the backend's `build()` method before processing messages."
             )
 
+        future = None
         try:
             # Submit a task to the pool
             future = self.pool.submit(
@@ -182,7 +184,8 @@ class RayBackend(Backend):
                 self.__class__.__name__,
             )
             # add actor back into pool
-            self.pool.add_actor_back_to_pool(future)
+            if future is not None:
+                self.pool.add_actor_back_to_pool(future)
             raise ex
 
     def terminate(self) -> None:

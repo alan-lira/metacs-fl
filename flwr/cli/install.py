@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 """Flower command line interface `install` command."""
+
 
 import hashlib
 import shutil
@@ -153,7 +154,7 @@ def validate_and_install(
         )
         raise typer.Exit(code=1)
 
-    version, fab_id = get_metadata_from_config(config)
+    fab_id, version = get_metadata_from_config(config)
     publisher, project_name = fab_id.split("/")
     config_metadata = (publisher, project_name, version, fab_hash)
 

@@ -1,4 +1,4 @@
-# Copyright 2023 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,7 +37,7 @@ from .aggregate import aggregate_bulyan, aggregate_krum
 from .fedavg import FedAvg
 
 
-# flake8: noqa: E501
+# noqa: E501
 # pylint: disable=line-too-long
 class Bulyan(FedAvg):
     """Bulyan strategy.

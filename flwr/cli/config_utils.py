@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,53 +14,20 @@
 # ==============================================================================
 """Utility to validate the `pyproject.toml` file."""
 
-import zipfile
-from io import BytesIO
+
 from pathlib import Path
-from typing import IO, Any, Optional, Union, get_args
+from typing import Any, Optional, Union
 
 import tomli
 import typer
 
-from flwr.common import object_ref
-from flwr.common.typing import UserConfigValue
-
-
-def get_fab_config(fab_file: Union[Path, bytes]) -> dict[str, Any]:
-    """Extract the config from a FAB file or path.
-
-    Parameters
-    ----------
-    fab_file : Union[Path, bytes]
-        The Flower App Bundle file to validate and extract the metadata from.
-        It can either be a path to the file or the file itself as bytes.
-
-    Returns
-    -------
-    Dict[str, Any]
-        The `config` of the given Flower App Bundle.
-    """
-    fab_file_archive: Union[Path, IO[bytes]]
-    if isinstance(fab_file, bytes):
-        fab_file_archive = BytesIO(fab_file)
-    elif isinstance(fab_file, Path):
-        fab_file_archive = fab_file
-    else:
-        raise ValueError("fab_file must be either a Path or bytes")
-
-    with zipfile.ZipFile(fab_file_archive, "r") as zipf:
-        with zipf.open("pyproject.toml") as file:
-            toml_content = file.read().decode("utf-8")
-
-        conf = load_from_string(toml_content)
-        if conf is None:
-            raise ValueError("Invalid TOML content in pyproject.toml")
-
-        is_valid, errors, _ = validate(conf, check_module=False)
-        if not is_valid:
-            raise ValueError(errors)
-
-        return conf
+from flwr.common.config import (
+    fuse_dicts,
+    get_fab_config,
+    get_metadata_from_config,
+    parse_config_args,
+    validate_config,
+)
 
 
 def get_fab_metadata(fab_file: Union[Path, bytes]) -> tuple[str, str]:
@@ -77,12 +44,7 @@ def get_fab_metadata(fab_file: Union[Path, bytes]) -> tuple[str, str]:
     Tuple[str, str]
         The `fab_id` and `fab_version` of the given Flower App Bundle.
     """
-    conf = get_fab_config(fab_file)
-
-    return (
-        f"{conf['tool']['flwr']['app']['publisher']}/{conf['project']['name']}",
-        conf["project"]["version"],
-    )
+    return get_metadata_from_config(get_fab_config(fab_file))
 
 
 def load_and_validate(
@@ -119,7 +81,7 @@ def load_and_validate(
         ]
         return (None, errors, [])
 
-    is_valid, errors, warnings = validate(config, check_module, path.parent)
+    is_valid, errors, warnings = validate_config(config, check_module, path.parent)
 
     if not is_valid:
         return (None, errors, warnings)
@@ -132,108 +94,21 @@ def load(toml_path: Path) -> Optional[dict[str, Any]]:
     if not toml_path.is_file():
         return None
 
-    with toml_path.open(encoding="utf-8") as toml_file:
-        return load_from_string(toml_file.read())
+    with toml_path.open("rb") as toml_file:
+        try:
+            return tomli.load(toml_file)
+        except tomli.TOMLDecodeError:
+            return None
 
 
-def _validate_run_config(config_dict: dict[str, Any], errors: list[str]) -> None:
-    for key, value in config_dict.items():
-        if isinstance(value, dict):
-            _validate_run_config(config_dict[key], errors)
-        elif not isinstance(value, get_args(UserConfigValue)):
-            raise ValueError(
-                f"The value for key {key} needs to be of type `int`, `float`, "
-                "`bool, `str`, or  a `dict` of those.",
-            )
-
-
-# pylint: disable=too-many-branches
-def validate_fields(config: dict[str, Any]) -> tuple[bool, list[str], list[str]]:
-    """Validate pyproject.toml fields."""
-    errors = []
-    warnings = []
-
-    if "project" not in config:
-        errors.append("Missing [project] section")
-    else:
-        if "name" not in config["project"]:
-            errors.append('Property "name" missing in [project]')
-        if "version" not in config["project"]:
-            errors.append('Property "version" missing in [project]')
-        if "description" not in config["project"]:
-            warnings.append('Recommended property "description" missing in [project]')
-        if "license" not in config["project"]:
-            warnings.append('Recommended property "license" missing in [project]')
-        if "authors" not in config["project"]:
-            warnings.append('Recommended property "authors" missing in [project]')
-
-    if (
-        "tool" not in config
-        or "flwr" not in config["tool"]
-        or "app" not in config["tool"]["flwr"]
-    ):
-        errors.append("Missing [tool.flwr.app] section")
-    else:
-        if "publisher" not in config["tool"]["flwr"]["app"]:
-            errors.append('Property "publisher" missing in [tool.flwr.app]')
-        if "config" in config["tool"]["flwr"]["app"]:
-            _validate_run_config(config["tool"]["flwr"]["app"]["config"], errors)
-        if "components" not in config["tool"]["flwr"]["app"]:
-            errors.append("Missing [tool.flwr.app.components] section")
-        else:
-            if "serverapp" not in config["tool"]["flwr"]["app"]["components"]:
-                errors.append(
-                    'Property "serverapp" missing in [tool.flwr.app.components]'
-                )
-            if "clientapp" not in config["tool"]["flwr"]["app"]["components"]:
-                errors.append(
-                    'Property "clientapp" missing in [tool.flwr.app.components]'
-                )
-
-    return len(errors) == 0, errors, warnings
-
-
-def validate(
-    config: dict[str, Any],
-    check_module: bool = True,
-    project_dir: Optional[Union[str, Path]] = None,
-) -> tuple[bool, list[str], list[str]]:
-    """Validate pyproject.toml."""
-    is_valid, errors, warnings = validate_fields(config)
-
-    if not is_valid:
-        return False, errors, warnings
-
-    # Validate serverapp
-    serverapp_ref = config["tool"]["flwr"]["app"]["components"]["serverapp"]
-    is_valid, reason = object_ref.validate(serverapp_ref, check_module, project_dir)
-
-    if not is_valid and isinstance(reason, str):
-        return False, [reason], []
-
-    # Validate clientapp
-    clientapp_ref = config["tool"]["flwr"]["app"]["components"]["clientapp"]
-    is_valid, reason = object_ref.validate(clientapp_ref, check_module, project_dir)
-
-    if not is_valid and isinstance(reason, str):
-        return False, [reason], []
-
-    return True, [], []
-
-
-def load_from_string(toml_content: str) -> Optional[dict[str, Any]]:
-    """Load TOML content from a string and return as dict."""
-    try:
-        data = tomli.loads(toml_content)
-        return data
-    except tomli.TOMLDecodeError:
-        return None
-
-
-def validate_project_config(
+def process_loaded_project_config(
     config: Union[dict[str, Any], None], errors: list[str], warnings: list[str]
 ) -> dict[str, Any]:
-    """Validate and return the Flower project configuration."""
+    """Process and return the loaded project configuration.
+
+    This function handles errors and warnings from the `load_and_validate` function,
+    exits on critical issues, and returns the validated configuration.
+    """
     if config is None:
         typer.secho(
             "Project configuration could not be loaded.\n"
@@ -258,7 +133,9 @@ def validate_project_config(
 
 
 def validate_federation_in_project_config(
-    federation: Optional[str], config: dict[str, Any]
+    federation: Optional[str],
+    config: dict[str, Any],
+    overrides: Optional[list[str]] = None,
 ) -> tuple[str, dict[str, Any]]:
     """Validate the federation name in the Flower project configuration."""
     federation = federation or config["tool"]["flwr"]["federations"].get("default")
@@ -266,7 +143,7 @@ def validate_federation_in_project_config(
     if federation is None:
         typer.secho(
             "❌ No federation name was provided and the project's `pyproject.toml` "
-            "doesn't declare a default federation (with an Exec API address or an "
+            "doesn't declare a default federation (with an Control API address or an "
             "`options.num-supernodes` value).",
             fg=typer.colors.RED,
             bold=True,
@@ -288,39 +165,92 @@ def validate_federation_in_project_config(
         )
         raise typer.Exit(code=1)
 
+    # Override the federation configuration if provided
+    if overrides:
+        overrides_dict = parse_config_args(overrides, flatten=False)
+        federation_config = fuse_dicts(federation_config, overrides_dict)
+
     return federation, federation_config
 
 
 def validate_certificate_in_federation_config(
     app: Path, federation_config: dict[str, Any]
 ) -> tuple[bool, Optional[bytes]]:
-    """Validate the certificates in the Flower project configuration."""
-    insecure_str = federation_config.get("insecure")
+    """Validate the certificates in the Flower project configuration.
+
+    Accepted configurations:
+      1. TLS enabled and gRPC will load(*) the trusted certificate bundle:
+         - Only `address` is provided. `root-certificates` and `insecure` not set.
+         - `address` is provided and `insecure` set to `false`. `root-certificates` not
+           set.
+         (*)gRPC uses a multi-step fallback mechanism to load the trusted certificate
+            bundle in the following sequence:
+            a. A configured file path (if set via configuration or environment),
+            b. An override callback (if registered via
+               `grpc_set_ssl_roots_override_callback`),
+            c. The OS trust store (if available),
+            d. A bundled default certificate file.
+      2. TLS enabled with self-signed certificates:
+         - `address` and `root-certificates` are provided. `insecure` not set.
+         - `address` and `root-certificates` are provided. `insecure` set to `false`.
+      3. TLS disabled. This is not recommended and should only be used for prototyping:
+         - `address` is provided and `insecure = true`. If `root-certificates` is
+           set, exit with an error.
+    """
+    insecure = get_insecure_flag(federation_config)
+
+    # Process root certificates
     if root_certificates := federation_config.get("root-certificates"):
-        root_certificates_bytes = (app / root_certificates).read_bytes()
-        if insecure := bool(insecure_str):
+        if insecure:
             typer.secho(
-                "❌ `root_certificates` were provided but the `insecure` parameter "
+                "❌ `root-certificates` were provided but the `insecure` parameter "
                 "is set to `True`.",
                 fg=typer.colors.RED,
                 bold=True,
             )
             raise typer.Exit(code=1)
+
+        # TLS is enabled with self-signed certificates: attempt to read the file
+        try:
+            root_certificates_bytes = (app / root_certificates).read_bytes()
+        except Exception as e:
+            typer.secho(
+                f"❌ Failed to read certificate file `{root_certificates}`: {e}",
+                fg=typer.colors.RED,
+                bold=True,
+            )
+            raise typer.Exit(code=1) from e
     else:
         root_certificates_bytes = None
-        if insecure_str is None:
-            typer.secho(
-                "❌ To disable TLS, set `insecure = true` in `pyproject.toml`.",
-                fg=typer.colors.RED,
-                bold=True,
-            )
-            raise typer.Exit(code=1)
-        if not (insecure := bool(insecure_str)):
-            typer.secho(
-                "❌ No certificate were given yet `insecure` is set to `False`.",
-                fg=typer.colors.RED,
-                bold=True,
-            )
-            raise typer.Exit(code=1)
 
     return insecure, root_certificates_bytes
+
+
+def exit_if_no_address(federation_config: dict[str, Any], cmd: str) -> None:
+    """Exit if the provided federation_config has no "address" key."""
+    if "address" not in federation_config:
+        typer.secho(
+            f"❌ `flwr {cmd}` currently works with a SuperLink. Ensure that the "
+            "correct SuperLink (Control API) address is provided in `pyproject.toml`.",
+            fg=typer.colors.RED,
+            bold=True,
+        )
+        raise typer.Exit(code=1)
+
+
+def get_insecure_flag(federation_config: dict[str, Any]) -> bool:
+    """Extract and validate the `insecure` flag from the federation configuration."""
+    insecure_value = federation_config.get("insecure")
+
+    if insecure_value is None:
+        # Not provided, default to False (TLS enabled)
+        return False
+    if isinstance(insecure_value, bool):
+        return insecure_value
+    typer.secho(
+        "❌ Invalid type for `insecure`: expected a boolean if provided. "
+        "(`insecure = true` or `insecure = false`)",
+        fg=typer.colors.RED,
+        bold=True,
+    )
+    raise typer.Exit(code=1)

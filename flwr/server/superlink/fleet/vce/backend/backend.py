@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,9 +21,9 @@ from typing import Callable
 from flwr.client.client_app import ClientApp
 from flwr.common.context import Context
 from flwr.common.message import Message
-from flwr.common.typing import ConfigsRecordValues
+from flwr.common.typing import ConfigRecordValues
 
-BackendConfig = dict[str, dict[str, ConfigsRecordValues]]
+BackendConfig = dict[str, dict[str, ConfigRecordValues]]
 
 
 class Backend(ABC):
@@ -45,7 +45,7 @@ class Backend(ABC):
     def num_workers(self) -> int:
         """Return number of workers in the backend.
 
-        This is the number of TaskIns that can be processed concurrently.
+        This is the number of Messages that can be processed concurrently.
         """
         return 0
 

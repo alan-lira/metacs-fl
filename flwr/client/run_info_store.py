@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from flwr.common import Context, RecordSet
+from flwr.common import Context, RecordDict
 from flwr.common.config import (
     get_fused_config,
     get_fused_config_from_dir,
@@ -86,7 +86,7 @@ class DeprecatedRunInfoStore:
                     run_id=run_id,
                     node_id=self.node_id,
                     node_config=self.node_config,
-                    state=RecordSet(),
+                    state=RecordDict(),
                     run_config=initial_run_config.copy(),
                 ),
             )

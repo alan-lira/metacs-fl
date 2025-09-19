@@ -1,4 +1,4 @@
-# Copyright 2023 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +27,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Optional, Union, cast
 
+from flwr.common.constant import FLWR_DIR
 from flwr.common.version import package_name, package_version
 
 FLWR_TELEMETRY_ENABLED = os.getenv("FLWR_TELEMETRY_ENABLED", "1")
@@ -86,7 +87,7 @@ def _get_source_id() -> str:
         # If the home directory can’t be resolved, RuntimeError is raised.
         return source_id
 
-    flwr_dir = home.joinpath(".flwr")
+    flwr_dir = home.joinpath(FLWR_DIR)
     # Create .flwr directory if it does not exist yet.
     try:
         flwr_dir.mkdir(parents=True, exist_ok=True)
@@ -123,7 +124,7 @@ class EventType(str, Enum):
     # This method combined with auto() will set the property value to
     # the property name e.g.
     # `START_CLIENT = auto()` becomes `START_CLIENT = "START_CLIENT"`
-    # The type signature is not compatible with mypy, pylint and flake8
+    # The type signature is not compatible with mypy and pylint
     # so each of those needs to be disabled for this line.
     # pylint: disable-next=no-self-argument,arguments-differ,line-too-long
     def _generate_next_value_(name: str, start: int, count: int, last_values: list[Any]) -> Any:  # type: ignore # noqa: E501
@@ -150,6 +151,16 @@ class EventType(str, Enum):
 
     # Not yet implemented
 
+    # --- `flwr-*` commands ------------------------------------------------------------
+
+    # CLI: flwr-simulation
+    FLWR_SIMULATION_RUN_ENTER = auto()
+    FLWR_SIMULATION_RUN_LEAVE = auto()
+
+    # CLI: flwr-serverapp
+    FLWR_SERVERAPP_RUN_ENTER = auto()
+    FLWR_SERVERAPP_RUN_LEAVE = auto()
+
     # --- Simulation Engine ------------------------------------------------------------
 
     # CLI: flower-simulation
@@ -170,15 +181,9 @@ class EventType(str, Enum):
     RUN_SUPERNODE_ENTER = auto()
     RUN_SUPERNODE_LEAVE = auto()
 
-    # CLI: `flower-server-app`
-    RUN_SERVER_APP_ENTER = auto()
-    RUN_SERVER_APP_LEAVE = auto()
-
-    # --- DEPRECATED -------------------------------------------------------------------
-
-    # [DEPRECATED] CLI: `flower-client-app`
-    RUN_CLIENT_APP_ENTER = auto()
-    RUN_CLIENT_APP_LEAVE = auto()
+    # CLI: `flower-superexec`
+    RUN_SUPEREXEC_ENTER = auto()
+    RUN_SUPEREXEC_LEAVE = auto()
 
 
 # Use the ThreadPoolExecutor with max_workers=1 to have a queue

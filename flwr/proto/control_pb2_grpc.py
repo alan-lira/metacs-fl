@@ -2,7 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-from flwr.proto import run_pb2 as flwr_dot_proto_dot_run__pb2
+from flwr.proto import control_pb2 as flwr_dot_proto_dot_control__pb2
 
 
 class ControlStub(object):
@@ -14,42 +14,78 @@ class ControlStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.CreateRun = channel.unary_unary(
-                '/flwr.proto.Control/CreateRun',
-                request_serializer=flwr_dot_proto_dot_run__pb2.CreateRunRequest.SerializeToString,
-                response_deserializer=flwr_dot_proto_dot_run__pb2.CreateRunResponse.FromString,
+        self.StartRun = channel.unary_unary(
+                '/flwr.proto.Control/StartRun',
+                request_serializer=flwr_dot_proto_dot_control__pb2.StartRunRequest.SerializeToString,
+                response_deserializer=flwr_dot_proto_dot_control__pb2.StartRunResponse.FromString,
                 )
-        self.GetRunStatus = channel.unary_unary(
-                '/flwr.proto.Control/GetRunStatus',
-                request_serializer=flwr_dot_proto_dot_run__pb2.GetRunStatusRequest.SerializeToString,
-                response_deserializer=flwr_dot_proto_dot_run__pb2.GetRunStatusResponse.FromString,
+        self.StopRun = channel.unary_unary(
+                '/flwr.proto.Control/StopRun',
+                request_serializer=flwr_dot_proto_dot_control__pb2.StopRunRequest.SerializeToString,
+                response_deserializer=flwr_dot_proto_dot_control__pb2.StopRunResponse.FromString,
                 )
-        self.UpdateRunStatus = channel.unary_unary(
-                '/flwr.proto.Control/UpdateRunStatus',
-                request_serializer=flwr_dot_proto_dot_run__pb2.UpdateRunStatusRequest.SerializeToString,
-                response_deserializer=flwr_dot_proto_dot_run__pb2.UpdateRunStatusResponse.FromString,
+        self.StreamLogs = channel.unary_stream(
+                '/flwr.proto.Control/StreamLogs',
+                request_serializer=flwr_dot_proto_dot_control__pb2.StreamLogsRequest.SerializeToString,
+                response_deserializer=flwr_dot_proto_dot_control__pb2.StreamLogsResponse.FromString,
+                )
+        self.ListRuns = channel.unary_unary(
+                '/flwr.proto.Control/ListRuns',
+                request_serializer=flwr_dot_proto_dot_control__pb2.ListRunsRequest.SerializeToString,
+                response_deserializer=flwr_dot_proto_dot_control__pb2.ListRunsResponse.FromString,
+                )
+        self.GetLoginDetails = channel.unary_unary(
+                '/flwr.proto.Control/GetLoginDetails',
+                request_serializer=flwr_dot_proto_dot_control__pb2.GetLoginDetailsRequest.SerializeToString,
+                response_deserializer=flwr_dot_proto_dot_control__pb2.GetLoginDetailsResponse.FromString,
+                )
+        self.GetAuthTokens = channel.unary_unary(
+                '/flwr.proto.Control/GetAuthTokens',
+                request_serializer=flwr_dot_proto_dot_control__pb2.GetAuthTokensRequest.SerializeToString,
+                response_deserializer=flwr_dot_proto_dot_control__pb2.GetAuthTokensResponse.FromString,
                 )
 
 
 class ControlServicer(object):
     """Missing associated documentation comment in .proto file."""
 
-    def CreateRun(self, request, context):
-        """Request to create a new run
+    def StartRun(self, request, context):
+        """Start run upon request
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GetRunStatus(self, request, context):
-        """Get the status of a given run
+    def StopRun(self, request, context):
+        """Stop run upon request
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def UpdateRunStatus(self, request, context):
-        """Update the status of a given run
+    def StreamLogs(self, request, context):
+        """Start log stream upon request
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ListRuns(self, request, context):
+        """flwr ls command
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetLoginDetails(self, request, context):
+        """Get login details upon request
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetAuthTokens(self, request, context):
+        """Get auth tokens upon request
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -58,20 +94,35 @@ class ControlServicer(object):
 
 def add_ControlServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'CreateRun': grpc.unary_unary_rpc_method_handler(
-                    servicer.CreateRun,
-                    request_deserializer=flwr_dot_proto_dot_run__pb2.CreateRunRequest.FromString,
-                    response_serializer=flwr_dot_proto_dot_run__pb2.CreateRunResponse.SerializeToString,
+            'StartRun': grpc.unary_unary_rpc_method_handler(
+                    servicer.StartRun,
+                    request_deserializer=flwr_dot_proto_dot_control__pb2.StartRunRequest.FromString,
+                    response_serializer=flwr_dot_proto_dot_control__pb2.StartRunResponse.SerializeToString,
             ),
-            'GetRunStatus': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetRunStatus,
-                    request_deserializer=flwr_dot_proto_dot_run__pb2.GetRunStatusRequest.FromString,
-                    response_serializer=flwr_dot_proto_dot_run__pb2.GetRunStatusResponse.SerializeToString,
+            'StopRun': grpc.unary_unary_rpc_method_handler(
+                    servicer.StopRun,
+                    request_deserializer=flwr_dot_proto_dot_control__pb2.StopRunRequest.FromString,
+                    response_serializer=flwr_dot_proto_dot_control__pb2.StopRunResponse.SerializeToString,
             ),
-            'UpdateRunStatus': grpc.unary_unary_rpc_method_handler(
-                    servicer.UpdateRunStatus,
-                    request_deserializer=flwr_dot_proto_dot_run__pb2.UpdateRunStatusRequest.FromString,
-                    response_serializer=flwr_dot_proto_dot_run__pb2.UpdateRunStatusResponse.SerializeToString,
+            'StreamLogs': grpc.unary_stream_rpc_method_handler(
+                    servicer.StreamLogs,
+                    request_deserializer=flwr_dot_proto_dot_control__pb2.StreamLogsRequest.FromString,
+                    response_serializer=flwr_dot_proto_dot_control__pb2.StreamLogsResponse.SerializeToString,
+            ),
+            'ListRuns': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListRuns,
+                    request_deserializer=flwr_dot_proto_dot_control__pb2.ListRunsRequest.FromString,
+                    response_serializer=flwr_dot_proto_dot_control__pb2.ListRunsResponse.SerializeToString,
+            ),
+            'GetLoginDetails': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetLoginDetails,
+                    request_deserializer=flwr_dot_proto_dot_control__pb2.GetLoginDetailsRequest.FromString,
+                    response_serializer=flwr_dot_proto_dot_control__pb2.GetLoginDetailsResponse.SerializeToString,
+            ),
+            'GetAuthTokens': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetAuthTokens,
+                    request_deserializer=flwr_dot_proto_dot_control__pb2.GetAuthTokensRequest.FromString,
+                    response_serializer=flwr_dot_proto_dot_control__pb2.GetAuthTokensResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -84,7 +135,7 @@ class Control(object):
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod
-    def CreateRun(request,
+    def StartRun(request,
             target,
             options=(),
             channel_credentials=None,
@@ -94,14 +145,14 @@ class Control(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Control/CreateRun',
-            flwr_dot_proto_dot_run__pb2.CreateRunRequest.SerializeToString,
-            flwr_dot_proto_dot_run__pb2.CreateRunResponse.FromString,
+        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Control/StartRun',
+            flwr_dot_proto_dot_control__pb2.StartRunRequest.SerializeToString,
+            flwr_dot_proto_dot_control__pb2.StartRunResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
     @staticmethod
-    def GetRunStatus(request,
+    def StopRun(request,
             target,
             options=(),
             channel_credentials=None,
@@ -111,14 +162,14 @@ class Control(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Control/GetRunStatus',
-            flwr_dot_proto_dot_run__pb2.GetRunStatusRequest.SerializeToString,
-            flwr_dot_proto_dot_run__pb2.GetRunStatusResponse.FromString,
+        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Control/StopRun',
+            flwr_dot_proto_dot_control__pb2.StopRunRequest.SerializeToString,
+            flwr_dot_proto_dot_control__pb2.StopRunResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
     @staticmethod
-    def UpdateRunStatus(request,
+    def StreamLogs(request,
             target,
             options=(),
             channel_credentials=None,
@@ -128,8 +179,59 @@ class Control(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Control/UpdateRunStatus',
-            flwr_dot_proto_dot_run__pb2.UpdateRunStatusRequest.SerializeToString,
-            flwr_dot_proto_dot_run__pb2.UpdateRunStatusResponse.FromString,
+        return grpc.experimental.unary_stream(request, target, '/flwr.proto.Control/StreamLogs',
+            flwr_dot_proto_dot_control__pb2.StreamLogsRequest.SerializeToString,
+            flwr_dot_proto_dot_control__pb2.StreamLogsResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def ListRuns(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Control/ListRuns',
+            flwr_dot_proto_dot_control__pb2.ListRunsRequest.SerializeToString,
+            flwr_dot_proto_dot_control__pb2.ListRunsResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def GetLoginDetails(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Control/GetLoginDetails',
+            flwr_dot_proto_dot_control__pb2.GetLoginDetailsRequest.SerializeToString,
+            flwr_dot_proto_dot_control__pb2.GetLoginDetailsResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def GetAuthTokens(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Control/GetAuthTokens',
+            flwr_dot_proto_dot_control__pb2.GetAuthTokensRequest.SerializeToString,
+            flwr_dot_proto_dot_control__pb2.GetAuthTokensResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

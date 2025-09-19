@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@ import numpy as np
 
 from flwr.client.typing import ClientAppCallable
 from flwr.common import ndarrays_to_parameters, parameters_to_ndarrays
-from flwr.common import recordset_compat as compat
+from flwr.common import recorddict_compat as compat
 from flwr.common.constant import MessageType
 from flwr.common.context import Context
 from flwr.common.differential_privacy import (
@@ -57,12 +57,12 @@ class LocalDpMod:
 
     Examples
     --------
-    Create an instance of the local DP mod and add it to the client-side mods:
+    Create an instance of the local DP mod and add it to the client-side mods::
 
-    >>> local_dp_mod = LocalDpMod( ... )
-    >>> app = fl.client.ClientApp(
-    >>>     client_fn=client_fn, mods=[local_dp_mod]
-    >>> )
+        local_dp_mod = LocalDpMod( ... )
+        app = fl.client.ClientApp(
+            client_fn=client_fn, mods=[local_dp_mod]
+        )
     """
 
     def __init__(
@@ -107,7 +107,7 @@ class LocalDpMod:
         if msg.metadata.message_type != MessageType.TRAIN:
             return call_next(msg, ctxt)
 
-        fit_ins = compat.recordset_to_fitins(msg.content, keep_input=True)
+        fit_ins = compat.recorddict_to_fitins(msg.content, keep_input=True)
         server_to_client_params = parameters_to_ndarrays(fit_ins.parameters)
 
         # Call inner app
@@ -117,7 +117,7 @@ class LocalDpMod:
         if out_msg.has_error():
             return out_msg
 
-        fit_res = compat.recordset_to_fitres(out_msg.content, keep_input=True)
+        fit_res = compat.recorddict_to_fitres(out_msg.content, keep_input=True)
 
         client_to_server_params = parameters_to_ndarrays(fit_res.parameters)
 
@@ -136,7 +136,7 @@ class LocalDpMod:
         fit_res.parameters = ndarrays_to_parameters(client_to_server_params)
 
         # Add noise to model params
-        add_localdp_gaussian_noise_to_params(
+        fit_res.parameters = add_localdp_gaussian_noise_to_params(
             fit_res.parameters, self.sensitivity, self.epsilon, self.delta
         )
 
@@ -149,5 +149,5 @@ class LocalDpMod:
             noise_value_sd,
         )
 
-        out_msg.content = compat.fitres_to_recordset(fit_res, keep_input=True)
+        out_msg.content = compat.fitres_to_recorddict(fit_res, keep_input=True)
         return out_msg

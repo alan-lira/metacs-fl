@@ -3,33 +3,41 @@
 isort:skip_file
 """
 import abc
+import flwr.proto.appio_pb2
 import flwr.proto.fab_pb2
+import flwr.proto.heartbeat_pb2
 import flwr.proto.log_pb2
+import flwr.proto.message_pb2
 import flwr.proto.run_pb2
 import flwr.proto.serverappio_pb2
 import grpc
 
 class ServerAppIoStub:
     def __init__(self, channel: grpc.Channel) -> None: ...
-    CreateRun: grpc.UnaryUnaryMultiCallable[
-        flwr.proto.run_pb2.CreateRunRequest,
-        flwr.proto.run_pb2.CreateRunResponse]
-    """Request run_id"""
+    ListAppsToLaunch: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.appio_pb2.ListAppsToLaunchRequest,
+        flwr.proto.appio_pb2.ListAppsToLaunchResponse]
+    """List runs to launch"""
+
+    RequestToken: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.appio_pb2.RequestTokenRequest,
+        flwr.proto.appio_pb2.RequestTokenResponse]
+    """Request token for a run"""
 
     GetNodes: grpc.UnaryUnaryMultiCallable[
         flwr.proto.serverappio_pb2.GetNodesRequest,
         flwr.proto.serverappio_pb2.GetNodesResponse]
     """Return a set of nodes"""
 
-    PushTaskIns: grpc.UnaryUnaryMultiCallable[
-        flwr.proto.serverappio_pb2.PushTaskInsRequest,
-        flwr.proto.serverappio_pb2.PushTaskInsResponse]
-    """Create one or more tasks"""
+    PushMessages: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.appio_pb2.PushAppMessagesRequest,
+        flwr.proto.appio_pb2.PushAppMessagesResponse]
+    """Create one or more messages"""
 
-    PullTaskRes: grpc.UnaryUnaryMultiCallable[
-        flwr.proto.serverappio_pb2.PullTaskResRequest,
-        flwr.proto.serverappio_pb2.PullTaskResResponse]
-    """Get task results"""
+    PullMessages: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.appio_pb2.PullAppMessagesRequest,
+        flwr.proto.appio_pb2.PullAppMessagesResponse]
+    """Get message results"""
 
     GetRun: grpc.UnaryUnaryMultiCallable[
         flwr.proto.run_pb2.GetRunRequest,
@@ -41,14 +49,14 @@ class ServerAppIoStub:
         flwr.proto.fab_pb2.GetFabResponse]
     """Get FAB"""
 
-    PullServerAppInputs: grpc.UnaryUnaryMultiCallable[
-        flwr.proto.serverappio_pb2.PullServerAppInputsRequest,
-        flwr.proto.serverappio_pb2.PullServerAppInputsResponse]
+    PullAppInputs: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.appio_pb2.PullAppInputsRequest,
+        flwr.proto.appio_pb2.PullAppInputsResponse]
     """Pull ServerApp inputs"""
 
-    PushServerAppOutputs: grpc.UnaryUnaryMultiCallable[
-        flwr.proto.serverappio_pb2.PushServerAppOutputsRequest,
-        flwr.proto.serverappio_pb2.PushServerAppOutputsResponse]
+    PushAppOutputs: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.appio_pb2.PushAppOutputsRequest,
+        flwr.proto.appio_pb2.PushAppOutputsResponse]
     """Push ServerApp outputs"""
 
     UpdateRunStatus: grpc.UnaryUnaryMultiCallable[
@@ -56,19 +64,52 @@ class ServerAppIoStub:
         flwr.proto.run_pb2.UpdateRunStatusResponse]
     """Update the status of a given run"""
 
+    GetRunStatus: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.run_pb2.GetRunStatusRequest,
+        flwr.proto.run_pb2.GetRunStatusResponse]
+    """Get the status of a given run"""
+
     PushLogs: grpc.UnaryUnaryMultiCallable[
         flwr.proto.log_pb2.PushLogsRequest,
         flwr.proto.log_pb2.PushLogsResponse]
     """Push ServerApp logs"""
 
+    SendAppHeartbeat: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.heartbeat_pb2.SendAppHeartbeatRequest,
+        flwr.proto.heartbeat_pb2.SendAppHeartbeatResponse]
+    """Heartbeat"""
+
+    PushObject: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.message_pb2.PushObjectRequest,
+        flwr.proto.message_pb2.PushObjectResponse]
+    """Push Object"""
+
+    PullObject: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.message_pb2.PullObjectRequest,
+        flwr.proto.message_pb2.PullObjectResponse]
+    """Pull Object"""
+
+    ConfirmMessageReceived: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.message_pb2.ConfirmMessageReceivedRequest,
+        flwr.proto.message_pb2.ConfirmMessageReceivedResponse]
+    """Confirm Message Received"""
+
 
 class ServerAppIoServicer(metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    def CreateRun(self,
-        request: flwr.proto.run_pb2.CreateRunRequest,
+    def ListAppsToLaunch(self,
+        request: flwr.proto.appio_pb2.ListAppsToLaunchRequest,
         context: grpc.ServicerContext,
-    ) -> flwr.proto.run_pb2.CreateRunResponse:
-        """Request run_id"""
+    ) -> flwr.proto.appio_pb2.ListAppsToLaunchResponse:
+        """List runs to launch"""
+        pass
+
+    @abc.abstractmethod
+    def RequestToken(self,
+        request: flwr.proto.appio_pb2.RequestTokenRequest,
+        context: grpc.ServicerContext,
+    ) -> flwr.proto.appio_pb2.RequestTokenResponse:
+        """Request token for a run"""
         pass
 
     @abc.abstractmethod
@@ -80,19 +121,19 @@ class ServerAppIoServicer(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    def PushTaskIns(self,
-        request: flwr.proto.serverappio_pb2.PushTaskInsRequest,
+    def PushMessages(self,
+        request: flwr.proto.appio_pb2.PushAppMessagesRequest,
         context: grpc.ServicerContext,
-    ) -> flwr.proto.serverappio_pb2.PushTaskInsResponse:
-        """Create one or more tasks"""
+    ) -> flwr.proto.appio_pb2.PushAppMessagesResponse:
+        """Create one or more messages"""
         pass
 
     @abc.abstractmethod
-    def PullTaskRes(self,
-        request: flwr.proto.serverappio_pb2.PullTaskResRequest,
+    def PullMessages(self,
+        request: flwr.proto.appio_pb2.PullAppMessagesRequest,
         context: grpc.ServicerContext,
-    ) -> flwr.proto.serverappio_pb2.PullTaskResResponse:
-        """Get task results"""
+    ) -> flwr.proto.appio_pb2.PullAppMessagesResponse:
+        """Get message results"""
         pass
 
     @abc.abstractmethod
@@ -112,18 +153,18 @@ class ServerAppIoServicer(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
-    def PullServerAppInputs(self,
-        request: flwr.proto.serverappio_pb2.PullServerAppInputsRequest,
+    def PullAppInputs(self,
+        request: flwr.proto.appio_pb2.PullAppInputsRequest,
         context: grpc.ServicerContext,
-    ) -> flwr.proto.serverappio_pb2.PullServerAppInputsResponse:
+    ) -> flwr.proto.appio_pb2.PullAppInputsResponse:
         """Pull ServerApp inputs"""
         pass
 
     @abc.abstractmethod
-    def PushServerAppOutputs(self,
-        request: flwr.proto.serverappio_pb2.PushServerAppOutputsRequest,
+    def PushAppOutputs(self,
+        request: flwr.proto.appio_pb2.PushAppOutputsRequest,
         context: grpc.ServicerContext,
-    ) -> flwr.proto.serverappio_pb2.PushServerAppOutputsResponse:
+    ) -> flwr.proto.appio_pb2.PushAppOutputsResponse:
         """Push ServerApp outputs"""
         pass
 
@@ -136,11 +177,51 @@ class ServerAppIoServicer(metaclass=abc.ABCMeta):
         pass
 
     @abc.abstractmethod
+    def GetRunStatus(self,
+        request: flwr.proto.run_pb2.GetRunStatusRequest,
+        context: grpc.ServicerContext,
+    ) -> flwr.proto.run_pb2.GetRunStatusResponse:
+        """Get the status of a given run"""
+        pass
+
+    @abc.abstractmethod
     def PushLogs(self,
         request: flwr.proto.log_pb2.PushLogsRequest,
         context: grpc.ServicerContext,
     ) -> flwr.proto.log_pb2.PushLogsResponse:
         """Push ServerApp logs"""
+        pass
+
+    @abc.abstractmethod
+    def SendAppHeartbeat(self,
+        request: flwr.proto.heartbeat_pb2.SendAppHeartbeatRequest,
+        context: grpc.ServicerContext,
+    ) -> flwr.proto.heartbeat_pb2.SendAppHeartbeatResponse:
+        """Heartbeat"""
+        pass
+
+    @abc.abstractmethod
+    def PushObject(self,
+        request: flwr.proto.message_pb2.PushObjectRequest,
+        context: grpc.ServicerContext,
+    ) -> flwr.proto.message_pb2.PushObjectResponse:
+        """Push Object"""
+        pass
+
+    @abc.abstractmethod
+    def PullObject(self,
+        request: flwr.proto.message_pb2.PullObjectRequest,
+        context: grpc.ServicerContext,
+    ) -> flwr.proto.message_pb2.PullObjectResponse:
+        """Pull Object"""
+        pass
+
+    @abc.abstractmethod
+    def ConfirmMessageReceived(self,
+        request: flwr.proto.message_pb2.ConfirmMessageReceivedRequest,
+        context: grpc.ServicerContext,
+    ) -> flwr.proto.message_pb2.ConfirmMessageReceivedResponse:
+        """Confirm Message Received"""
         pass
 
 

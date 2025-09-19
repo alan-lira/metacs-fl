@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,17 +14,23 @@
 # ==============================================================================
 """Record APIs."""
 
-from .configsrecord import ConfigsRecord
+
+from .array import Array
+from .arrayrecord import ArrayRecord, ParametersRecord
+from .configrecord import ConfigRecord, ConfigsRecord
 from .conversion_utils import array_from_numpy
-from .metricsrecord import MetricsRecord
-from .parametersrecord import Array, ParametersRecord
-from .recordset import RecordSet
+from .metricrecord import MetricRecord, MetricsRecord
+from .recorddict import RecordDict, RecordSet
 
 __all__ = [
     "Array",
+    "ArrayRecord",
+    "ConfigRecord",
     "ConfigsRecord",
+    "MetricRecord",
     "MetricsRecord",
     "ParametersRecord",
+    "RecordDict",
     "RecordSet",
     "array_from_numpy",
 ]

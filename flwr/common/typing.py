@@ -1,4 +1,4 @@
-# Copyright 2020 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -45,14 +45,14 @@ Value = Union[
     list[str],
 ]
 
-# Value types for common.MetricsRecord
-MetricsScalar = Union[int, float]
-MetricsScalarList = Union[list[int], list[float]]
-MetricsRecordValues = Union[MetricsScalar, MetricsScalarList]
-# Value types for common.ConfigsRecord
-ConfigsScalar = Union[MetricsScalar, str, bytes, bool]
-ConfigsScalarList = Union[MetricsScalarList, list[str], list[bytes], list[bool]]
-ConfigsRecordValues = Union[ConfigsScalar, ConfigsScalarList]
+# Value types for common.MetricRecord
+MetricScalar = Union[int, float]
+MetricScalarList = Union[list[int], list[float]]
+MetricRecordValues = Union[MetricScalar, MetricScalarList]
+# Value types for common.ConfigRecord
+ConfigScalar = Union[MetricScalar, str, bytes, bool]
+ConfigScalarList = Union[MetricScalarList, list[str], list[bytes], list[bool]]
+ConfigRecordValues = Union[ConfigScalar, ConfigScalarList]
 
 Metrics = dict[str, Scalar]
 MetricsAggregationFn = Callable[[list[tuple[int, Metrics]]], Metrics]
@@ -230,6 +230,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
     running_at: str
     finished_at: str
     status: RunStatus
+    flwr_aid: str
 
     @classmethod
     def create_empty(cls, run_id: int) -> "Run":
@@ -245,6 +246,7 @@ class Run:  # pylint: disable=too-many-instance-attributes
             running_at="",
             finished_at="",
             status=RunStatus(status="", sub_status="", details=""),
+            flwr_aid="",
         )
 
 
@@ -254,3 +256,71 @@ class Fab:
 
     hash_str: str
     content: bytes
+
+
+class RunNotRunningException(BaseException):
+    """Raised when a run is not running."""
+
+
+class InvalidRunStatusException(BaseException):
+    """Raised when an RPC is invalidated by the RunStatus."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+# OIDC user authentication types
+@dataclass
+class UserAuthLoginDetails:
+    """User authentication login details."""
+
+    auth_type: str
+    device_code: str
+    verification_uri_complete: str
+    expires_in: int
+    interval: int
+
+
+@dataclass
+class UserAuthCredentials:
+    """User authentication tokens."""
+
+    access_token: str
+    refresh_token: str
+
+
+@dataclass
+class AccountInfo:
+    """User information for event log."""
+
+    flwr_aid: Optional[str]
+    account_name: Optional[str]
+
+
+@dataclass
+class Actor:
+    """Event log actor."""
+
+    actor_id: Optional[str]
+    description: Optional[str]
+    ip_address: str
+
+
+@dataclass
+class Event:
+    """Event log description."""
+
+    action: str
+    run_id: Optional[int]
+    fab_hash: Optional[str]
+
+
+@dataclass
+class LogEntry:
+    """Event log record."""
+
+    timestamp: str
+    actor: Actor
+    event: Event
+    status: str

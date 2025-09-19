@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,14 +21,14 @@ from typing import Optional
 import grpc
 
 from flwr.common import GRPC_MAX_MESSAGE_LENGTH
+from flwr.common.grpc import generic_create_grpc_server
 from flwr.common.logger import log
 from flwr.proto.simulationio_pb2_grpc import (  # pylint: disable=E0611
     add_SimulationIoServicer_to_server,
 )
-from flwr.server.superlink.ffs.ffs_factory import FfsFactory
 from flwr.server.superlink.linkstate import LinkStateFactory
+from flwr.supercore.ffs import FfsFactory
 
-from ..fleet.grpc_bidi.grpc_server import generic_create_grpc_server
 from .simulationio_servicer import SimulationIoServicer
 
 

@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 # limitations under the License.
 # ==============================================================================
 """Flower command line interface `new` command."""
+
 
 import re
 from enum import Enum
@@ -34,6 +35,7 @@ class MlFramework(str, Enum):
     """Available frameworks."""
 
     PYTORCH = "PyTorch"
+    PYTORCH_MSG_API = "PyTorch (Message API)"
     TENSORFLOW = "TensorFlow"
     SKLEARN = "sklearn"
     HUGGINGFACE = "HuggingFace"
@@ -81,7 +83,7 @@ def render_template(template: str, data: dict[str, str]) -> str:
 def create_file(file_path: Path, content: str) -> None:
     """Create file including all nessecary directories and write content into file."""
     file_path.parent.mkdir(exist_ok=True)
-    file_path.write_text(content)
+    file_path.write_text(content, encoding="utf-8")
 
 
 def render_and_create(file_path: Path, template: str, context: dict[str, str]) -> None:
@@ -153,6 +155,9 @@ def new(
     if framework_str == MlFramework.BASELINE:
         framework_str = "baseline"
 
+    if framework_str == MlFramework.PYTORCH_MSG_API:
+        framework_str = "pytorch_msg_api"
+
     print(
         typer.style(
             f"\n🔨 Creating Flower App {app_name}...",
@@ -200,19 +205,19 @@ def new(
         if llm_challenge_str == "generalnlp":
             challenge_name = "General NLP"
             num_clients = "20"
-            dataset_name = "vicgalle/alpaca-gpt4"
+            dataset_name = "flwrlabs/alpaca-gpt4"
         elif llm_challenge_str == "finance":
             challenge_name = "Finance"
             num_clients = "50"
-            dataset_name = "FinGPT/fingpt-sentiment-train"
+            dataset_name = "flwrlabs/fingpt-sentiment-train"
         elif llm_challenge_str == "medical":
             challenge_name = "Medical"
             num_clients = "20"
-            dataset_name = "medalpaca/medical_meadow_medical_flashcards"
+            dataset_name = "flwrlabs/medical-meadow-medical-flashcards"
         else:
             challenge_name = "Code"
             num_clients = "10"
-            dataset_name = "lucasmccabe-lmi/CodeAlpaca-20k"
+            dataset_name = "flwrlabs/code-alpaca-20k"
 
         context["llm_challenge_str"] = llm_challenge_str
         context["fraction_fit"] = fraction_fit
@@ -242,10 +247,17 @@ def new(
             MlFramework.TENSORFLOW.value,
             MlFramework.SKLEARN.value,
             MlFramework.NUMPY.value,
+            "pytorch_msg_api",
         ]
         if framework_str in frameworks_with_tasks:
             files[f"{import_name}/task.py"] = {
                 "template": f"app/code/task.{template_name}.py.tpl"
+            }
+
+        if framework_str == "pytorch_msg_api":
+            # Use custom __init__ that better captures name of framework
+            files[f"{import_name}/__init__.py"] = {
+                "template": f"app/code/__init__.{framework_str}.py.tpl"
             }
 
         if framework_str == "baseline":
@@ -270,27 +282,35 @@ def new(
 
     prompt = typer.style(
         "🎊 Flower App creation successful.\n\n"
-        "To run your Flower App, use the following command:\n\n",
+        "To run your Flower App, first install its dependencies:\n\n",
         fg=typer.colors.GREEN,
         bold=True,
     )
 
     _add = "	huggingface-cli login\n" if llm_challenge_str else ""
+
     prompt += typer.style(
-        _add + f"	flwr run {package_name}\n\n",
+        f"	cd {package_name} && pip install -e .\n" + _add + "\n",
         fg=typer.colors.BRIGHT_CYAN,
         bold=True,
     )
 
     prompt += typer.style(
-        "If you haven't installed all dependencies yet, follow these steps:\n\n",
+        "then, run the app:\n\n ",
         fg=typer.colors.GREEN,
         bold=True,
     )
 
     prompt += typer.style(
-        f"	cd {package_name}\n" + "	pip install -e .\n" + _add + "	flwr run .\n",
+        "\tflwr run .\n\n",
         fg=typer.colors.BRIGHT_CYAN,
+        bold=True,
+    )
+
+    prompt += typer.style(
+        "💡 Check the README in your app directory to learn how to\n"
+        "customize it and how to run it using the Deployment Runtime.\n",
+        fg=typer.colors.GREEN,
         bold=True,
     )
 
