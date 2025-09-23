@@ -335,13 +335,14 @@ class MetaCSFL:
                                    num_tasks: int,
                                    cost_matrices: dict,
                                    time_limit: float,
+                                   data_privacy_approach: str,
                                    logger: Logger) -> tuple:
         # Initialize the initial solution.
         X_init = []
-        # Get the necessary properties of the candidate clients.
-        tasks_per_class_list = [client_map["client_tasks_per_class_{0}".format(current_phase)]
-                                for _, client_map in candidate_clients.items()]
-        class_capacity_vectors_list, sorted_classes = build_class_capacity_vectors_list(tasks_per_class_list)
+        # Build the class capacity vectors list.
+        class_capacity_vectors_list, sorted_classes = build_class_capacity_vectors_list(candidate_clients,
+                                                                                        data_privacy_approach,
+                                                                                        current_phase)
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
         initial_solution_generator_phase = client_selection_settings["initial_solution_generator_{0}ing".format(current_phase)]
@@ -408,6 +409,7 @@ class MetaCSFL:
                                           profiling_rounds: list,
                                           cost_matrices: dict,
                                           time_limit: float,
+                                          data_privacy_approach: str,
                                           logger: Logger) -> tuple:
         # Verify if an initial solution generation is necessary.
         initial_solution_generation_is_needed = self._initial_solution_generation_needed(current_round,
@@ -422,6 +424,7 @@ class MetaCSFL:
                                                                   num_tasks,
                                                                   cost_matrices,
                                                                   time_limit,
+                                                                  data_privacy_approach,
                                                                   logger)
             # Update the initial solution generation history.
             initial_solution_generation_history = self.get_attribute("_initial_solution_generation_history")
@@ -453,6 +456,7 @@ class MetaCSFL:
                         selected_clients_metrics_history: dict,
                         profiling_rounds: list,
                         time_limit: float,
+                        data_privacy_approach: str,
                         logger: Logger) -> dict:
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
@@ -469,13 +473,15 @@ class MetaCSFL:
                                                                      profiling_rounds,
                                                                      cost_matrices,
                                                                      time_limit,
+                                                                     data_privacy_approach,
                                                                      logger)
         # Get the necessary properties of the candidate clients.
         task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
                                            for _, client_map in candidate_clients.items()]
-        tasks_per_class_list = [client_map["client_tasks_per_class_{0}".format(current_phase)]
-                                for _, client_map in candidate_clients.items()]
-        class_capacity_vectors_list, sorted_classes = build_class_capacity_vectors_list(tasks_per_class_list)
+        # Build the class capacity vectors list.
+        class_capacity_vectors_list, sorted_classes = build_class_capacity_vectors_list(candidate_clients,
+                                                                                        data_privacy_approach,
+                                                                                        current_phase)
         mean_power_consumption_idle_mode_list = [client_map["client_mean_power_consumption_idle_mode"]
                                                  for _, client_map in candidate_clients.items()]
         remaining_battery_energy_list = [client_map["client_remaining_battery_energy"]
@@ -632,6 +638,7 @@ class MetaCSFL:
         selected_clients_metrics_history = kwargs["selected_clients_metrics_history"]
         profiling_rounds = kwargs["profiling_rounds"]
         time_limit = kwargs["time_limit"]
+        data_privacy_approach = kwargs["data_privacy_approach"]
         logger = kwargs["logger"]
         # Get the necessary properties of the candidate clients.
         task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
@@ -687,6 +694,7 @@ class MetaCSFL:
                                                         selected_clients_metrics_history,
                                                         profiling_rounds,
                                                         time_limit,
+                                                        data_privacy_approach,
                                                         logger)
             else:
                 # Get the latest set of selected clients, if available.

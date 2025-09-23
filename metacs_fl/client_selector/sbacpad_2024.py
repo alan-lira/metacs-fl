@@ -290,6 +290,7 @@ class SBACPAD2024:
                              num_tasks: int,
                              cost_matrices: dict,
                              time_limit: float,
+                             data_privacy_approach: str,
                              logger: Logger) -> dict:
         # Start the clients' selection duration timer.
         selection_duration_start = process_time()
@@ -298,10 +299,10 @@ class SBACPAD2024:
         # Initialize the solution.
         X = []
         X_dist = []
-        # Get the necessary properties of the candidate clients.
-        tasks_per_class_list = [client_map["client_tasks_per_class_{0}".format(current_phase)]
-                                for _, client_map in candidate_clients.items()]
-        class_capacity_vectors_list, sorted_classes = build_class_capacity_vectors_list(tasks_per_class_list)
+        # Build the class capacity vectors list.
+        class_capacity_vectors_list, sorted_classes = build_class_capacity_vectors_list(candidate_clients,
+                                                                                        data_privacy_approach,
+                                                                                        current_phase)
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
         client_selector_phase = client_selection_settings["client_selector_{0}ing".format(current_phase)]
@@ -411,6 +412,7 @@ class SBACPAD2024:
                               num_tasks: int,
                               selected_clients_metrics_history: dict,
                               time_limit: float,
+                              data_privacy_approach: str,
                               logger: Logger) -> list:
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
@@ -431,6 +433,7 @@ class SBACPAD2024:
                         num_tasks,
                         cost_matrices,
                         time_limit,
+                        data_privacy_approach,
                         logger)
                 selected_clients_future = executor.submit(target, *args)
                 selected_clients_futures.append(selected_clients_future)
@@ -447,6 +450,7 @@ class SBACPAD2024:
         num_tasks = kwargs["num_tasks"]
         selected_clients_metrics_history = kwargs["selected_clients_metrics_history"]
         time_limit = kwargs["time_limit"]
+        data_privacy_approach = kwargs["data_privacy_approach"]
         logger = kwargs["logger"]
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
@@ -492,6 +496,7 @@ class SBACPAD2024:
                                                                   num_tasks,
                                                                   selected_clients_metrics_history,
                                                                   time_limit,
+                                                                  data_privacy_approach,
                                                                   logger)
         # Return the list of selected clients' Future objects.
         return selected_clients_futures

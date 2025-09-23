@@ -1,4 +1,4 @@
-from numpy import array, int64, ndarray, unique
+from numpy import array, ndarray
 from numpy.random import default_rng
 
 
@@ -32,22 +32,25 @@ class RoundRobinDatasetSlicer:
     def slice_round_robin_per_class(self,
                                     num_examples_per_class: dict,
                                     phase: str) -> tuple:
-        x_sliced = []
-        y_sliced = []
+        x_sliced, y_sliced = [], []
         class_indices_map = {}
         round_robin_offsets = {}
         if phase == "train":
-            x_sliced, y_sliced = [], []
             class_indices_map = self.class_indices_map_train
             round_robin_offsets = self.round_robin_offsets_train
         elif phase == "test":
-            x_sliced, y_sliced = [], []
             class_indices_map = self.class_indices_map_test
             round_robin_offsets = self.round_robin_offsets_test
-        for label_str, count in num_examples_per_class.items():
-            indices = class_indices_map[label_str]
-            offset = round_robin_offsets[label_str]
+        for label_str, requested in num_examples_per_class.items():
+            indices = class_indices_map.get(label_str, [])
             total = len(indices)
+            # Skip if no data for this class or request is invalid.
+            if total == 0 or requested <= 0:
+                continue
+            # Cap request at available examples.
+            count = min(requested, total)
+            # Round-robin slicing with wrap-around.
+            offset = round_robin_offsets.get(label_str, 0)
             selected_indices = [indices[(offset + i) % total] for i in range(count)]
             round_robin_offsets[label_str] = (offset + count) % total
             for idx in selected_indices:

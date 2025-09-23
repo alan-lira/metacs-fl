@@ -14,18 +14,17 @@ from hashlib import sha256
 from keras import losses
 from keras.callbacks import Callback, EarlyStopping, ReduceLROnPlateau
 from keras.models import Model
-from keras.saving import load_model, save_model
 from logging import Logger
 from multiprocessing import Process, Queue, set_start_method
-from numpy import argmax, array, linspace, mean, sum, unique
-from numpy.random import default_rng
+from numpy import argmax, array, asarray, clip, float32, int8, linspace, mean, minimum, ndarray, ones, sum, unique, \
+    where, zeros
+from numpy.random import default_rng, laplace, rand
 from os import getpid
 from pandas import read_csv
 from pathlib import Path
-from psutil import cpu_freq
 from re import compile
 from socket import gethostname
-from tensorflow import function, GradientTape, int32, Module, random, reduce_mean, TensorSpec
+from tensorflow import function, GradientTape, Module, reduce_mean, TensorSpec
 from tensorflow.python.framework.ops import EagerTensor, SymbolicTensor
 from tensorflow.python.profiler.model_analyzer import profile
 from tensorflow.python.profiler.option_builder import ProfileOptionBuilder
@@ -638,11 +637,65 @@ class FlowerNumpyClient(NumPyClient):
                                                               idle_testing_phase_event,
                                                               idle_testing_phase_energy_in_joules)
 
+    @staticmethod
+    def _dp_presence_randomized_response(local_classes: ndarray,
+                                         true_presence_probability: float) -> ndarray:
+        n = len(local_classes)
+        if n == 0:
+            return zeros(0, dtype=int8)
+        # True presence: all classes in 'local_classes' are present -> ones.
+        true_presence = ones(n, dtype=int8)
+        # Randomized response:
+        # - With probability p, report true bit (1);
+        # - With probability (1-p), report random bit (0/1 with prob 0.5).
+        rnd = rand(n)
+        random_bits = (rand(n) < 0.5).astype(int8)
+        reported = where(rnd < true_presence_probability, true_presence, random_bits)
+        return reported.astype(int8)
+
+    @staticmethod
+    def _dp_noisy_histogram_from_counts(y_local: ndarray,
+                                        num_global_classes: int,
+                                        epsilon: float,
+                                        clip_max: float = None) -> ndarray:
+        hist = zeros(num_global_classes, dtype=float32)
+        if len(y_local) > 0:
+            uniq, counts = unique(y_local, return_counts=True)
+            hist[uniq] = counts.astype(float32)
+        if clip_max is not None:
+            hist = minimum(hist, float(clip_max))
+        # Each record contributes to exactly one bin of the histogram.
+        # Clipping ensures no single client can push a bin above clip_max (if defined).
+        sensitivity = 1.0
+        scale = sensitivity / float(epsilon)
+        noise = laplace(loc=0.0, scale=scale, size=hist.shape)
+        noisy = hist + noise
+        noisy_clipped = clip(noisy, 0.0, None).astype(float32)
+        return noisy_clipped
+
     def get_properties(self,
                        config: dict) -> dict:
         """ Implementation of the abstract method from the NumPyClient class."""
         # Record the energy consumed by this client during the past idle events, if needed.
         self._record_past_idle_events(config)
+        if "client_dp_presence" in config:
+            y_train = self.get_attribute("_y_train")
+            local_classes = asarray(unique(y_train))
+            true_presence_probability = config["true_presence_probability"]
+            # Get the privatized presence vector aligned with local_classes.
+            dp_presence = self._dp_presence_randomized_response(local_classes, true_presence_probability)
+            config.update({"client_dp_presence": "|".join(map(str, dp_presence.tolist())),
+                           "client_local_classes_claimed": "|".join(map(str, local_classes.tolist()))})
+        if "client_dp_histogram" in config:
+            epsilon = config["epsilon"]
+            y_train = self.get_attribute("_y_train")
+            num_global_classes = int(config["num_global_classes"])
+            class_index_map_str = config["class_index_map"]
+            class_index_map = {int(k): int(v)
+                               for k, v in (pair.split("=") for pair in class_index_map_str.split("|") if pair)}
+            y_global = array([class_index_map[y] for y in y_train if y in class_index_map])
+            dp_hist = self._dp_noisy_histogram_from_counts(y_global, num_global_classes, epsilon)
+            config.update({"client_dp_histogram": "|".join(["{0}".format(float(x)) for x in dp_hist])})
         if "client_id" in config:
             client_id = self.get_attribute("_client_id")
             config.update({"client_id": client_id})

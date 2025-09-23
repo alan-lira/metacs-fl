@@ -65,28 +65,6 @@ class FlowerExecutor:
         # Return the personalized_settings dictionary.
         return personalized_settings
 
-    def _launch_flower_server(self,
-                              server_id: int) -> None:
-        # Get the necessary attributes.
-        current_execution = self.get_attribute("_current_execution")
-        # Get the execution name and settings.
-        execution_name = next(iter(current_execution))
-        execution_settings = current_execution[execution_name]
-        # Get the base server config file.
-        base_server_config_file = Path(execution_settings["base_server_config_file"])
-        # Load the personalized_settings dictionary for the server.
-        server_personalized_settings = self._get_personalized_settings_for_server(base_server_config_file,
-                                                                                  current_execution)
-        # Instantiate the flower server launcher.
-        cpu_cores_available = get_cpu_cores_available()
-        fsl = FlowerServerLauncher(server_id,
-                                   base_server_config_file,
-                                   server_personalized_settings,
-                                   server_acquired_cpu_cores=cpu_cores_available,
-                                   instantiate_server=True)
-        # Launch the flower server.
-        fsl.launch_server()
-
     @staticmethod
     def _get_personalized_settings_for_client(client_id: int,
                                               base_client_config_file: Path,
@@ -134,8 +112,30 @@ class FlowerExecutor:
         with open(file=output_file, mode="a", encoding="utf-8") as o_f:
            o_f.write(data_line)
 
+    def _launch_flower_server(self,
+                              server_id: int) -> FlowerServerLauncher:
+        # Get the necessary attributes.
+        current_execution = self.get_attribute("_current_execution")
+        # Get the execution name and settings.
+        execution_name = next(iter(current_execution))
+        execution_settings = current_execution[execution_name]
+        # Get the base server config file.
+        base_server_config_file = Path(execution_settings["base_server_config_file"])
+        # Load the personalized_settings dictionary for the server.
+        server_personalized_settings = self._get_personalized_settings_for_server(base_server_config_file,
+                                                                                  current_execution)
+        # Instantiate the flower server launcher.
+        cpu_cores_available = get_cpu_cores_available()
+        fsl = FlowerServerLauncher(server_id,
+                                   base_server_config_file,
+                                   server_personalized_settings,
+                                   server_acquired_cpu_cores=cpu_cores_available,
+                                   instantiate_server=True)
+        # Return the flower server launcher.
+        return fsl
+
     def _launch_flower_client(self,
-                              client_id: int) -> None:
+                              client_id: int) -> FlowerClientLauncher:
         # Get the necessary attributes.
         current_execution = self.get_attribute("_current_execution")
         current_execution_devices = self.get_attribute("_current_execution_devices")
@@ -160,11 +160,10 @@ class FlowerExecutor:
                                    client_personalized_settings,
                                    client_acquired_cpu_cores=cpu_cores_available,
                                    instantiate_client=True)
-        # Launch the flower client.
-        fcl.launch_client()
+        # Return the flower client launcher.
+        return fcl
 
     def execute_fl_with_flower(self) -> None:
-        # Set the list of executions to execute.
         executions_to_execute = []
         config_file = self.get_attribute("_config_file")
         section_names = get_all_section_names(config_file)
@@ -298,7 +297,7 @@ class FlowerExecutor:
             # Start the execution timer.
             start = perf_counter()
             # Start the Flower server in a separate process.
-            server_process = Process(target=self._launch_flower_server, args=(0,))
+            server_process = Process(target=lambda: self._launch_flower_server(0).launch_server())
             server_process.start()
             # Wait for the server to start.
             sleep(5)
@@ -307,7 +306,7 @@ class FlowerExecutor:
             # Get the number of clients.
             num_clients = execution_settings["num_clients"]
             for client_id in range(num_clients):
-                p = Process(target=self._launch_flower_client, args=(client_id,))
+                p = Process(target=lambda cid=client_id: self._launch_flower_client(cid).launch_client())
                 p.start()
                 client_processes.append(p)
             # Wait for all client processes to finish.

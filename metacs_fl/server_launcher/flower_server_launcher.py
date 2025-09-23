@@ -120,6 +120,14 @@ class FlowerServerLauncher:
                 model_aggregator_settings = parse_config_section(config_file, model_aggregator_section)
                 model_aggregator_settings["name"] = model_aggregator
                 server_strategy_implementation_settings["model_aggregator"] = model_aggregator_settings
+                data_privacy_approach = server_strategy_implementation_settings["data_privacy_approach"]
+                data_privacy_approach_settings = {}
+                match data_privacy_approach:
+                    case "Differentially_Private":
+                        data_privacy_approach_section = "{0} Settings".format(data_privacy_approach)
+                        data_privacy_approach_settings = parse_config_section(config_file, data_privacy_approach_section)
+                data_privacy_approach_settings["name"] = data_privacy_approach
+                server_strategy_implementation_settings["data_privacy_approach"] = data_privacy_approach_settings
                 server_strategy_settings.update(server_strategy_implementation_settings)
                 self._set_attribute("_server_strategy_settings", server_strategy_settings)
             case "MetaCS-FL":
@@ -187,6 +195,14 @@ class FlowerServerLauncher:
                 model_aggregator_settings = parse_config_section(config_file, model_aggregator_section)
                 model_aggregator_settings["name"] = model_aggregator
                 server_strategy_implementation_settings["model_aggregator"] = model_aggregator_settings
+                data_privacy_approach = server_strategy_implementation_settings["data_privacy_approach"]
+                data_privacy_approach_settings = {}
+                match data_privacy_approach:
+                    case "Differentially_Private":
+                        data_privacy_approach_section = "{0} Settings".format(data_privacy_approach)
+                        data_privacy_approach_settings = parse_config_section(config_file, data_privacy_approach_section)
+                data_privacy_approach_settings["name"] = data_privacy_approach
+                server_strategy_implementation_settings["data_privacy_approach"] = data_privacy_approach_settings
                 server_strategy_settings.update(server_strategy_implementation_settings)
                 self._set_attribute("_server_strategy_settings", server_strategy_settings)
         # Parse and set the ssl settings.

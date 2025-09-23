@@ -1,7 +1,6 @@
 from collections import Counter
 from copy import deepcopy
 from math import e, exp, log, sqrt
-from numpy import ndarray
 from numpy.random import default_rng
 from statistics import mean, stdev
 
@@ -110,17 +109,37 @@ def calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_cli
     return D
 
 
-def build_class_capacity_vectors_list(tasks_per_class_list: list) -> tuple:
-    unique_classes = set()
-    for d in tasks_per_class_list:
-        unique_classes.update(int(k) for k in d.keys())
-    sorted_classes = sorted(unique_classes)
+def build_class_capacity_vectors_list(candidate_clients: dict,
+                                      data_privacy_approach: str,
+                                      current_phase: str) -> tuple:
     Y = []
-    for d in tasks_per_class_list:
-        gamma = []
-        for k in sorted_classes:
-            gamma.append(d.get(str(k), 0))
-        Y.append(gamma)
+    sorted_classes = []
+    match data_privacy_approach:
+        case "Non_Private":
+            tasks_per_class_list = [client_map["client_tasks_per_class_{0}".format(current_phase)]
+                                    for _, client_map in candidate_clients.items()]
+            unique_classes = set()
+            for d in tasks_per_class_list:
+                unique_classes.update(int(k) for k in d.keys())
+            sorted_classes = sorted(unique_classes)
+            for d in tasks_per_class_list:
+                gamma = []
+                for k in sorted_classes:
+                    gamma.append(d.get(str(k), 0))
+                Y.append(gamma)
+        case "Differentially_Private":
+            # Get the class-index mapping (all clients have the same mapping, so we take from the first).
+            _, first_client_map = next(iter(candidate_clients.items()))
+            class_index_map = first_client_map["class_index_map"]
+            idx_to_cls = {idx: cls for cls, idx in class_index_map.items()}
+            sorted_classes = [idx_to_cls[idx] for idx in sorted(idx_to_cls.keys())]
+            for _, client_map in candidate_clients.items():
+                client_dp_histogram = client_map["client_dp_histogram"]
+                gamma = []
+                for cls in sorted_classes:
+                    idx = class_index_map[cls]
+                    gamma.append(int(round(client_dp_histogram[idx])))
+                Y.append(gamma)
     return Y, sorted_classes
 
 
@@ -162,16 +181,20 @@ def distribute_tasks_with_locally_balanced_approach(X: list,
         # Get the available classes (non-zero counts) for this client.
         available_classes = [k for k, count in enumerate(Y[i]) if count > 0]
         num_classes = len(available_classes)
-        # Distribute tasks as evenly as possible while respecting capacity.
+        if num_classes == 0:
+            # No capacity, all tasks must be dropped.
+            X_dist.append(x_dist_i)
+            continue
         remaining_tasks = x_i
         for k in available_classes:
             # Calculate the number of tasks to assign to this class.
             tasks_for_class = min(remaining_tasks // num_classes, Y[i][k])
             x_dist_i[k] += tasks_for_class
             remaining_tasks -= tasks_for_class
-        # Distribute any remaining tasks in a balanced way (round-robin) respecting capacity.
+        # Distribute remaining tasks safely.
         class_idx = 0
-        while remaining_tasks > 0:
+        max_capacity = sum(Y[i][k] for k in available_classes)
+        while remaining_tasks > 0 and sum(x_dist_i) < max_capacity:
             k = available_classes[class_idx % num_classes]
             # Check if capacity is not exceeded.
             if x_dist_i[k] < Y[i][k]:
@@ -192,13 +215,10 @@ def distribute_tasks_with_globally_balanced_approach(X: list,
     m = len(Y[0])
     # Get the number of tasks scheduled.
     T = sum(X)
-    # Compute the total capacity per class globally (sum across all clients).
-    total_capacity_per_class = [0] * m
-    for i in range(n):
-        for k in range(m):
-            total_capacity_per_class[k] += Y[i][k]
-    # Calculate the global ideal distribution of tasks per class.
+    total_capacity_per_class = [sum(Y[i][k] for i in range(n)) for k in range(m)]
     total_capacity = sum(total_capacity_per_class)
+    if total_capacity == 0:
+        return [[0] * m for _ in range(n)]
     ideal_distribution_per_class = [int(T * total_capacity_per_class[k] / total_capacity)
                                     for k in range(m)]
     # Adjust for rounding errors.
@@ -218,14 +238,16 @@ def distribute_tasks_with_globally_balanced_approach(X: list,
             if tasks_to_allocate <= 0:
                 break
             if remaining_Y[i][k] > 0:
-                allocated_tasks = min(tasks_to_allocate, remaining_X[i], remaining_Y[i][k])
-                X_dist[i][k] += allocated_tasks
-                remaining_X[i] -= allocated_tasks
-                remaining_Y[i][k] -= allocated_tasks
-                tasks_to_allocate -= allocated_tasks
-    # Distribute any remaining tasks in a balanced way.
+                allocated = min(tasks_to_allocate, remaining_X[i], remaining_Y[i][k])
+                X_dist[i][k] += allocated
+                remaining_X[i] -= allocated
+                remaining_Y[i][k] -= allocated
+                tasks_to_allocate -= allocated
+    # Safe final redistribution.
     remaining_tasks = sum(remaining_X)
-    while remaining_tasks > 0:
+    max_capacity_left = sum(sum(row) for row in remaining_Y)
+    while remaining_tasks > 0 and max_capacity_left > 0:
+        progress = False
         for i in range(n):
             if remaining_X[i] > 0:
                 for k in range(m):
@@ -234,13 +256,16 @@ def distribute_tasks_with_globally_balanced_approach(X: list,
                         remaining_X[i] -= 1
                         remaining_Y[i][k] -= 1
                         remaining_tasks -= 1
+                        max_capacity_left -= 1
+                        progress = True
                         if remaining_tasks == 0:
                             break
                 if remaining_tasks == 0:
                     break
-    # Final check to verify if all tasks were distributed.
+        if not progress:
+            break
     if sum(remaining_X) != 0:
-        print("Error: Not all tasks have been allocated. Remaining tasks: {0}".format(sum(remaining_X)))
+        print("Warning: {0} tasks could not be allocated due to lack of capacity!".format(sum(remaining_X)))
     return X_dist
 
 
@@ -248,7 +273,7 @@ def organize_tasks_distribution(X_dist: list,
                                 sorted_classes: list) -> list:
     X_dist_organized = []
     for gamma in X_dist:
-        gamma_dict = {k: v for k, v in zip(sorted_classes, gamma) if v != 0}
+        gamma_dict = {k: int(v) for k, v in zip(sorted_classes, gamma) if v != 0}
         X_dist_organized.append(gamma_dict)
     return X_dist_organized
 
