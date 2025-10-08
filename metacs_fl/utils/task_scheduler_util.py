@@ -155,21 +155,35 @@ def distribute_tasks_with_random_approach(X: list,
             continue
         # Expand the available classes according to their counts.
         expanded_gamma_i = [k for k, count in enumerate(Y[i]) for _ in range(count)]
-        # If not enough available tasks, limit to what's possible.
-        sample_size = min(x_i, len(expanded_gamma_i))
-        # Randomly select classes without replacement.
-        selected_classes = rng.choice(expanded_gamma_i, size=sample_size, replace=False)
-        # Count how many times each class was selected.
+        if not expanded_gamma_i:
+            X_dist.append(x_dist_i)
+            continue
+        # Allow duplication if local dataset is smaller than target.
+        replace_mode = x_i > len(expanded_gamma_i)
+        selected_classes = rng.choice(expanded_gamma_i, size=x_i, replace=replace_mode)
         class_counts = Counter(selected_classes)
         # Update x_dist_i with these counts.
         for k, count in class_counts.items():
             x_dist_i[k] = count
+        # 🔒 Enforce exact count.
+        current_total = sum(x_dist_i)
+        if current_total < x_i:
+            available_classes = [k for k, c in enumerate(Y[i]) if c > 0] or [0]
+            for _ in range(x_i - current_total):
+                k = rng.choice(available_classes)
+                x_dist_i[k] += 1
+        elif current_total > x_i:
+            all_assigned = [k for k, c in enumerate(x_dist_i) for _ in range(c)]
+            remove_idx = rng.choice(all_assigned, size=current_total - x_i, replace=False)
+            for k in remove_idx:
+                x_dist_i[k] -= 1
         X_dist.append(x_dist_i)
     return X_dist
 
 
 def distribute_tasks_with_locally_balanced_approach(X: list,
                                                     Y: list) -> list:
+    rng = default_rng()
     X_dist = []
     for i, x_i in enumerate(X):
         # Initialize with zeros for each class.
@@ -186,28 +200,37 @@ def distribute_tasks_with_locally_balanced_approach(X: list,
             X_dist.append(x_dist_i)
             continue
         remaining_tasks = x_i
+        # First pass: distribute evenly without exceeding local counts.
         for k in available_classes:
             # Calculate the number of tasks to assign to this class.
             tasks_for_class = min(remaining_tasks // num_classes, Y[i][k])
             x_dist_i[k] += tasks_for_class
             remaining_tasks -= tasks_for_class
-        # Distribute remaining tasks safely.
+        # Second pass: fill remaining tasks safely (with duplication if needed).
         class_idx = 0
-        max_capacity = sum(Y[i][k] for k in available_classes)
-        while remaining_tasks > 0 and sum(x_dist_i) < max_capacity:
+        while remaining_tasks > 0:
             k = available_classes[class_idx % num_classes]
-            # Check if capacity is not exceeded.
-            if x_dist_i[k] < Y[i][k]:
-                x_dist_i[k] += 1
-                remaining_tasks -= 1
+            x_dist_i[k] += 1
+            remaining_tasks -= 1
             class_idx += 1
-        # Append the distribution of tasks of this client.
+        # 🔒 Enforce exact count.
+        current_total = sum(x_dist_i)
+        if current_total < x_i:
+            for _ in range(x_i - current_total):
+                k = rng.choice(available_classes)
+                x_dist_i[k] += 1
+        elif current_total > x_i:
+            all_assigned = [k for k, c in enumerate(x_dist_i) for _ in range(c)]
+            remove_idx = rng.choice(all_assigned, size=current_total - x_i, replace=False)
+            for k in remove_idx:
+                x_dist_i[k] -= 1
         X_dist.append(x_dist_i)
     return X_dist
 
 
 def distribute_tasks_with_globally_balanced_approach(X: list,
                                                      Y: list) -> list:
+    rng = default_rng()
     # Get the number of candidate clients.
     n = len(X)
     # Get the number of task classes from the first client
@@ -219,9 +242,10 @@ def distribute_tasks_with_globally_balanced_approach(X: list,
     total_capacity = sum(total_capacity_per_class)
     if total_capacity == 0:
         return [[0] * m for _ in range(n)]
+    # Ideal class-level distribution.
     ideal_distribution_per_class = [int(T * total_capacity_per_class[k] / total_capacity)
                                     for k in range(m)]
-    # Adjust for rounding errors.
+    # Adjust rounding.
     allocated_tasks = sum(ideal_distribution_per_class)
     remaining_tasks = T - allocated_tasks
     # Distribute remaining tasks to the classes with the highest residual.
@@ -232,6 +256,7 @@ def distribute_tasks_with_globally_balanced_approach(X: list,
     X_dist = [[0] * m for _ in range(n)]
     remaining_X = deepcopy(X)
     remaining_Y = deepcopy(Y)
+    # Global balanced allocation.
     for k in range(m):
         tasks_to_allocate = ideal_distribution_per_class[k]
         for i in range(n):
@@ -243,29 +268,36 @@ def distribute_tasks_with_globally_balanced_approach(X: list,
                 remaining_X[i] -= allocated
                 remaining_Y[i][k] -= allocated
                 tasks_to_allocate -= allocated
-    # Safe final redistribution.
+    # Redistribute remaining tasks (duplicate if needed).
     remaining_tasks = sum(remaining_X)
-    max_capacity_left = sum(sum(row) for row in remaining_Y)
-    while remaining_tasks > 0 and max_capacity_left > 0:
+    while remaining_tasks > 0:
         progress = False
         for i in range(n):
             if remaining_X[i] > 0:
                 for k in range(m):
-                    if remaining_Y[i][k] > 0 and remaining_X[i] > 0:
-                        X_dist[i][k] += 1
-                        remaining_X[i] -= 1
-                        remaining_Y[i][k] -= 1
-                        remaining_tasks -= 1
-                        max_capacity_left -= 1
-                        progress = True
-                        if remaining_tasks == 0:
-                            break
+                    X_dist[i][k] += 1
+                    remaining_X[i] -= 1
+                    remaining_tasks -= 1
+                    progress = True
+                    if remaining_tasks == 0:
+                        break
                 if remaining_tasks == 0:
                     break
         if not progress:
             break
-    if sum(remaining_X) != 0:
-        print("Warning: {0} tasks could not be allocated due to lack of capacity!".format(sum(remaining_X)))
+    # 🔒 Enforce exact count per client.
+    for i, x_i in enumerate(X):
+        current_total = sum(X_dist[i])
+        if current_total < x_i:
+            available_classes = [k for k in range(m) if Y[i][k] > 0] or [0]
+            for _ in range(x_i - current_total):
+                k = rng.choice(available_classes)
+                X_dist[i][k] += 1
+        elif current_total > x_i:
+            all_assigned = [k for k, c in enumerate(X_dist[i]) for _ in range(c)]
+            remove_idx = rng.choice(all_assigned, size=current_total - x_i, replace=False)
+            for k in remove_idx:
+                X_dist[i][k] -= 1
     return X_dist
 
 

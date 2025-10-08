@@ -654,13 +654,13 @@ class FlowerNumpyClient(NumPyClient):
         return reported.astype(int8)
 
     @staticmethod
-    def _dp_noisy_histogram_from_counts(y_local: ndarray,
+    def _dp_noisy_histogram_from_counts(y_local_mapped: ndarray,
                                         num_global_classes: int,
                                         epsilon: float,
                                         clip_max: float = None) -> ndarray:
         hist = zeros(num_global_classes, dtype=float32)
-        if len(y_local) > 0:
-            uniq, counts = unique(y_local, return_counts=True)
+        if len(y_local_mapped) > 0:
+            uniq, counts = unique(y_local_mapped, return_counts=True)
             hist[uniq] = counts.astype(float32)
         if clip_max is not None:
             hist = minimum(hist, float(clip_max))
@@ -693,8 +693,8 @@ class FlowerNumpyClient(NumPyClient):
             class_index_map_str = config["class_index_map"]
             class_index_map = {int(k): int(v)
                                for k, v in (pair.split("=") for pair in class_index_map_str.split("|") if pair)}
-            y_global = array([class_index_map[y] for y in y_train if y in class_index_map])
-            dp_hist = self._dp_noisy_histogram_from_counts(y_global, num_global_classes, epsilon)
+            y_local_mapped = array([class_index_map[y] for y in y_train if y in class_index_map])
+            dp_hist = self._dp_noisy_histogram_from_counts(y_local_mapped, num_global_classes, epsilon)
             config.update({"client_dp_histogram": "|".join(["{0}".format(float(x)) for x in dp_hist])})
         if "client_id" in config:
             client_id = self.get_attribute("_client_id")
