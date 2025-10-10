@@ -294,21 +294,29 @@ class FlowerExecutor:
                     self._set_attribute("_current_execution_devices", current_execution_devices)
             # Print the start of the execution.
             print("\nStarting the execution '{0}'...".format(execution_name))
+            # Get the process wait time (after launching).
+            process_wait_time = execution_settings.get("process_wait_time", 5)
             # Start the execution timer.
             start = perf_counter()
             # Start the Flower server in a separate process.
-            server_process = Process(target=lambda: self._launch_flower_server(0).launch_server())
+            server_id = execution_settings["server_id"]
+            server_process = Process(target=lambda: self._launch_flower_server(server_id).launch_server())
             server_process.start()
             # Wait for the server to start.
-            sleep(5)
+            sleep(process_wait_time)
+            print("Launched the Server '{0}'...".format(server_id))
             # Start multiple Flower clients in separate processes.
             client_processes = []
             # Get the number of clients.
             num_clients = execution_settings["num_clients"]
-            for client_id in range(num_clients):
-                p = Process(target=lambda cid=client_id: self._launch_flower_client(cid).launch_client())
+            for idx in range(num_clients):
+                p = Process(target=lambda client_id=idx: self._launch_flower_client(client_id).launch_client())
                 p.start()
+                # Wait for the client to start.
+                sleep(5)
                 client_processes.append(p)
+                sleep(process_wait_time)
+                print("Launched the Client '{0}'...".format(idx))
             # Wait for all client processes to finish.
             for p in client_processes:
                 p.join()
