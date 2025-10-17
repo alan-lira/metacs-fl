@@ -9,8 +9,8 @@ from flwr.common import Parameters
 from io import BytesIO
 from keras import layers, Model, Sequential
 from keras.applications import DenseNet121, EfficientNetB0, EfficientNetV2L, MobileNetV2, ResNet50, VGG16
-from keras.losses import Loss, SparseCategoricalCrossentropy
-from keras.metrics import Metric, SparseCategoricalAccuracy
+from keras.losses import BinaryCrossentropy, Loss, SparseCategoricalCrossentropy
+from keras.metrics import BinaryAccuracy, Metric, SparseCategoricalAccuracy
 from keras.optimizers import Adam, Optimizer, SGD
 from keras.optimizers.schedules import CosineDecay, ExponentialDecay
 from keras.saving import load_model as keras_load_model, save_model as keras_save_model
@@ -241,6 +241,113 @@ def load_custom_cnn_cinic_10() -> Model:
     return model
 
 
+def load_custom_ffnn_sentiment140(model_provider_specific_settings: dict) -> Model:
+    """Feedforward Neural Network (FFNN) baseline for Sentiment140."""
+    # Get the model specific settings.
+    vocab_size = model_provider_specific_settings["vocab_size"]
+    max_length = model_provider_specific_settings["max_length"]
+    embedding_dim = model_provider_specific_settings["embedding_dim"]
+    # Initialize the model architecture.
+    model = Sequential()
+    # Input Layer.
+    model.add(layers.Input(shape=(max_length,)))
+    # Embedding layer to learn word representations.
+    model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
+    # Global average pooling to aggregate embeddings across the sequence.
+    model.add(layers.GlobalAveragePooling1D())
+    # Fully connected layer with ReLU activation.
+    model.add(layers.Dense(128, activation="relu"))
+    # Dropout layer to reduce overfitting.
+    model.add(layers.Dropout(0.5))
+    # Output layer for binary sentiment classification (sigmoid activation).
+    model.add(layers.Dense(1, activation="sigmoid"))
+    # Return the model architecture.
+    return model
+
+
+def load_custom_cnn_sentiment140(model_provider_specific_settings: dict) -> Model:
+    """Convolutional Neural Network (CNN) model for Sentiment140."""
+    # Get the model specific settings.
+    vocab_size = model_provider_specific_settings["vocab_size"]
+    max_length = model_provider_specific_settings["max_length"]
+    embedding_dim = model_provider_specific_settings["embedding_dim"]
+    # Initialize the model architecture.
+    model = Sequential()
+    # Input Layer.
+    model.add(layers.Input(shape=(max_length,)))
+    # Embedding layer to learn distributed representations of words.
+    model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
+    # First convolutional block to extract local n-gram features.
+    model.add(layers.Conv1D(filters=128, kernel_size=5, activation="relu", padding="same"))
+    model.add(layers.MaxPooling1D(pool_size=2))
+    # Second convolutional block to refine extracted features.
+    model.add(layers.Conv1D(filters=64, kernel_size=5, activation="relu", padding="same"))
+    model.add(layers.GlobalMaxPooling1D())
+    # Fully connected layer for higher-level feature combination.
+    model.add(layers.Dense(64, activation="relu"))
+    # Dropout layer to reduce overfitting.
+    model.add(layers.Dropout(0.5))
+    # Output layer for binary sentiment classification (sigmoid activation).
+    model.add(layers.Dense(1, activation="sigmoid"))
+    # Return the model architecture.
+    return model
+
+
+def load_custom_lstm_sentiment140(model_provider_specific_settings: dict) -> Model:
+    """Long Short-Term Memory (LSTM) model for Sentiment140."""
+    # Get the model specific settings.
+    vocab_size = model_provider_specific_settings["vocab_size"]
+    max_length = model_provider_specific_settings["max_length"]
+    embedding_dim = model_provider_specific_settings["embedding_dim"]
+    # Initialize the model architecture.
+    model = Sequential()
+    # Input Layer.
+    model.add(layers.Input(shape=(max_length,)))
+    # Embedding layer to map tokens to dense vectors.
+    model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length, mask_zero=True))
+    # LSTM layer to capture sequential dependencies and context.
+    model.add(layers.LSTM(128, return_sequences=False))
+    # Fully connected layer for learned feature projection.
+    model.add(layers.Dense(64, activation="relu"))
+    # Dropout layer to prevent overfitting.
+    model.add(layers.Dropout(0.5))
+    # Output layer for binary sentiment classification (sigmoid activation).
+    model.add(layers.Dense(1, activation="sigmoid"))
+    # Return the model architecture.
+    return model
+
+
+def load_custom_transformer_sentiment140(model_provider_specific_settings: dict) -> Model:
+    """Lightweight Transformer-based model for Sentiment140."""
+    # Get the model specific settings.
+    vocab_size = model_provider_specific_settings["vocab_size"]
+    max_length = model_provider_specific_settings["max_length"]
+    embedding_dim = model_provider_specific_settings["embedding_dim"]
+    # Initialize the model architecture.
+    # Sequential is used for structural consistency (Transformer blocks typically use functional API).
+    model = Sequential()
+    # Input Layer.
+    model.add(layers.Input(shape=(max_length,)))
+    # Embedding layer to represent input tokens.
+    model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
+    # Layer normalization to stabilize and scale the embeddings.
+    model.add(layers.LayerNormalization())
+    # Single Transformer encoder block (multi-head self-attention + normalization).
+    model.add(layers.MultiHeadAttention(num_heads=4, key_dim=embedding_dim))
+    model.add(layers.Dropout(0.5))
+    model.add(layers.LayerNormalization())
+    # Feed-forward projection layer.
+    model.add(layers.Dense(128, activation="relu"))
+    # Global average pooling to aggregate sequence representations.
+    model.add(layers.GlobalAveragePooling1D())
+    # Dropout layer to prevent overfitting.
+    model.add(layers.Dropout(0.5))
+    # Output layer for binary sentiment classification (sigmoid activation).
+    model.add(layers.Dense(1, activation="sigmoid"))
+    # Return the model architecture.
+    return model
+
+
 def load_efficientnet_b0(model_provider_specific_settings: dict) -> Model:
     # Instantiate the Kera's EfficientNetB0 model.
     model = EfficientNetB0(input_shape=model_provider_specific_settings["input_shape"],
@@ -402,6 +509,13 @@ def load_loss_function(model_settings: dict) -> Loss:
                                                      ignore_class=loss_settings["ignore_class"],
                                                      reduction=loss_settings["reduction"],
                                                      name=loss_settings["loss_name"])
+            case "BinaryCrossentropy":
+                # Instantiate the Kera's BinaryCrossentropy loss function.
+                loss = BinaryCrossentropy(from_logits=loss_settings["from_logits"],
+                                          label_smoothing=loss_settings["label_smoothing"],
+                                          axis=loss_settings["axis"],
+                                          reduction=loss_settings["reduction"],
+                                          name=loss_settings["loss_name"])
     # Return the loss function.
     return loss
 
@@ -417,6 +531,9 @@ def load_metrics(model_settings: dict) -> list[Metric]:
                 case "sparse_categorical_accuracy":
                     # Instantiate the Kera's SparseCategoricalAccuracy metric.
                     metrics[index] = SparseCategoricalAccuracy()
+                case "binary_accuracy":
+                    # Instantiate the Kera's BinaryAccuracy metric.
+                    metrics[index] = BinaryAccuracy()
     # Return the list of metrics.
     return metrics
 
@@ -450,6 +567,14 @@ def load_model(model_settings: dict,
                 model = load_custom_cnn_svhn()
             case "Custom_CNN_CINIC-10":
                 model = load_custom_cnn_cinic_10()
+            case "Custom_FFNN_Sentiment140":
+                model = load_custom_ffnn_sentiment140(model_provider_specific_settings)
+            case "Custom_CNN_Sentiment140":
+                model = load_custom_cnn_sentiment140(model_provider_specific_settings)
+            case "Custom_LSTM_Sentiment140":
+                model = load_custom_lstm_sentiment140(model_provider_specific_settings)
+            case "Custom_Transformer_Sentiment140":
+                model = load_custom_transformer_sentiment140(model_provider_specific_settings)
             case "EfficientNetB0":
                 model = load_efficientnet_b0(model_provider_specific_settings)
             case "EfficientNetV2L":

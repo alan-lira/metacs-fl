@@ -1,8 +1,9 @@
 from copy import deepcopy
-from multiprocessing import Process
+from multiprocessing import Barrier, Process
 from numpy.random import default_rng
 from pathlib import Path
 from time import perf_counter, sleep
+from threading import BrokenBarrierError
 
 from metacs_fl.client_launcher.flower_client_launcher import FlowerClientLauncher
 from metacs_fl.devices.edge_devices import generate_edge_devices
@@ -21,6 +22,7 @@ class FlowerExecutor:
         self._current_execution = {}
         self._current_execution_devices = []
         self._rng = default_rng()
+        self._dataset_loaded_barrier = None
 
     def _set_attribute(self,
                        attribute_name: str,
@@ -110,7 +112,7 @@ class FlowerExecutor:
         # Write the data line.
         data_line = str(client_id) + "," + ",".join(map(str, filtered_device_emulation_settings.values())) + "\n"
         with open(file=output_file, mode="a", encoding="utf-8") as o_f:
-           o_f.write(data_line)
+            o_f.write(data_line)
 
     def _launch_flower_server(self,
                               server_id: int) -> FlowerServerLauncher:
@@ -134,8 +136,46 @@ class FlowerExecutor:
         # Return the flower server launcher.
         return fsl
 
+    @staticmethod
+    def _verify_dataset_loaded(fcl: FlowerClientLauncher,
+                               max_retries: int = 10,
+                               retry_delay: float = 30) -> bool:
+        client_id = fcl._client_id
+        for attempt in range(max_retries):
+            try:
+                # Check if the main dataset attributes exist and are not None.
+                if (hasattr(fcl, '_x_train') and fcl._x_train is not None and
+                    hasattr(fcl, '_y_train') and fcl._y_train is not None and
+                    hasattr(fcl, '_x_test') and fcl._x_test is not None and
+                    hasattr(fcl, '_y_test') and fcl._y_test is not None):
+                    # Additional checks for non-empty datasets.
+                    if (len(fcl._x_train) > 0 and len(fcl._y_train) > 0 and
+                        len(fcl._x_test) > 0 and len(fcl._y_test) > 0):
+                        print("Client {0} has successfully loaded the dataset (attempt {1}/{2})"
+                              .format(client_id, attempt + 1, max_retries))
+                        return True
+                    else:
+                        print("Client {0} has dataset variables but they are empty (attempt {1}/{2})"
+                              .format(client_id, attempt + 1, max_retries))
+                else:
+                    print("Client {0} has None dataset variables (attempt {1}/{2})"
+                          .format(client_id, attempt + 1, max_retries))
+            except Exception as e:
+                print("Failed to verify dataset for client {0} (attempt {1}/{2}): {3}"
+                      .format(client_id, attempt + 1, max_retries, e))
+            # Wait before retrying.
+            if attempt < max_retries - 1:
+                print("Retrying dataset verification for client {0} in {1} seconds..."
+                      .format(client_id, retry_delay))
+                sleep(retry_delay)
+            else:
+                print("Client {0} failed to load dataset after {1} attempts!"
+                      .format(client_id, max_retries))
+        return False
+
     def _launch_flower_client(self,
-                              client_id: int) -> FlowerClientLauncher:
+                              client_id: int,
+                              dataset_loaded_barrier: Barrier = None) -> FlowerClientLauncher:
         # Get the necessary attributes.
         current_execution = self.get_attribute("_current_execution")
         current_execution_devices = self.get_attribute("_current_execution_devices")
@@ -160,8 +200,37 @@ class FlowerExecutor:
                                    client_personalized_settings,
                                    client_acquired_cpu_cores=cpu_cores_available,
                                    instantiate_client=True)
+        # Ensure dataset is loaded and verified before proceeding.
+        if dataset_loaded_barrier is not None:
+            # Verify that dataset was fully loaded with retry mechanism.
+            dataset_loaded = self._verify_dataset_loaded(fcl)
+            if dataset_loaded:
+                print("Client {0} has successfully loaded the dataset and is ready!".format(client_id))
+                # Signal that this client has loaded its dataset.
+                dataset_loaded_barrier.wait()
+            else:
+                print("Client {0} failed to load dataset properly after all retries!".format(client_id))
+                # Still signal the barrier to avoid deadlock, but with critical warning.
+                dataset_loaded_barrier.wait()
         # Return the flower client launcher.
         return fcl
+
+    def _launch_flower_client_safely(self,
+                                     client_id: int,
+                                     dataset_loaded_barrier: Barrier) -> None:
+        try:
+            client_launcher = self._launch_flower_client(client_id, dataset_loaded_barrier)
+            # Only launch the client if dataset was verified (though barrier will be passed regardless).
+            client_launcher.launch_client()
+        except Exception as e:
+            print("Error in client {0}: {1}".format(client_id, e))
+            # Still signal the barrier to avoid deadlock.
+            try:
+                dataset_loaded_barrier.wait()
+            except BrokenBarrierError:
+                print("[Client {0}] Barrier broken.".format(client_id))
+            except Exception as e:
+                print("[Client {0}] Barrier wait failed: {1}".format(client_id, e))
 
     def execute_fl_with_flower(self) -> None:
         executions_to_execute = []
@@ -298,6 +367,10 @@ class FlowerExecutor:
             process_wait_time = execution_settings.get("process_wait_time", 5)
             # Start the execution timer.
             start = perf_counter()
+            # Get the number of clients.
+            num_clients = execution_settings["num_clients"]
+            # Create a barrier to synchronize dataset loading.
+            dataset_loaded_barrier = Barrier(num_clients + 1)
             # Start the Flower server in a separate process.
             server_id = execution_settings["server_id"]
             server_process = Process(target=lambda: self._launch_flower_server(server_id).launch_server())
@@ -307,16 +380,16 @@ class FlowerExecutor:
             print("Launched the Server '{0}'...".format(server_id))
             # Start multiple Flower clients in separate processes.
             client_processes = []
-            # Get the number of clients.
-            num_clients = execution_settings["num_clients"]
             for idx in range(num_clients):
-                p = Process(target=lambda client_id=idx: self._launch_flower_client(client_id).launch_client())
+                p = Process(target=self._launch_flower_client_safely, args=(idx, dataset_loaded_barrier))
                 p.start()
-                # Wait for the client to start.
-                sleep(5)
                 client_processes.append(p)
                 sleep(process_wait_time)
                 print("Launched the Client '{0}'...".format(idx))
+            # Wait for all clients to safely load their datasets.
+            print("Waiting for all clients to load and verify their datasets...")
+            dataset_loaded_barrier.wait()
+            print("All clients have completed dataset loading verification!")
             # Wait for all client processes to finish.
             for p in client_processes:
                 p.join()

@@ -10,16 +10,18 @@ from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import DirichletPartitioner, IidPartitioner, PathologicalPartitioner
 from keras.applications.densenet import preprocess_input as densenet121_preprocess_input
 from keras.applications.efficientnet import preprocess_input as efficientnet_preprocess_input
-from keras.applications.efficientnet_v2  import preprocess_input as efficientnet_v2_preprocess_input
+from keras.applications.efficientnet_v2 import preprocess_input as efficientnet_v2_preprocess_input
 from keras.applications.mobilenet_v2 import preprocess_input as mobilenet_v2_preprocess_input
 from keras.applications.resnet import preprocess_input as resnet50_preprocess_input
 from keras.applications.vgg16 import preprocess_input as vgg16_preprocess_input
-from numpy import array, empty, int64, ndarray
+from numpy import array, empty, int64, ndarray, where
 from pathlib import Path
 from PIL import Image
 from random import sample
 from tensorflow import expand_dims
 from tensorflow.image import resize
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
 from time import perf_counter
 
 
@@ -122,6 +124,9 @@ def instantiate_fds(federated_dataset_settings: dict) -> FederatedDataset:
             train_partitioner_key = "train"
             test_partitioner_key = "test"
         case "flwrlabs/cinic10":
+            train_partitioner_key = "train"
+            test_partitioner_key = "test"
+        case "adilbekovich/Sentiment140Twitter":
             train_partitioner_key = "train"
             test_partitioner_key = "test"
     partitioners = {}
@@ -253,6 +258,11 @@ def _load_federated_dataset(client_id: int,
             y_field_key = "label"
             train_split_key = "train"
             test_split_key = "test"
+        case "adilbekovich/Sentiment140Twitter":
+            x_field_key = "text"
+            y_field_key = "label"
+            train_split_key = "train"
+            test_split_key = "test"
     # Get the client's partitions (based on its id).
     partition_train = fds.load_partition(client_id, train_split_key)
     partition_train.set_format("numpy")
@@ -277,10 +287,57 @@ def _reshape_images(x: NDArray,
     return x_reshaped
 
 
-def _pre_process_dataset(dataset: str,
-                         model_settings: dict,
-                         x_train: NDArray,
-                         x_test: NDArray) -> tuple:
+def _pre_process_sentiment140_text_dataset(texts: NDArray,
+                                           labels: NDArray,
+                                           vocab_size: int,
+                                           max_length: int) -> NDArray:
+    # Convert to list and handle empty texts.
+    texts = list(texts) if not isinstance(texts, list) else texts
+    # Filter out None, empty, or whitespace-only texts.
+    valid_indices = []
+    valid_texts = []
+    for i, text in enumerate(texts):
+        if text is not None and str(text).strip():
+            valid_indices.append(i)
+            valid_texts.append(str(text).strip())
+    if not valid_texts:
+        print("Warning: No valid texts found after filtering")
+        if labels is not None:
+            return array([]), array([])
+        return array([])
+    # Initialize tokenizer (you might want to make this global or pass it as parameter).
+    tokenizer = Tokenizer(num_words=vocab_size, oov_token="<OOV>")
+    tokenizer.fit_on_texts(valid_texts)
+    # Convert texts to sequences.
+    sequences = tokenizer.texts_to_sequences(valid_texts)
+    # Filter out empty sequences (texts that become empty after tokenization).
+    non_empty_sequences = []
+    non_empty_indices = []
+    for i, seq in enumerate(sequences):
+        if len(seq) > 0:
+            non_empty_sequences.append(seq)
+            non_empty_indices.append(valid_indices[i])
+    if not non_empty_sequences:
+        print("All sequences are empty after tokenization!")
+        if labels is not None:
+            return array([]), array([])
+        return array([])
+    # Pad sequences.
+    padded_sequences = pad_sequences(non_empty_sequences, maxlen=max_length, padding="post")
+    if labels is not None:
+        # Filter labels to match the non-empty sequences.
+        labels_array = array(labels)
+        valid_labels = labels_array[non_empty_indices]
+        # Convert labels from Sentiment140 format (0,4) to binary (0,1).
+        binary_labels = where(valid_labels == 4, 1, 0)
+        return padded_sequences, binary_labels
+    return padded_sequences
+
+
+def _pre_process_image_dataset(dataset: str,
+                               model_settings: dict,
+                               x_train: NDArray,
+                               x_test: NDArray) -> tuple:
     # Set the list of custom CNNs.
     custom_cnns = ["Custom_CNN_CIFAR-10", "Custom_CNN_CIFAR-100_Fine_Labels", "Custom_CNN_CIFAR-100_Coarse_Labels",
                    "Custom_CNN_MNIST", "Custom_CNN_FashionMNIST", "Custom_CNN_SVHN", "Custom_CNN_CINIC-10",
@@ -340,6 +397,11 @@ def load_dataset(client_id: int,
                  federated_dataset_settings: dict,
                  model_settings: dict,
                  fds: FederatedDataset) -> tuple:
+    # Get the model specific settings (can be necessary for pre-processing of dataset).
+    model_provider = model_settings["provider"]
+    model_provider_settings = model_settings[model_provider]
+    model_name = model_provider_settings["model_name"]
+    model_provider_specific_settings = model_settings[model_name]
     # Start the dataset loading duration timer.
     dataset_loading_duration_start = perf_counter()
     # Initialize x_train, y_train, x_test, and y_test.
@@ -353,8 +415,19 @@ def load_dataset(client_id: int,
         case "FederatedDataset":
             x_train, y_train, x_test, y_test = _load_federated_dataset(client_id, federated_dataset_settings, fds)
             dataset = federated_dataset_settings["dataset"]
-    # Pre-process the dataset.
-    x_train, x_test = _pre_process_dataset(dataset, model_settings, x_train, x_test)
+    # Handle dataset preprocessing separately.
+    if dataset == "adilbekovich/Sentiment140Twitter":
+        # Pre-process the text dataset (sentiment140).
+        vocab_size = model_provider_specific_settings["vocab_size"]
+        max_length = model_provider_specific_settings["max_length"]
+        if len(x_train) > 0:
+            x_train, y_train = _pre_process_sentiment140_text_dataset(x_train, y_train, vocab_size, max_length)
+        if len(x_test) > 0:
+            x_test, y_test = _pre_process_sentiment140_text_dataset(x_test, y_test, vocab_size, max_length)
+    elif dataset in ["uoft-cs/cifar10", "uoft-cs/cifar100", "ylecun/mnist", "zalando-datasets/fashion_mnist",
+                     "zh-plus/tiny-imagenet", "benjamin-paine/imagenet-1k", "ufldl-stanford/svhn", "flwrlabs/cinic10"]:
+        # Pre-process the image dataset.
+        x_train, x_test = _pre_process_image_dataset(dataset, model_settings, x_train, x_test)
     # Get the dataset load duration.
     dataset_loading_duration = perf_counter() - dataset_loading_duration_start
     # Return the loaded dataset (x_train, y_train, x_test, and y_test).
