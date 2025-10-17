@@ -16,12 +16,13 @@ from keras.callbacks import Callback, EarlyStopping, ReduceLROnPlateau
 from keras.models import Model
 from logging import Logger
 from multiprocessing import Process, Queue, set_start_method
-from numpy import argmax, array, asarray, clip, float32, int8, linspace, mean, minimum, ndarray, ones, sum, unique, \
-    where, zeros
+from numpy import argmax, array, asarray, clip, float32, int8, linspace, mean, minimum, ndarray, ones, rint, sum, \
+    unique, where, zeros
 from numpy.random import default_rng, laplace, rand
 from os import getpid
 from pandas import read_csv
 from pathlib import Path
+from psutil import cpu_count, cpu_freq
 from re import compile
 from socket import gethostname
 from tensorflow import function, GradientTape, Module, reduce_mean, TensorSpec
@@ -402,17 +403,18 @@ class FlowerNumpyClient(NumPyClient):
                                                   connection_establishment_event,
                                                   initialization_energy_in_joules)
         # Initialize the network simulator.
-        phi_ar2 = [0.5, 0.3]  # AR(2): two coefficients.
-        self._network_simulator = NetworkSimulator(self._device_emulation_settings["upload_bandwidth_mean"],
-                                                   self._device_emulation_settings["upload_bandwidth_std"],
-                                                   self._device_emulation_settings["upload_bandwidth_min"],
-                                                   self._device_emulation_settings["download_bandwidth_mean"],
-                                                   self._device_emulation_settings["download_bandwidth_std"],
-                                                   self._device_emulation_settings["download_bandwidth_min"],
-                                                   self._device_emulation_settings["base_latency"],
-                                                   self._device_emulation_settings["latency_jitter"],
-                                                   self._device_emulation_settings["packet_loss_rate"],
-                                                   phi_ar2)
+        if self._device_emulation_settings:
+            phi_ar2 = [0.5, 0.3]  # AR(2): two coefficients.
+            self._network_simulator = NetworkSimulator(self._device_emulation_settings["upload_bandwidth_mean"],
+                                                       self._device_emulation_settings["upload_bandwidth_std"],
+                                                       self._device_emulation_settings["upload_bandwidth_min"],
+                                                       self._device_emulation_settings["download_bandwidth_mean"],
+                                                       self._device_emulation_settings["download_bandwidth_std"],
+                                                       self._device_emulation_settings["download_bandwidth_min"],
+                                                       self._device_emulation_settings["base_latency"],
+                                                       self._device_emulation_settings["latency_jitter"],
+                                                       self._device_emulation_settings["packet_loss_rate"],
+                                                       phi_ar2)
 
     def _set_attribute(self,
                        attribute_name: str,
@@ -502,16 +504,19 @@ class FlowerNumpyClient(NumPyClient):
                                                   initialization_time_in_seconds: float) -> float:
         # Get the necessary attributes.
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
-        # Set the dictionary of client attributes to be used for the estimation.
-        client_attributes = {"base_latency": device_emulation_settings["base_latency"],
-                             "base_latency_unit": device_emulation_settings["base_latency_unit"],
-                             "server_location": device_emulation_settings["server_location"],
-                             "client_location": device_emulation_settings["client_location"],
-                             "mpc_comp_i": device_emulation_settings["mean_power_consumption_heavy_computational_load_in_watts"],
-                             "mpc_send_i": device_emulation_settings["mean_power_consumption_data_transmission_in_watts"]}
-        # Estimate the energy consumed by this client during the initialization event.
-        initialization_energy_in_joules = calculate_initialization_energy(client_attributes,
-                                                                          initialization_time_in_seconds)
+        if device_emulation_settings:
+            # Set the dictionary of client attributes to be used for the estimation.
+            client_attributes = {"base_latency": device_emulation_settings["base_latency"],
+                                 "base_latency_unit": device_emulation_settings["base_latency_unit"],
+                                 "server_location": device_emulation_settings["server_location"],
+                                 "client_location": device_emulation_settings["client_location"],
+                                 "mpc_comp_i": device_emulation_settings["mean_power_consumption_heavy_computational_load_in_watts"],
+                                 "mpc_send_i": device_emulation_settings["mean_power_consumption_data_transmission_in_watts"]}
+            # Estimate the energy consumed by this client during the initialization event.
+            initialization_energy_in_joules = calculate_initialization_energy(client_attributes,
+                                                                              initialization_time_in_seconds)
+        else:
+            initialization_energy_in_joules = 0.0  # TODO
         # Return the estimated initialization energy (in joules).
         return initialization_energy_in_joules
 
@@ -519,10 +524,13 @@ class FlowerNumpyClient(NumPyClient):
                                         idle_time_in_seconds: float) -> float:
         # Get the necessary attributes.
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
-        # Set the dictionary of client attributes to be used for the estimation.
-        client_attributes = {"mpc_idle_i": device_emulation_settings["mean_power_consumption_idle_in_watts"]}
-        # Estimate the energy consumed by this client while idle during an event of round r.
-        idle_energy_in_joules = calculate_idle_energy(client_attributes, idle_time_in_seconds)
+        if device_emulation_settings:
+            # Set the dictionary of client attributes to be used for the estimation.
+            client_attributes = {"mpc_idle_i": device_emulation_settings["mean_power_consumption_idle_in_watts"]}
+            # Estimate the energy consumed by this client while idle during an event of round r.
+            idle_energy_in_joules = calculate_idle_energy(client_attributes, idle_time_in_seconds)
+        else:
+            idle_energy_in_joules = 0.0  # TODO
         # Return the estimated idle energy (in joules).
         return idle_energy_in_joules
 
@@ -533,17 +541,18 @@ class FlowerNumpyClient(NumPyClient):
                                              consumed_energy_in_joules: float) -> None:
         # Get the necessary attributes.
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
-        remaining_battery_energy_file = self.get_attribute("_remaining_battery_energy_file")
-        # Update the remaining battery energy file.
-        battery_maximum_stored_energy_in_joules = device_emulation_settings["battery_maximum_stored_energy_in_joules"]
-        device_connected_to_a_power_source = device_emulation_settings["device_connected_to_a_power_source"]
-        update_remaining_battery_energy_file(remaining_battery_energy_file,
-                                             comm_round,
-                                             phase,
-                                             event,
-                                             consumed_energy_in_joules,
-                                             battery_maximum_stored_energy_in_joules,
-                                             device_connected_to_a_power_source)
+        if device_emulation_settings:
+            remaining_battery_energy_file = self.get_attribute("_remaining_battery_energy_file")
+            # Update the remaining battery energy file.
+            battery_maximum_stored_energy_in_joules = device_emulation_settings["battery_maximum_stored_energy_in_joules"]
+            device_connected_to_a_power_source = device_emulation_settings["device_connected_to_a_power_source"]
+            update_remaining_battery_energy_file(remaining_battery_energy_file,
+                                                 comm_round,
+                                                 phase,
+                                                 event,
+                                                 consumed_energy_in_joules,
+                                                 battery_maximum_stored_energy_in_joules,
+                                                 device_connected_to_a_power_source)
 
     def _record_past_idle_events(self,
                                  config: dict) -> None:
@@ -670,8 +679,10 @@ class FlowerNumpyClient(NumPyClient):
         scale = sensitivity / float(epsilon)
         noise = laplace(loc=0.0, scale=scale, size=hist.shape)
         noisy = hist + noise
-        noisy_clipped = clip(noisy, 0.0, None).astype(float32)
-        return noisy_clipped
+        # Clip to avoid negative counts, then round to integers.
+        noisy_clipped = clip(noisy, 0.0, None)
+        dp_noisy_histogram = rint(noisy_clipped).astype(int)
+        return dp_noisy_histogram
 
     def get_properties(self,
                        config: dict) -> dict:
@@ -694,8 +705,8 @@ class FlowerNumpyClient(NumPyClient):
             class_index_map = {int(k): int(v)
                                for k, v in (pair.split("=") for pair in class_index_map_str.split("|") if pair)}
             y_local_mapped = array([class_index_map[y] for y in y_train if y in class_index_map])
-            dp_hist = self._dp_noisy_histogram_from_counts(y_local_mapped, num_global_classes, epsilon)
-            config.update({"client_dp_histogram": "|".join(["{0}".format(float(x)) for x in dp_hist])})
+            dp_noisy_histogram = self._dp_noisy_histogram_from_counts(y_local_mapped, num_global_classes, epsilon)
+            config.update({"client_dp_histogram": "|".join(["{0}".format(x) for x in dp_noisy_histogram])})
         if "client_id" in config:
             client_id = self.get_attribute("_client_id")
             config.update({"client_id": client_id})
@@ -741,46 +752,58 @@ class FlowerNumpyClient(NumPyClient):
             config.update({"client_remaining_battery_energy": remaining_battery_energy_in_joules})
         if "client_mean_power_consumption_idle_mode" in config:
             device_emulation_settings = self.get_attribute("_device_emulation_settings")
-            mpc_idle_i = device_emulation_settings["mean_power_consumption_idle_in_watts"]
+            if device_emulation_settings:
+                mpc_idle_i = device_emulation_settings["mean_power_consumption_idle_in_watts"]
+            else:
+                mpc_idle_i = 0.0  # TODO
             config.update({"client_mean_power_consumption_idle_mode": mpc_idle_i})
         if "client_current_download_bandwidth_in_bytes_per_second" in config:
             device_emulation_settings = self.get_attribute("_device_emulation_settings")
-            network_simulator = self.get_attribute("_network_simulator")
-            # Simulate network performance change.
-            _, current_download_bandwidth = network_simulator.simulate_network_performance_change()
-            # Save the current state of the network simulator.
-            self._set_attribute("_network_simulator", network_simulator)
-            # Convert the current download bandwidth to Bytes per second.
-            download_bandwidth_unit = device_emulation_settings["download_bandwidth_unit"]
-            current_download_bandwidth_in_bytes_per_second = convert_network_bandwidth(current_download_bandwidth,
-                                                                                       download_bandwidth_unit,
-                                                                                       "Bps")
+            if device_emulation_settings:
+                network_simulator = self.get_attribute("_network_simulator")
+                # Simulate network performance change.
+                _, current_download_bandwidth = network_simulator.simulate_network_performance_change()
+                # Save the current state of the network simulator.
+                self._set_attribute("_network_simulator", network_simulator)
+                # Convert the current download bandwidth to Bytes per second.
+                download_bandwidth_unit = device_emulation_settings["download_bandwidth_unit"]
+                current_download_bandwidth_in_bytes_per_second = convert_network_bandwidth(current_download_bandwidth,
+                                                                                           download_bandwidth_unit,
+                                                                                           "Bps")
+            else:
+                current_download_bandwidth_in_bytes_per_second = 0.0  # TODO
             config.update({"client_current_download_bandwidth_in_bytes_per_second":
                                current_download_bandwidth_in_bytes_per_second})
         if "client_current_upload_bandwidth_in_bytes_per_second" in config:
             device_emulation_settings = self.get_attribute("_device_emulation_settings")
-            network_simulator = self.get_attribute("_network_simulator")
-            # Simulate network performance change.
-            current_upload_bandwidth, _ = network_simulator.simulate_network_performance_change()
-            # Save the current state of the network simulator.
-            self._set_attribute("_network_simulator", network_simulator)
-            # Convert the current upload bandwidth to Bytes per second.
-            upload_bandwidth_unit = device_emulation_settings["upload_bandwidth_unit"]
-            current_upload_bandwidth_in_bytes_per_second = convert_network_bandwidth(current_upload_bandwidth,
-                                                                                     upload_bandwidth_unit,
-                                                                                     "Bps")
+            if device_emulation_settings:
+                network_simulator = self.get_attribute("_network_simulator")
+                # Simulate network performance change.
+                current_upload_bandwidth, _ = network_simulator.simulate_network_performance_change()
+                # Save the current state of the network simulator.
+                self._set_attribute("_network_simulator", network_simulator)
+                # Convert the current upload bandwidth to Bytes per second.
+                upload_bandwidth_unit = device_emulation_settings["upload_bandwidth_unit"]
+                current_upload_bandwidth_in_bytes_per_second = convert_network_bandwidth(current_upload_bandwidth,
+                                                                                         upload_bandwidth_unit,
+                                                                                         "Bps")
+            else:
+                current_upload_bandwidth_in_bytes_per_second = 0.0  # TODO
             config.update({"client_current_upload_bandwidth_in_bytes_per_second":
                                current_upload_bandwidth_in_bytes_per_second})
         if "client_current_latency_in_milliseconds" in config:
             device_emulation_settings = self.get_attribute("_device_emulation_settings")
-            network_simulator = self.get_attribute("_network_simulator")
-            # Simulate network latency change.
-            current_latency = network_simulator.simulate_latency_change()
-            # Save the current state of the network simulator.
-            self._set_attribute("_network_simulator", network_simulator)
-            # Convert the current latency to milliseconds.
-            base_latency_unit = device_emulation_settings["base_latency_unit"]
-            current_latency_in_milliseconds = convert_duration(current_latency, base_latency_unit, "ms")
+            if device_emulation_settings:
+                network_simulator = self.get_attribute("_network_simulator")
+                # Simulate network latency change.
+                current_latency = network_simulator.simulate_latency_change()
+                # Save the current state of the network simulator.
+                self._set_attribute("_network_simulator", network_simulator)
+                # Convert the current latency to milliseconds.
+                base_latency_unit = device_emulation_settings["base_latency_unit"]
+                current_latency_in_milliseconds = convert_duration(current_latency, base_latency_unit, "ms")
+            else:
+                current_latency_in_milliseconds = 0.0  # TODO
             config.update({"client_current_latency_in_milliseconds": current_latency_in_milliseconds})
         # Return the properties requested by the server.
         return config
@@ -789,28 +812,31 @@ class FlowerNumpyClient(NumPyClient):
                                                             model: Model) -> float:
         # Get the necessary attributes.
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
-        network_simulator = self.get_attribute("_network_simulator")
-        # Simulate network performance change, latency change, and packet loss event occurrence.
-        current_upload_bandwidth, _ = network_simulator.simulate_network_performance_change()
-        current_latency = network_simulator.simulate_latency_change()
-        packet_loss_event_occurred = network_simulator.simulate_packet_loss_event()
-        # Save the current state of the network simulator.
-        self._set_attribute("_network_simulator", network_simulator)
-        # Get the packet loss rate of the device's network.
-        packet_loss_rate = device_emulation_settings["packet_loss_rate"]
-        # Set the dictionary of client attributes to be used for the estimation.
-        client_attributes = {"upload_bandwidth": current_upload_bandwidth,
-                             "upload_bandwidth_unit": device_emulation_settings["upload_bandwidth_unit"],
-                             "base_latency": current_latency,
-                             "base_latency_unit": device_emulation_settings["base_latency_unit"],
-                             "mss_ipv4_in_bytes": device_emulation_settings["mss_ipv4_in_bytes"],
-                             "server_location": device_emulation_settings["server_location"],
-                             "client_location": device_emulation_settings["client_location"]}
-        # Estimate the time needed to upload the local model parameters to the server.
-        initial_parameters_upload_time_in_seconds = calculate_initial_parameters_upload_time(client_attributes,
-                                                                                             model,
-                                                                                             packet_loss_event_occurred,
-                                                                                             packet_loss_rate)
+        if device_emulation_settings:
+            network_simulator = self.get_attribute("_network_simulator")
+            # Simulate network performance change, latency change, and packet loss event occurrence.
+            current_upload_bandwidth, _ = network_simulator.simulate_network_performance_change()
+            current_latency = network_simulator.simulate_latency_change()
+            packet_loss_event_occurred = network_simulator.simulate_packet_loss_event()
+            # Save the current state of the network simulator.
+            self._set_attribute("_network_simulator", network_simulator)
+            # Get the packet loss rate of the device's network.
+            packet_loss_rate = device_emulation_settings["packet_loss_rate"]
+            # Set the dictionary of client attributes to be used for the estimation.
+            client_attributes = {"upload_bandwidth": current_upload_bandwidth,
+                                 "upload_bandwidth_unit": device_emulation_settings["upload_bandwidth_unit"],
+                                 "base_latency": current_latency,
+                                 "base_latency_unit": device_emulation_settings["base_latency_unit"],
+                                 "mss_ipv4_in_bytes": device_emulation_settings["mss_ipv4_in_bytes"],
+                                 "server_location": device_emulation_settings["server_location"],
+                                 "client_location": device_emulation_settings["client_location"]}
+            # Estimate the time needed to upload the local model parameters to the server.
+            initial_parameters_upload_time_in_seconds = calculate_initial_parameters_upload_time(client_attributes,
+                                                                                                 model,
+                                                                                                 packet_loss_event_occurred,
+                                                                                                 packet_loss_rate)
+        else:
+            initial_parameters_upload_time_in_seconds = 0.0  # TODO
         # Return the estimated initial parameters upload time (in seconds).
         return initial_parameters_upload_time_in_seconds
 
@@ -872,30 +898,43 @@ class FlowerNumpyClient(NumPyClient):
                                            phase_config: dict) -> float:
         # Get the necessary attributes.
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
-        network_simulator = self.get_attribute("_network_simulator")
-        # Simulate network performance change, latency change, and packet loss event occurrence.
-        _, current_download_bandwidth = network_simulator.simulate_network_performance_change()
-        current_latency = network_simulator.simulate_latency_change()
-        packet_loss_event_occurred = network_simulator.simulate_packet_loss_event()
-        # Save the current state of the network simulator.
-        self._set_attribute("_network_simulator", network_simulator)
-        # Get the packet loss rate of the device's network.
-        packet_loss_rate = device_emulation_settings["packet_loss_rate"]
-        # Set the dictionary of client attributes to be used for the estimation.
-        client_attributes = {"download_bandwidth": current_download_bandwidth,
-                             "download_bandwidth_unit": device_emulation_settings["download_bandwidth_unit"],
-                             "base_latency": current_latency,
-                             "base_latency_unit": device_emulation_settings["base_latency_unit"],
-                             "mss_ipv4_in_bytes": device_emulation_settings["mss_ipv4_in_bytes"],
-                             "server_location": device_emulation_settings["server_location"],
-                             "client_location": device_emulation_settings["client_location"]}
-        # Estimate the time needed to download the global model parameters and instruction from the server.
-        download_time_in_seconds, client_down_metrics = calculate_download_time(client_attributes,
-                                                                                phase,
-                                                                                global_parameters,
-                                                                                phase_config,
-                                                                                packet_loss_event_occurred,
-                                                                                packet_loss_rate)
+        if device_emulation_settings:
+            network_simulator = self.get_attribute("_network_simulator")
+            # Simulate network performance change, latency change, and packet loss event occurrence.
+            _, current_download_bandwidth = network_simulator.simulate_network_performance_change()
+            current_latency = network_simulator.simulate_latency_change()
+            packet_loss_event_occurred = network_simulator.simulate_packet_loss_event()
+            # Save the current state of the network simulator.
+            self._set_attribute("_network_simulator", network_simulator)
+            # Get the packet loss rate of the device's network.
+            packet_loss_rate = device_emulation_settings["packet_loss_rate"]
+            # Set the dictionary of client attributes to be used for the estimation.
+            client_attributes = {"download_bandwidth": current_download_bandwidth,
+                                 "download_bandwidth_unit": device_emulation_settings["download_bandwidth_unit"],
+                                 "base_latency": current_latency,
+                                 "base_latency_unit": device_emulation_settings["base_latency_unit"],
+                                 "mss_ipv4_in_bytes": device_emulation_settings["mss_ipv4_in_bytes"],
+                                 "server_location": device_emulation_settings["server_location"],
+                                 "client_location": device_emulation_settings["client_location"]}
+            # Estimate the time needed to download the global model parameters and instruction from the server.
+            download_time_in_seconds, client_down_metrics = calculate_download_time(client_attributes,
+                                                                                    phase,
+                                                                                    global_parameters,
+                                                                                    phase_config,
+                                                                                    packet_loss_event_occurred,
+                                                                                    packet_loss_rate)
+        else:
+            # TODO
+            download_time_in_seconds = 0.0
+            client_down_metrics = {"np_m": 0,
+                                   "fpp_m": 0,
+                                   "is_{0}_i".format(phase): 0,
+                                   "bw_down_i": 0,
+                                   "ack_down": 0,
+                                   "rtt_down_i": 0,
+                                   "num_packets": 0,
+                                   "num_lost_packets": 0,
+                                   "retransmission_time_in_seconds": 0}
         # Save the client download metrics to file.
         if not down_metrics_file.is_file():
             # Append the header line.
@@ -910,10 +949,13 @@ class FlowerNumpyClient(NumPyClient):
                                             download_time_in_seconds: float) -> float:
         # Get the necessary attributes.
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
-        # Set the dictionary of client attributes to be used for the estimation.
-        client_attributes = {"mpc_recv_i": device_emulation_settings["mean_power_consumption_data_reception_in_watts"]}
-        # Estimate the energy consumed by this client during the download event of round r.
-        download_energy_in_joules = calculate_download_energy(client_attributes, download_time_in_seconds)
+        if device_emulation_settings:
+            # Set the dictionary of client attributes to be used for the estimation.
+            client_attributes = {"mpc_recv_i": device_emulation_settings["mean_power_consumption_data_reception_in_watts"]}
+            # Estimate the energy consumed by this client during the download event of round r.
+            download_energy_in_joules = calculate_download_energy(client_attributes, download_time_in_seconds)
+        else:
+            download_energy_in_joules = 0.0  # TODO
         # Return the estimated download energy (in joules).
         return download_energy_in_joules
 
@@ -925,30 +967,41 @@ class FlowerNumpyClient(NumPyClient):
                                          local_parameters: NDArrays = None) -> float:
         # Get the necessary attributes.
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
-        network_simulator = self.get_attribute("_network_simulator")
-        # Simulate network performance change, latency change, and packet loss event occurrence.
-        current_upload_bandwidth, _ = network_simulator.simulate_network_performance_change()
-        current_latency = network_simulator.simulate_latency_change()
-        packet_loss_event_occurred = network_simulator.simulate_packet_loss_event()
-        # Save the current state of the network simulator.
-        self._set_attribute("_network_simulator", network_simulator)
-        # Get the packet loss rate of the device's network.
-        packet_loss_rate = device_emulation_settings["packet_loss_rate"]
-        # Set the dictionary of client attributes to be used for the estimation.
-        client_attributes = {"upload_bandwidth": current_upload_bandwidth,
-                             "upload_bandwidth_unit": device_emulation_settings["upload_bandwidth_unit"],
-                             "base_latency": current_latency,
-                             "base_latency_unit": device_emulation_settings["base_latency_unit"],
-                             "mss_ipv4_in_bytes": device_emulation_settings["mss_ipv4_in_bytes"],
-                             "server_location": device_emulation_settings["server_location"],
-                             "client_location": device_emulation_settings["client_location"]}
-        # Estimate the time needed to upload the local model parameters and metrics to the server.
-        upload_time_in_seconds, client_up_metrics = calculate_upload_time(client_attributes,
-                                                                          phase,
-                                                                          phase_metrics,
-                                                                          packet_loss_event_occurred,
-                                                                          packet_loss_rate,
-                                                                          local_parameters)
+        if device_emulation_settings:
+            network_simulator = self.get_attribute("_network_simulator")
+            # Simulate network performance change, latency change, and packet loss event occurrence.
+            current_upload_bandwidth, _ = network_simulator.simulate_network_performance_change()
+            current_latency = network_simulator.simulate_latency_change()
+            packet_loss_event_occurred = network_simulator.simulate_packet_loss_event()
+            # Save the current state of the network simulator.
+            self._set_attribute("_network_simulator", network_simulator)
+            # Get the packet loss rate of the device's network.
+            packet_loss_rate = device_emulation_settings["packet_loss_rate"]
+            # Set the dictionary of client attributes to be used for the estimation.
+            client_attributes = {"upload_bandwidth": current_upload_bandwidth,
+                                 "upload_bandwidth_unit": device_emulation_settings["upload_bandwidth_unit"],
+                                 "base_latency": current_latency,
+                                 "base_latency_unit": device_emulation_settings["base_latency_unit"],
+                                 "mss_ipv4_in_bytes": device_emulation_settings["mss_ipv4_in_bytes"],
+                                 "server_location": device_emulation_settings["server_location"],
+                                 "client_location": device_emulation_settings["client_location"]}
+            # Estimate the time needed to upload the local model parameters and metrics to the server.
+            upload_time_in_seconds, client_up_metrics = calculate_upload_time(client_attributes,
+                                                                              phase,
+                                                                              phase_metrics,
+                                                                              packet_loss_event_occurred,
+                                                                              packet_loss_rate,
+                                                                              local_parameters)
+        else:
+            # TODO
+            upload_time_in_seconds = 0.0
+            client_up_metrics = {"ms_{0}_i".format(phase): 0,
+                                 "bw_up_i": 0,
+                                 "ack_up": 0,
+                                 "rtt_up_i": 0,
+                                 "num_packets": 0,
+                                 "num_lost_packets": 0,
+                                 "retransmission_time_in_seconds": 0}
         # Save the client upload metrics to file.
         if not up_metrics_file.is_file():
             # Append the header line.
@@ -963,12 +1016,46 @@ class FlowerNumpyClient(NumPyClient):
                                           upload_time_in_seconds: float) -> float:
         # Get the necessary attributes.
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
-        # Set the dictionary of client attributes to be used for the estimation.
-        client_attributes = {"mpc_send_i": device_emulation_settings["mean_power_consumption_data_transmission_in_watts"]}
-        # Estimate the energy consumed by this client during the upload event of round r.
-        upload_energy_in_joules = calculate_upload_energy(client_attributes, upload_time_in_seconds)
+        if device_emulation_settings:
+            # Set the dictionary of client attributes to be used for the estimation.
+            client_attributes = {"mpc_send_i": device_emulation_settings["mean_power_consumption_data_transmission_in_watts"]}
+            # Estimate the energy consumed by this client during the upload event of round r.
+            upload_energy_in_joules = calculate_upload_energy(client_attributes, upload_time_in_seconds)
+        else:
+            upload_energy_in_joules = 0.0  # TODO
         # Return the estimated upload energy (in joules).
         return upload_energy_in_joules
+
+    @staticmethod
+    def _resolve_device_emulation_settings(device_emulation_settings: dict | None) -> dict:
+        """
+        Ensure that all required device emulation settings are available.
+        If missing, they are inferred from the real system hardware.
+        """
+        if not device_emulation_settings:
+            device_emulation_settings = {}
+            # Get base system info.
+            node_info = get_cpu_and_memory_info()
+            # Derive CPU data.
+            num_cores = cpu_count(logical=False)
+            freq_info = cpu_freq()
+            cpu_freq_hz = (freq_info.current * 1e6) if freq_info else 2.5e9  # fallback 2.5 GHz
+            # Define default ranges for FLOPs-per-cycle-per-core (training/inference).
+            fpocc_defaults = {"fpocc_training": [0.5, 1.0],
+                              "fpocc_inference": [0.4, 0.9]}
+            # Build a complete settings dict.
+            defaults = {"peak_memory_bandwidth_in_bytes_per_second": node_info.get("peak_memory_bandwidth_in_GBps", 0) * 1e9,
+                        "cpu_num_cores": num_cores,
+                        "cpu_frequency_in_hertz": cpu_freq_hz,
+                        "fpocc_training": fpocc_defaults["fpocc_training"],
+                        "fpocc_inference": fpocc_defaults["fpocc_inference"],
+                        "peak_memory_bandwidth_in_gigabytes_per_second": node_info.get("peak_memory_bandwidth_in_GBps", 0),
+                        "peak_cpu_gflops": node_info.get("theoretical_cpu_gflops", 0)}
+            # Merge user-specified and real defaults.
+            for key, value in defaults.items():
+                device_emulation_settings.setdefault(key, value)
+        # Return the 'resolved' device_emulation_settings.
+        return device_emulation_settings
 
     def _training_task(self,
                        global_parameters: NDArrays,
@@ -1027,6 +1114,8 @@ class FlowerNumpyClient(NumPyClient):
         # Get the necessary attributes.
         client_id = self.get_attribute("_client_id")
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
+        # Resolve the device emulation settings (in case a device is not being simulated).
+        device_emulation_settings = self._resolve_device_emulation_settings(device_emulation_settings)
         # Get the device's memory bandwidth peak (in bytes per seconds).
         device_peak_memory_bandwidth_in_Bps = device_emulation_settings["peak_memory_bandwidth_in_bytes_per_second"]
         # Initializations.
@@ -1194,10 +1283,13 @@ class FlowerNumpyClient(NumPyClient):
                                                computation_time_in_seconds: float) -> float:
         # Get the necessary attributes.
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
-        # Set the dictionary of client attributes to be used for the estimation.
-        client_attributes = {"mpc_comp_i": device_emulation_settings["mean_power_consumption_heavy_computational_load_in_watts"]}
-        # Estimate the energy consumed by this client during the computation event of round r.
-        computation_energy_in_joules = calculate_computation_energy(client_attributes, computation_time_in_seconds)
+        if device_emulation_settings:
+            # Set the dictionary of client attributes to be used for the estimation.
+            client_attributes = {"mpc_comp_i": device_emulation_settings["mean_power_consumption_heavy_computational_load_in_watts"]}
+            # Estimate the energy consumed by this client during the computation event of round r.
+            computation_energy_in_joules = calculate_computation_energy(client_attributes, computation_time_in_seconds)
+        else:
+            computation_energy_in_joules = 0.0  # TODO
         # Return the estimated computation energy (in joules).
         return computation_energy_in_joules
 
@@ -1367,10 +1459,13 @@ class FlowerNumpyClient(NumPyClient):
         # Calculate the total energy consumed by this client during the training phase event of round r.
         training_energy_in_joules = download_energy_in_joules + computation_energy_in_joules + upload_energy_in_joules
         # Append the mean power consumptions to the training metrics.
-        mpc_idle_i = device_emulation_settings["mean_power_consumption_idle_in_watts"]
-        mpc_recv_i = device_emulation_settings["mean_power_consumption_data_reception_in_watts"]
-        mpc_comp_i = device_emulation_settings["mean_power_consumption_heavy_computational_load_in_watts"]
-        mpc_send_i = device_emulation_settings["mean_power_consumption_data_transmission_in_watts"]
+        if device_emulation_settings:
+            mpc_idle_i = device_emulation_settings["mean_power_consumption_idle_in_watts"]
+            mpc_recv_i = device_emulation_settings["mean_power_consumption_data_reception_in_watts"]
+            mpc_comp_i = device_emulation_settings["mean_power_consumption_heavy_computational_load_in_watts"]
+            mpc_send_i = device_emulation_settings["mean_power_consumption_data_transmission_in_watts"]
+        else:
+            mpc_idle_i, mpc_recv_i, mpc_comp_i, mpc_send_i = 0.0, 0.0, 0.0, 0.0  # TODO
         training_metrics.update({"mpc_idle_i": mpc_idle_i,
                                  "mpc_recv_i": mpc_recv_i,
                                  "mpc_comp_i": mpc_comp_i,
@@ -1513,6 +1608,8 @@ class FlowerNumpyClient(NumPyClient):
         # Get the necessary attributes.
         client_id = self.get_attribute("_client_id")
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
+        # Resolve the device emulation settings (in case a device is not being simulated).
+        device_emulation_settings = self._resolve_device_emulation_settings(device_emulation_settings)
         # Get the device's memory bandwidth peak (in bytes per seconds).
         device_peak_memory_bandwidth_in_Bps = device_emulation_settings["peak_memory_bandwidth_in_bytes_per_second"]
         # Initializations.
@@ -1833,10 +1930,13 @@ class FlowerNumpyClient(NumPyClient):
         # Calculate the total energy consumed by this client during the testing phase event of round r.
         testing_energy_in_joules = download_energy_in_joules + computation_energy_in_joules + upload_energy_in_joules
         # Append the mean power consumptions to the testing metrics.
-        mpc_idle_i = device_emulation_settings["mean_power_consumption_idle_in_watts"]
-        mpc_recv_i = device_emulation_settings["mean_power_consumption_data_reception_in_watts"]
-        mpc_comp_i = device_emulation_settings["mean_power_consumption_heavy_computational_load_in_watts"]
-        mpc_send_i = device_emulation_settings["mean_power_consumption_data_transmission_in_watts"]
+        if device_emulation_settings:
+            mpc_idle_i = device_emulation_settings["mean_power_consumption_idle_in_watts"]
+            mpc_recv_i = device_emulation_settings["mean_power_consumption_data_reception_in_watts"]
+            mpc_comp_i = device_emulation_settings["mean_power_consumption_heavy_computational_load_in_watts"]
+            mpc_send_i = device_emulation_settings["mean_power_consumption_data_transmission_in_watts"]
+        else:
+            mpc_idle_i, mpc_recv_i, mpc_comp_i, mpc_send_i = 0.0, 0.0, 0.0, 0.0  # TODO
         testing_metrics.update({"mpc_idle_i": mpc_idle_i,
                                 "mpc_recv_i": mpc_recv_i,
                                 "mpc_comp_i": mpc_comp_i,

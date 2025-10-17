@@ -4,6 +4,7 @@ from numpy.random import default_rng
 from pathlib import Path
 from time import perf_counter, sleep
 from threading import BrokenBarrierError
+from traceback import format_exc
 
 from metacs_fl.client_launcher.flower_client_launcher import FlowerClientLauncher
 from metacs_fl.devices.edge_devices import generate_edge_devices
@@ -190,9 +191,10 @@ class FlowerExecutor:
                                                                                   current_execution,
                                                                                   current_execution_devices)
         # Append the client resources to the 'clients_resources.csv' file.
-        root_output_folder = Path(client_personalized_settings["_root_output_folder"])
-        device_emulation_settings = client_personalized_settings["_device_emulation_settings"]
-        self._append_client_resources_to_file(client_id, root_output_folder, device_emulation_settings)
+        if "_device_emulation_settings" in client_personalized_settings:
+            root_output_folder = Path(client_personalized_settings["_root_output_folder"])
+            device_emulation_settings = client_personalized_settings["_device_emulation_settings"]
+            self._append_client_resources_to_file(client_id, root_output_folder, device_emulation_settings)
         # Instantiate the flower client launcher.
         cpu_cores_available = get_cpu_cores_available()
         fcl = FlowerClientLauncher(client_id,
@@ -224,13 +226,14 @@ class FlowerExecutor:
             client_launcher.launch_client()
         except Exception as e:
             print("Error in client {0}: {1}".format(client_id, e))
-            # Still signal the barrier to avoid deadlock.
+            print(format_exc())
             try:
                 dataset_loaded_barrier.wait()
             except BrokenBarrierError:
                 print("[Client {0}] Barrier broken.".format(client_id))
-            except Exception as e:
-                print("[Client {0}] Barrier wait failed: {1}".format(client_id, e))
+            except Exception as e2:
+                print("[Client {0}] Barrier wait failed: {1}".format(client_id, e2))
+                print(format_exc())
 
     def execute_fl_with_flower(self) -> None:
         executions_to_execute = []

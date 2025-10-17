@@ -588,21 +588,22 @@ def load_model(model_settings: dict,
             case "DenseNet121":
                 model = load_densenet_121(model_provider_specific_settings)
         # Compile the Kera's model.
-        loss_weights = model_provider_settings["loss_weights"]
-        weighted_metrics = model_provider_settings["weighted_metrics"]
-        run_eagerly = model_provider_settings["run_eagerly"]
-        steps_per_execution = model_provider_settings["steps_per_execution"]
-        jit_compile = model_provider_settings["jit_compile"]
-        auto_scale_loss = model_provider_settings["auto_scale_loss"]
-        model.compile(optimizer=optimizer,
-                      loss=loss_function,
-                      loss_weights=loss_weights,
-                      metrics=metrics,
-                      weighted_metrics=weighted_metrics,
-                      run_eagerly=run_eagerly,
-                      steps_per_execution=steps_per_execution,
-                      jit_compile=jit_compile,
-                      auto_scale_loss=auto_scale_loss)
+        if "Sentiment140" in model_name:
+            # Simpler compile for text-based models.
+            model.compile(optimizer="adam",
+                          loss="binary_crossentropy",
+                          metrics=metrics)
+        else:
+            # Full compile for image models.
+            model.compile(optimizer=optimizer,
+                          loss=loss_function,
+                          metrics=metrics,
+                          loss_weights=model_provider_settings.get("loss_weights", None),
+                          weighted_metrics=model_provider_settings.get("weighted_metrics", None),
+                          run_eagerly=model_provider_settings.get("run_eagerly", False),
+                          steps_per_execution=model_provider_settings.get("steps_per_execution", 1),
+                          jit_compile=model_provider_settings.get("jit_compile", False),
+                          auto_scale_loss=model_provider_settings.get("auto_scale_loss", False))
         # Get the model's metrics names.
         metrics_names = [metric.name for metric in vars(model)["_compile_metrics"]._user_metrics]
     return model, metrics_names

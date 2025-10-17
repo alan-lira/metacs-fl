@@ -23,7 +23,7 @@ from random import random
 from re import escape, findall, search
 from signal import SIGINT, SIGKILL, SIGTERM
 from socket import AF_INET, AF_INET6, create_connection, gaierror, SOCK_DGRAM, socket, timeout
-from subprocess import CalledProcessError, CompletedProcess, DEVNULL, PIPE, Popen, run
+from subprocess import CalledProcessError, CompletedProcess, check_output, DEVNULL, PIPE, Popen, run
 from tensorflow import int32, random as tf_random
 from time import time, sleep
 from typing import List
@@ -616,32 +616,30 @@ def scale_measure(measure: float,
 
 
 def get_cpu_peak_frequency(unit: str = "Hz") -> float:
-    unit_divisors = {"Hz": 1, "MHz": 1e6, "GHz": 1e9}
-    if unit not in unit_divisors:
-        raise ValueError("Unsupported unit '{0}'. Supported units: {1}".format(unit, ', '.join(unit_divisors.keys())))
-    # Get the peak frequency for all CPU cores using pathlib.
-    cpu_peak_frequencies_in_hertz = []
-    cpu_dir = Path("/sys/devices/system/cpu/")
-    for cpu in cpu_dir.iterdir():
-        if cpu.name.startswith("cpu") and (cpu / "cpufreq").is_dir():
-            max_freq_file = cpu / "cpufreq" / "cpuinfo_max_freq"
-            try:
-                with max_freq_file.open("r") as f:
-                    max_freq_khz = int(f.read().strip())
-                    max_freq_hz = max_freq_khz * 1000
-                    cpu_peak_frequencies_in_hertz.append(max_freq_hz)
-            except (FileNotFoundError, PermissionError, OSError):
-                # CPU might be offline, isolated, or resource busy...
-                continue
-    if not cpu_peak_frequencies_in_hertz:
-        raise RuntimeError("Could not retrieve peak CPU frequencies.")
-    # Get the highest frequency among all cores (max of the peak frequencies).
-    cpu_peak_frequency_in_hertz = max(cpu_peak_frequencies_in_hertz)
-    # Convert from Hz to the requested unit.
-    divisor = unit_divisors[unit]
-    cpu_peak_frequency = cpu_peak_frequency_in_hertz / divisor
-    # Return the CPU's peak frequency.
-    return cpu_peak_frequency
+    default_freq_ghz = 3.0  # Conservative default.
+    is_wsl = is_wsl2()
+    # Try 'lscpu' first.
+    output = safe_run_command(["lscpu"])
+    if output:
+        # Try parsing the "CPU max MHz" line.
+        match = search(r"CPU max MHz:\s+([\d.]+)", output)
+        if match:
+            freq_mhz = float(match.group(1))
+            freq_hz = freq_mhz * 1e6
+            return freq_hz if unit == "Hz" else freq_hz / 1e9
+        # Fallback: use "MHz" if only average is available.
+        match = search(r"CPU MHz:\s+([\d.]+)", output)
+        if match:
+            freq_mhz = float(match.group(1))
+            freq_hz = freq_mhz * 1e6
+            return freq_hz if unit == "Hz" else freq_hz / 1e9
+    # WSL2 or failure fallback.
+    if is_wsl:
+        print("[Warning] WSL2 detected — unable to get real CPU peak frequency. Using default 3.0 GHz.")
+    else:
+        print("[Warning] Could not retrieve CPU frequency via lscpu. Using default 3.0 GHz.")
+    freq_hz = default_freq_ghz * 1e9
+    return freq_hz if unit == "Hz" else default_freq_ghz
 
 
 def get_cpu_instructions_set() -> list:
@@ -739,15 +737,41 @@ def get_num_memory_channels_from_known_cpus_list(cpu_model: str) -> int:
     return default_num_memory_channels
 
 
+def is_wsl2() -> bool:
+    try:
+        return "microsoft" in Path("/proc/version").read_text().lower()
+    except Exception:
+        return False
+
+
+def safe_run_command(cmd: list[str]) -> str | None:
+    try:
+        return check_output(cmd, text=True).strip()
+    except CalledProcessError:
+        return None
+    except FileNotFoundError:
+        return None
+
+
 def get_memory_speed_in_mtps() -> int:
-    # Get the memory speed in MT/s using the 'dmidecode' command.
-    dmidecode_args = ["sudo", "dmidecode", "-t", "memory"]
-    dmidecode_out = run_command(command_args=dmidecode_args, check=True, capture_output=True, text=True).stdout
-    matches = findall(r"Configured Memory Speed:\s+(\d+)\s+MT/s", dmidecode_out)
-    speeds = list(map(int, matches))
-    default_memory_speed = 2133  # Fallback: 2133 (most common for DDR4).
-    memory_speed_in_MTps = max(speeds) if speeds else default_memory_speed
-    return memory_speed_in_MTps
+    default_memory_speed = 2133  # Common DDR4 baseline.
+    # Handle WSL2 limitation.
+    if is_wsl2():
+        print("[Warning] WSL2 detected — cannot access hardware info via dmidecode.")
+        return default_memory_speed
+    # Try running dmidecode safely.
+    output = safe_run_command(["sudo", "dmidecode", "-t", "memory"])
+    if not output:
+        print("[Warning] 'dmidecode' unavailable or failed — using default memory speed.")
+        return default_memory_speed
+    # Parse memory speed values.
+    matches = findall(r"Configured Memory Speed:\s+(\d+)\s+MT/s", output)
+    if matches:
+        speeds = list(map(int, matches))
+        memory_speed_in_MTps = max(speeds)
+        return memory_speed_in_MTps
+    print("[Warning] Could not parse memory speed from dmidecode output — using default value.")
+    return default_memory_speed
 
 
 def get_cpu_and_memory_info() -> dict:

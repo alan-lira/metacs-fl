@@ -290,7 +290,8 @@ def _reshape_images(x: NDArray,
 def _pre_process_sentiment140_text_dataset(texts: NDArray,
                                            labels: NDArray,
                                            vocab_size: int,
-                                           max_length: int) -> NDArray:
+                                           max_length: int,
+                                           tokenizer = None) -> tuple:
     # Convert to list and handle empty texts.
     texts = list(texts) if not isinstance(texts, list) else texts
     # Filter out None, empty, or whitespace-only texts.
@@ -303,11 +304,12 @@ def _pre_process_sentiment140_text_dataset(texts: NDArray,
     if not valid_texts:
         print("Warning: No valid texts found after filtering")
         if labels is not None:
-            return array([]), array([])
-        return array([])
-    # Initialize tokenizer (you might want to make this global or pass it as parameter).
-    tokenizer = Tokenizer(num_words=vocab_size, oov_token="<OOV>")
-    tokenizer.fit_on_texts(valid_texts)
+            return array([]), array([]), tokenizer
+        return array([]), None, tokenizer
+    # Create and fit tokenizer if not provided.
+    if tokenizer is None:
+        tokenizer = Tokenizer(num_words=vocab_size, oov_token="<OOV>")
+        tokenizer.fit_on_texts(valid_texts)
     # Convert texts to sequences.
     sequences = tokenizer.texts_to_sequences(valid_texts)
     # Filter out empty sequences (texts that become empty after tokenization).
@@ -320,18 +322,19 @@ def _pre_process_sentiment140_text_dataset(texts: NDArray,
     if not non_empty_sequences:
         print("All sequences are empty after tokenization!")
         if labels is not None:
-            return array([]), array([])
-        return array([])
+            return array([]), array([]), tokenizer
+        return array([]), None, tokenizer
     # Pad sequences.
     padded_sequences = pad_sequences(non_empty_sequences, maxlen=max_length, padding="post")
+    # Process labels if provided.
+    binary_labels = None
     if labels is not None:
         # Filter labels to match the non-empty sequences.
         labels_array = array(labels)
         valid_labels = labels_array[non_empty_indices]
         # Convert labels from Sentiment140 format (0,4) to binary (0,1).
         binary_labels = where(valid_labels == 4, 1, 0)
-        return padded_sequences, binary_labels
-    return padded_sequences
+    return padded_sequences, binary_labels, tokenizer
 
 
 def _pre_process_image_dataset(dataset: str,
@@ -420,10 +423,18 @@ def load_dataset(client_id: int,
         # Pre-process the text dataset (sentiment140).
         vocab_size = model_provider_specific_settings["vocab_size"]
         max_length = model_provider_specific_settings["max_length"]
-        if len(x_train) > 0:
-            x_train, y_train = _pre_process_sentiment140_text_dataset(x_train, y_train, vocab_size, max_length)
-        if len(x_test) > 0:
-            x_test, y_test = _pre_process_sentiment140_text_dataset(x_test, y_test, vocab_size, max_length)
+        # Pre-process the training data (fits the tokenizer).
+        x_train, y_train, tokenizer = _pre_process_sentiment140_text_dataset(x_train,
+                                                                             y_train,
+                                                                             vocab_size,
+                                                                             max_length,
+                                                                             tokenizer=None)
+        # Pre-process the test data (reuse the same tokenizer).
+        x_test, y_test, _ = _pre_process_sentiment140_text_dataset(x_test,
+                                                                   y_test,
+                                                                   vocab_size,
+                                                                   max_length,
+                                                                   tokenizer=tokenizer)
     elif dataset in ["uoft-cs/cifar10", "uoft-cs/cifar100", "ylecun/mnist", "zalando-datasets/fashion_mnist",
                      "zh-plus/tiny-imagenet", "benjamin-paine/imagenet-1k", "ufldl-stanford/svhn", "flwrlabs/cinic10"]:
         # Pre-process the image dataset.
