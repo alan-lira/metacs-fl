@@ -597,7 +597,7 @@ def balanced_adjustment_strategy(selected_clients: dict,
     if schedule_to_all_clients:
         for client_info in selected_clients.values():
             if client_info["client_num_tasks_scheduled"] == 0:
-                capacities = client_info[f"client_task_assignment_capacities_{phase}"]
+                capacities = client_info["client_task_assignment_capacities_{0}".format(phase)]
                 client_info["client_num_tasks_scheduled"] = min(c for c in capacities if c > 0)
     if not schedule_to_all_clients:
         selected_clients = {cid: info for cid, info in selected_clients.items()
