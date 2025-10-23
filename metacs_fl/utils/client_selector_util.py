@@ -1,7 +1,7 @@
 from bisect import bisect_left
 from numpy import array
 from numpy.linalg import linalg
-from random import choice, sample
+from random import sample
 from time import time
 
 
@@ -277,6 +277,188 @@ def add_tasks_to_a_random_client(selected_clients: dict,
     return 0
 
 
+def distribute_remaining_tasks_balanced(selected_clients: dict,
+                                        client_capacities_map: dict,
+                                        remaining_tasks: int,
+                                        schedule_to_all_clients: bool) -> None:
+    while remaining_tasks != 0:
+        if remaining_tasks > 0:
+            # Add tasks to the most under-utilized client that can accept more.
+            candidates = []
+            for client_id, client_info in selected_clients.items():
+                capacities = client_capacities_map[client_id]
+                current = client_info["client_num_tasks_scheduled"]
+                max_capacity = capacities[-1]
+                if current < max_capacity:
+                    # Calculate utilization ratio (current/max).
+                    utilization = current / max_capacity if max_capacity > 0 else 0
+                    # Find next capacity.
+                    next_capacity = find_next_capacity(capacities, current)
+                    if next_capacity is not None:
+                        task_increase = next_capacity - current
+                        candidates.append((client_id, utilization, task_increase))
+            if not candidates:
+                break
+            # Prefer clients with the lowest utilization (most under-utilized).
+            candidates.sort(key=lambda x: (x[1], -x[2]))  # Low utilization, high capacity increases.
+            best_client_id, _, task_increase = candidates[0]
+            # Apply the increase.
+            current = selected_clients[best_client_id]["client_num_tasks_scheduled"]
+            next_capacity = find_next_capacity(client_capacities_map[best_client_id], current)
+            selected_clients[best_client_id]["client_num_tasks_scheduled"] = next_capacity
+            remaining_tasks -= task_increase
+        else:  # remaining_tasks < 0
+            # Remove tasks from the most over-utilized client that can reduce.
+            candidates = []
+            for client_id, client_info in selected_clients.items():
+                capacities = client_capacities_map[client_id]
+                current = client_info["client_num_tasks_scheduled"]
+                min_capacity = capacities[0]
+                can_reduce = current > min_capacity
+                if schedule_to_all_clients:
+                    can_reduce = can_reduce and current > 1
+                if can_reduce:
+                    # Calculate utilization ratio.
+                    max_capacity = capacities[-1]
+                    utilization = current / max_capacity if max_capacity > 0 else 1.0
+                    # Find previous capacity.
+                    prev_capacity = find_previous_capacity(capacities, current)
+                    if prev_capacity is not None:
+                        task_decrease = current - prev_capacity
+                        candidates.append((client_id, utilization, task_decrease))
+            if not candidates:
+                break
+            # Prefer clients with the highest utilization (most over-utilized).
+            candidates.sort(key=lambda x: (-x[1], -x[2]))  # High utilization, high capacity decreases
+            best_client_id, _, task_decrease = candidates[0]
+            # Apply the decrease.
+            current = selected_clients[best_client_id]["client_num_tasks_scheduled"]
+            prev_capacity = find_previous_capacity(client_capacities_map[best_client_id], current)
+            selected_clients[best_client_id]["client_num_tasks_scheduled"] = prev_capacity
+            remaining_tasks += task_decrease
+
+
+def adjust_capacity_weighted_distribution(provisional_schedule: dict,
+                                          selected_clients: dict,
+                                          client_capacities_map: dict,
+                                          remaining_tasks: int) -> None:
+    if remaining_tasks > 0:
+        # Distribute extra tasks to clients that can accept more.
+        clients_by_spare_capacity = []
+        for client_id, scheduled_tasks in provisional_schedule.items():
+            capacities = client_capacities_map[client_id]
+            max_capacity = max(capacities)
+            spare_capacity = max_capacity - scheduled_tasks
+            if spare_capacity > 0:
+                # Find the actual next valid capacity.
+                next_capacity = find_next_capacity(capacities, scheduled_tasks)
+                if next_capacity is not None:
+                    actual_increase = next_capacity - scheduled_tasks
+                    clients_by_spare_capacity.append((client_id, spare_capacity, actual_increase, next_capacity))
+        # Sort by spare capacity (descending) and then by actual increase needed (ascending).
+        clients_by_spare_capacity.sort(key=lambda x: (-x[1], x[2]))
+        for client_id, _, actual_increase, next_capacity in clients_by_spare_capacity:
+            if actual_increase <= remaining_tasks:
+                provisional_schedule[client_id] = next_capacity
+                remaining_tasks -= actual_increase
+                if remaining_tasks <= 0:
+                    break
+    else:  # remaining_tasks < 0.
+        # Remove excess tasks from clients that can reduce.
+        tasks_to_remove = -remaining_tasks
+        clients_by_current_load = []
+        for client_id, scheduled_tasks in provisional_schedule.items():
+            capacities = client_capacities_map[client_id]
+            min_capacity = min(capacities)
+            if scheduled_tasks > min_capacity:
+                # Find the actual previous valid capacity.
+                prev_capacity = find_previous_capacity(capacities, scheduled_tasks)
+                if prev_capacity is not None:
+                    actual_decrease = scheduled_tasks - prev_capacity
+                    # Calculate current utilization for prioritization.
+                    max_capacity = max(capacities)
+                    utilization = scheduled_tasks / max_capacity if max_capacity > 0 else 1.0
+                    clients_by_current_load.append((client_id, utilization, actual_decrease, prev_capacity))
+        # Sort by utilization (descending) - remove from most utilized first.
+        clients_by_current_load.sort(key=lambda x: (-x[1], x[2]))
+        for client_id, _, actual_decrease, prev_capacity in clients_by_current_load:
+            if actual_decrease <= tasks_to_remove:
+                provisional_schedule[client_id] = prev_capacity
+                tasks_to_remove -= actual_decrease
+                if tasks_to_remove <= 0:
+                    break
+
+
+def find_closest_capacity(capacities: list,
+                          target: int) -> int:
+    return min(capacities, key=lambda x: abs(x - target))
+
+
+def distribute_tasks_capacity_weighted(selected_clients: dict,
+                                       client_capacities_map: dict,
+                                       num_tasks_to_schedule: int) -> None:
+    if not selected_clients:
+        return
+    # Calculate total capacity weight (sum of max capacities).
+    total_max_capacity = sum(max(capacities) for capacities in client_capacities_map.values())
+    if total_max_capacity == 0:
+        # Fallback: assign minimum tasks to all clients.
+        for client_id, client_info in selected_clients.items():
+            capacities = client_capacities_map[client_id]
+            client_info["client_num_tasks_scheduled"] = min(capacities)
+        return
+    # First pass: assign tasks proportionally to max capacity.
+    remaining_tasks = num_tasks_to_schedule
+    provisional_schedule = {}
+    for client_id, client_info in selected_clients.items():
+        capacities = client_capacities_map[client_id]
+        max_capacity = max(capacities)
+        # Calculate proportional allocation.
+        proportional_share = (max_capacity / total_max_capacity) * num_tasks_to_schedule
+        target_tasks = max(min(capacities), int(proportional_share))
+        # Find the closest valid capacity.
+        closest_capacity = find_closest_capacity(capacities, target_tasks)
+        provisional_schedule[client_id] = closest_capacity
+        remaining_tasks -= closest_capacity
+    # Second pass: adjust for remaining tasks.
+    if remaining_tasks != 0:
+        adjust_capacity_weighted_distribution(provisional_schedule,
+                                              selected_clients,
+                                              client_capacities_map,
+                                              remaining_tasks)
+    # Apply the final schedule.
+    for client_id, task_count in provisional_schedule.items():
+        selected_clients[client_id]["client_num_tasks_scheduled"] = task_count
+
+
+def balanced_initial_schedule(selected_clients: dict,
+                              client_capacities_map: dict,
+                              num_tasks_to_schedule: int,
+                              schedule_to_all_clients: bool) -> None:
+    if schedule_to_all_clients:
+        # Use balanced distribution for all clients.
+        base_tasks_per_client = num_tasks_to_schedule // len(selected_clients)
+        remaining_tasks = num_tasks_to_schedule
+        # First pass: assign base tasks to all clients.
+        for client_id, client_info in selected_clients.items():
+            capacities = client_capacities_map[client_id]
+            min_capacity = capacities[0]
+            # Find the closest valid capacity to base_tasks_per_client.
+            target = max(min_capacity, base_tasks_per_client)
+            closest_capacity = find_closest_capacity(capacities, target)
+            client_info["client_num_tasks_scheduled"] = closest_capacity
+            remaining_tasks -= closest_capacity
+        # Second pass: distribute remaining tasks while maintaining balance.
+        if remaining_tasks != 0:
+            distribute_remaining_tasks_balanced(selected_clients,
+                                                client_capacities_map,
+                                                remaining_tasks,
+                                                schedule_to_all_clients)
+    else:
+        # For non-all scheduling, use capacity-weighted distribution.
+        distribute_tasks_capacity_weighted(selected_clients, client_capacities_map, num_tasks_to_schedule)
+
+
 def schedule_tasks_to_selected_clients(num_tasks_to_schedule: int,
                                        selected_clients: dict,
                                        phase: str,
@@ -284,87 +466,240 @@ def schedule_tasks_to_selected_clients(num_tasks_to_schedule: int,
                                        previous_schedules_to_avoid: list | None = None,
                                        schedule_to_all_clients: bool = False,
                                        max_duration_seconds: float = 120.0) -> dict:
-    # Initialize the timer.
     start_time = time()
-    # If there are no tasks to schedule or selected clients, end.
     if num_tasks_to_schedule == 0 or not selected_clients:
         return selected_clients
-    # Initialize the list of task assignment capacities per client.
-    task_assignment_capacities_list = []
-    # Set the key for the task assignment capacities per client (current phase).
     client_task_assignment_capacities_key = "client_task_assignment_capacities_{0}".format(phase)
-    for _, client_info in selected_clients.items():
-        # Get the task assignment capacities of client i.
-        client_task_assignment_capacities_phase = client_info[client_task_assignment_capacities_key]
-        # Append the task assignment capacities of client i to the list of task assignment capacities.
-        task_assignment_capacities_list.append(client_task_assignment_capacities_phase)
-    # Compute all the possible sums of task assignments, considering one assignment per client.
-    all_possible_task_assignment_sums = get_all_possible_sums(task_assignment_capacities_list)
-    # If the number of tasks to schedule is infeasible...
-    if num_tasks_to_schedule not in all_possible_task_assignment_sums:
-        # Set a new valid number of tasks to schedule.
-        num_tasks_to_schedule = take_closest(all_possible_task_assignment_sums, num_tasks_to_schedule)
-    # If is a profile round or all clients must have tasks, initially schedule a minimum number of tasks to all clients.
+    # Calculate min/max possible sums.
+    min_possible_sum = 0
+    max_possible_sum = 0
+    client_capacities_map = {}
+    for client_id, client_info in selected_clients.items():
+        capacities = client_info[client_task_assignment_capacities_key]
+        client_capacities_map[client_id] = sorted(capacities)  # Keep sorted for efficient lookup
+        min_possible_sum += min(capacities)
+        max_possible_sum += max(capacities)
+    # Adjust target if infeasible.
+    if num_tasks_to_schedule < min_possible_sum:
+        num_tasks_to_schedule = min_possible_sum
+    elif num_tasks_to_schedule > max_possible_sum:
+        num_tasks_to_schedule = max_possible_sum
+    # Balanced initialization for profiling rounds.
     if profiling_round or schedule_to_all_clients:
-        schedule_minimum_tasks_to_all_clients(selected_clients, phase, start_time)
-    # While there are tasks left to schedule...
-    remove_action = True
-    while True:
-        # If any stopping condition was met...
-        if time() - start_time > max_duration_seconds:
-            if previous_schedules_to_avoid:
-                # Fallback: return a random previous schedule (originally supposed to be avoided).
-                return choice(list(previous_schedules_to_avoid))
-            else:
-                # Fallback: return the current incomplete schedule.
-                return selected_clients
-        # Initialize the variable used to invalidate the current schedule.
-        invalidate_current_schedule = False
-        # If is a profile round and there are previous schedules to be avoided...
-        if profiling_round and previous_schedules_to_avoid:
-            # Find a different schedule (clients should ideally have different schedules during profiling).
-            new_schedule = find_different_schedule(selected_clients,
-                                                   phase,
-                                                   previous_schedules_to_avoid)
-            if new_schedule is not None:
-                selected_clients = new_schedule
-        # If all clients must receive tasks, verify if this constraint was met.
-        if schedule_to_all_clients:
-            all_clients_have_tasks = all(client_info["client_num_tasks_scheduled"] > 0
-                                         for _, client_info in selected_clients.items())
-            if not all_clients_have_tasks:
-                invalidate_current_schedule = True
-        all_clients_have_a_valid_num_tasks = all(client_info["client_num_tasks_scheduled"]
-                                                 in client_info[client_task_assignment_capacities_key]
-                                                 for _, client_info in selected_clients.items())
-        if not all_clients_have_a_valid_num_tasks:
-            invalidate_current_schedule = True
-        # Invalidate the current schedule, if needed.
-        if invalidate_current_schedule:
-            if remove_action:
-                # Remove tasks from a random client.
-                remove_tasks_from_a_random_client(selected_clients, phase, schedule_to_all_clients=schedule_to_all_clients)
-            else:
-                # Add tasks to a random client.
-                add_tasks_to_a_random_client(selected_clients, phase)
-            remove_action = not remove_action
-        # Get the current schedule.
-        current_schedule = [client_info["client_num_tasks_scheduled"] for _, client_info in selected_clients.items()]
-        # Get the current number of tasks assigned.
-        num_tasks_scheduled = sum(current_schedule)
-        # Verify if all the tasks have been scheduled...
-        if not invalidate_current_schedule and num_tasks_scheduled == num_tasks_to_schedule:
-            # If so, filter out the clients with no tasks scheduled, if any.
-            selected_clients_filtered = {client_id: client_info
-                                         for client_id, client_info in selected_clients.items()
-                                         if client_info["client_num_tasks_scheduled"] > 0}
-            return selected_clients_filtered
-        if num_tasks_scheduled > num_tasks_to_schedule:
-            # Remove tasks from a random client.
-            remove_tasks_from_a_random_client(selected_clients, phase, schedule_to_all_clients=schedule_to_all_clients)
+        balanced_initial_schedule(selected_clients,
+                                  client_capacities_map,
+                                  num_tasks_to_schedule,
+                                  schedule_to_all_clients)
+    # Use balanced adjustment strategy.
+    return balanced_adjustment_strategy(selected_clients,
+                                        client_capacities_map,
+                                        num_tasks_to_schedule,
+                                        phase,
+                                        profiling_round,
+                                        schedule_to_all_clients,
+                                        previous_schedules_to_avoid,
+                                        start_time,
+                                        max_duration_seconds)
+
+
+def calculate_balance_metric(utilizations: list) -> float:
+    if not utilizations:
+        return 0.0
+    mean = sum(utilizations) / len(utilizations)
+    variance = sum((u - mean) ** 2 for u in utilizations) / len(utilizations)
+    return variance ** 0.5
+
+
+def get_schedule_tuple(selected_clients: dict) -> tuple:
+    return tuple(sorted((cid, info["client_num_tasks_scheduled"]) for cid, info in selected_clients.items()))
+
+
+def find_balanced_alternative(selected_clients: dict,
+                              client_capacities_map: dict,
+                              previous_schedules_to_avoid: list) -> bool:
+    # Try small swaps between clients.
+    client_ids = list(selected_clients.keys())
+    for i in range(len(client_ids)):
+        for j in range(i + 1, len(client_ids)):
+            client_i, client_j = client_ids[i], client_ids[j]
+            cap_i = client_capacities_map[client_i]
+            cap_j = client_capacities_map[client_j]
+            current_i = selected_clients[client_i]["client_num_tasks_scheduled"]
+            current_j = selected_clients[client_j]["client_num_tasks_scheduled"]
+            # Check if swap is possible and valid.
+            if current_j in cap_i and current_i in cap_j:
+                # Try the swap.
+                selected_clients[client_i]["client_num_tasks_scheduled"] = current_j
+                selected_clients[client_j]["client_num_tasks_scheduled"] = current_i
+
+                new_schedule = get_schedule_tuple(selected_clients)
+                if new_schedule not in previous_schedules_to_avoid:
+                    return True
+                # Swap back if not valid.
+                selected_clients[client_i]["client_num_tasks_scheduled"] = current_i
+                selected_clients[client_j]["client_num_tasks_scheduled"] = current_j
+
+    return False
+
+
+def balanced_adjustment_strategy(selected_clients: dict,
+                                 client_capacities_map: dict,
+                                 num_tasks_to_schedule: int,
+                                 phase: str,
+                                 profiling_round: bool,
+                                 schedule_to_all_clients: bool,
+                                 previous_schedules_to_avoid: list | None,
+                                 start_time: float,
+                                 max_duration_seconds: float) -> dict:
+    max_iterations = len(selected_clients) * 20
+    iteration = 0
+    while iteration < max_iterations and (time() - start_time) < max_duration_seconds:
+        iteration += 1
+        current_total = sum(client_info["client_num_tasks_scheduled"]
+                            for client_info in selected_clients.values())
+        difference = num_tasks_to_schedule - current_total
+        if difference == 0:
+            # Check if we need to avoid previous schedules during profiling.
+            if profiling_round and previous_schedules_to_avoid:
+                current_schedule_tuple = get_schedule_tuple(selected_clients)
+                if current_schedule_tuple in previous_schedules_to_avoid:
+                    # Find a slightly different balanced schedule.
+                    if not find_balanced_alternative(selected_clients, client_capacities_map,
+                                                     previous_schedules_to_avoid):
+                        break  # Keep current if no alternative found.
+                    continue
+            break
+        # Calculate current balance metric (standard deviation of utilization).
+        utilizations = []
+        for client_id, client_info in selected_clients.items():
+            capacities = client_capacities_map[client_id]
+            current = client_info["client_num_tasks_scheduled"]
+            max_cap = capacities[-1]
+            utilization = current / max_cap if max_cap > 0 else 0
+            utilizations.append(utilization)
+        current_balance = calculate_balance_metric(utilizations)
+        if difference > 0:
+            # Try to add tasks while maintaining balance.
+            if not balanced_task_addition(selected_clients,
+                                          client_capacities_map,
+                                          difference,
+                                          current_balance):
+                break
         else:
-            # Add tasks to a random client.
-            add_tasks_to_a_random_client(selected_clients, phase)
+            # Try to remove tasks while maintaining balance.
+            if not balanced_task_removal(selected_clients,
+                                         client_capacities_map,
+                                         abs(difference),
+                                         current_balance,
+                                         schedule_to_all_clients):
+                break
+    # Final validation.
+    if schedule_to_all_clients:
+        for client_info in selected_clients.values():
+            if client_info["client_num_tasks_scheduled"] == 0:
+                capacities = client_info[f"client_task_assignment_capacities_{phase}"]
+                client_info["client_num_tasks_scheduled"] = min(c for c in capacities if c > 0)
+    if not schedule_to_all_clients:
+        selected_clients = {cid: info for cid, info in selected_clients.items()
+                            if info["client_num_tasks_scheduled"] > 0}
+    return selected_clients
+
+
+def find_next_capacity(capacities: list,
+                       current: int) -> int | None:
+    for cap in capacities:
+        if cap > current:
+            return cap
+    return None
+
+
+def balanced_task_addition(selected_clients: dict,
+                           client_capacities_map: dict,
+                           tasks_to_add: int,
+                           current_balance: float) -> bool:
+    candidates = []
+    for client_id, client_info in selected_clients.items():
+        capacities = client_capacities_map[client_id]
+        current = client_info["client_num_tasks_scheduled"]
+        max_capacity = capacities[-1]
+        if current < max_capacity:
+            next_capacity = find_next_capacity(capacities, current)
+            if next_capacity is not None:
+                increase = next_capacity - current
+                new_utilization = next_capacity / max_capacity
+                # Calculate potential new balance.
+                utilizations = []
+                for other_id, other_info in selected_clients.items():
+                    if other_id == client_id:
+                        utilizations.append(new_utilization)
+                    else:
+                        other_capacities = client_capacities_map[other_id]
+                        other_current = other_info["client_num_tasks_scheduled"]
+                        other_max = other_capacities[-1]
+                        utilizations.append(other_current / other_max if other_max > 0 else 0)
+                new_balance = calculate_balance_metric(utilizations)
+                balance_improvement = current_balance - new_balance  # Lower is better.
+                candidates.append((client_id, balance_improvement, increase, next_capacity))
+    if not candidates:
+        return False
+    # Prefer moves that improve balance the most.
+    candidates.sort(key=lambda x: (-x[1], x[2]))  # High balance improvement, small increases.
+    for client_id, _, increase, new_capacity in candidates:
+        if increase <= tasks_to_add:
+            selected_clients[client_id]["client_num_tasks_scheduled"] = new_capacity
+            return True
+    return False
+
+
+def find_previous_capacity(capacities: list,
+                           current: int) -> int | None:
+    for cap in reversed(capacities):
+        if cap < current:
+            return cap
+    return None
+
+
+def balanced_task_removal(selected_clients: dict,
+                          client_capacities_map: dict,
+                          tasks_to_remove: int,
+                          current_balance: float,
+                          schedule_to_all_clients: bool) -> bool:
+    candidates = []
+    for client_id, client_info in selected_clients.items():
+        capacities = client_capacities_map[client_id]
+        current = client_info["client_num_tasks_scheduled"]
+        min_capacity = capacities[0]
+        can_reduce = current > min_capacity
+        if schedule_to_all_clients:
+            can_reduce = can_reduce and current > 1
+        if can_reduce:
+            prev_capacity = find_previous_capacity(capacities, current)
+            if prev_capacity is not None:
+                decrease = current - prev_capacity
+                max_capacity = capacities[-1]
+                new_utilization = prev_capacity / max_capacity
+                # Calculate potential new balance.
+                utilizations = []
+                for other_id, other_info in selected_clients.items():
+                    if other_id == client_id:
+                        utilizations.append(new_utilization)
+                    else:
+                        other_capacities = client_capacities_map[other_id]
+                        other_current = other_info["client_num_tasks_scheduled"]
+                        other_max = other_capacities[-1]
+                        utilizations.append(other_current / other_max if other_max > 0 else 0)
+                new_balance = calculate_balance_metric(utilizations)
+                balance_improvement = current_balance - new_balance  # Lower is better.
+                candidates.append((client_id, balance_improvement, decrease, prev_capacity))
+    if not candidates:
+        return False
+    # Prefer moves that improve balance the most.
+    candidates.sort(key=lambda x: (-x[1], x[2]))  # High balance improvement, small decreases.
+    for client_id, _, decrease, new_capacity in candidates:
+        if decrease <= tasks_to_remove:
+            selected_clients[client_id]["client_num_tasks_scheduled"] = new_capacity
+            return True
+    return False
 
 
 def calculate_linear_interpolation_or_extrapolation(x1: int | float,

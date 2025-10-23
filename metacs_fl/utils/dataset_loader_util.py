@@ -332,8 +332,8 @@ def _pre_process_sentiment140_text_dataset(texts: NDArray,
         # Filter labels to match the non-empty sequences.
         labels_array = array(labels)
         valid_labels = labels_array[non_empty_indices]
-        # Convert labels from Sentiment140 format (0,4) to binary (0,1).
-        binary_labels = where(valid_labels == 4, 1, 0)
+        # Convert labels from Sentiment140 format (0,1) to binary (0,1).
+        binary_labels = where(valid_labels == 1, 1, 0)
     return padded_sequences, binary_labels, tokenizer
 
 
