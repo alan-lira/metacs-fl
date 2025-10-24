@@ -447,36 +447,39 @@ def load_dataset(client_id: int,
 
 def get_task_assignment_capacities(x_train: NDArray,
                                    x_test: NDArray,
-                                   task_assignment_capacities_settings: dict) -> tuple:
+                                   task_assignment_capacities_settings: dict,
+                                   samples_per_task: int) -> tuple:
     # Get the necessary attributes.
     task_assignment_capacities_train = list(task_assignment_capacities_settings["task_assignment_capacities_train"])
     task_assignment_capacities_test = list(task_assignment_capacities_settings["task_assignment_capacities_test"])
+    lower_bound = task_assignment_capacities_settings["lower_bound"]
+    upper_bound = task_assignment_capacities_settings["upper_bound"]
+    step = task_assignment_capacities_settings["step"]
+    # Scale the bounds for training.
+    if upper_bound == "client_capacity":
+        upper_bound_train = len(x_train) // samples_per_task
+    else:
+        upper_bound_train = upper_bound // samples_per_task
+    lower_bound_train = lower_bound // samples_per_task
+    step_train = max(1, step // samples_per_task)
+    # Scale the bounds for testing.
+    if upper_bound == "client_capacity":
+        upper_bound_test = len(x_test) // samples_per_task
+    else:
+        upper_bound_test = upper_bound // samples_per_task
+    lower_bound_test = lower_bound // samples_per_task
+    step_test = max(1, step // samples_per_task)
+    # Compute train capacities.
     if not task_assignment_capacities_train:
-        lower_bound = task_assignment_capacities_settings["lower_bound"]
-        upper_bound = task_assignment_capacities_settings["upper_bound"]
-        if upper_bound == "client_capacity":
-            upper_bound = len(x_train)
-        task_assignment_capacities_train = [lower_bound, upper_bound]
-        step = task_assignment_capacities_settings["step"]
-        task_assignment_capacities_train.extend(list(range(lower_bound, upper_bound + 1, step)))
+        task_assignment_capacities_train = [lower_bound_train, upper_bound_train]
+        task_assignment_capacities_train.extend(list(range(lower_bound_train, upper_bound_train + 1, step_train)))
+    # Compute test capacities.
     if not task_assignment_capacities_test:
-        lower_bound = task_assignment_capacities_settings["lower_bound"]
-        upper_bound = task_assignment_capacities_settings["upper_bound"]
-        if upper_bound == "client_capacity":
-            upper_bound = len(x_test)
-        task_assignment_capacities_test = [lower_bound, upper_bound]
-        step = task_assignment_capacities_settings["step"]
-        task_assignment_capacities_test.extend(list(range(lower_bound, upper_bound + 1, step)))
-    task_assignment_capacities_train = sorted(list(set(task_assignment_capacities_train)))
-    task_assignment_capacities_train_extension = list(range(task_assignment_capacities_train[-2] + 1,
-                                                            task_assignment_capacities_train[-1]))
-    task_assignment_capacities_train.extend(task_assignment_capacities_train_extension)
-    task_assignment_capacities_train = sorted(list(set(task_assignment_capacities_train)))
-    task_assignment_capacities_test = sorted(list(set(task_assignment_capacities_test)))
-    task_assignment_capacities_test_extension = list(range(task_assignment_capacities_test[-2] + 1,
-                                                           task_assignment_capacities_test[-1]))
-    task_assignment_capacities_test.extend(task_assignment_capacities_test_extension)
-    task_assignment_capacities_test = sorted(list(set(task_assignment_capacities_test)))
+        task_assignment_capacities_test = [lower_bound_test, upper_bound_test]
+        task_assignment_capacities_test.extend(list(range(lower_bound_test, upper_bound_test + 1, step_test)))
+    # Remove duplicates and ensure sorted order.
+    task_assignment_capacities_train = sorted(set(task_assignment_capacities_train))
+    task_assignment_capacities_test = sorted(set(task_assignment_capacities_test))
     return task_assignment_capacities_train, task_assignment_capacities_test
 
 

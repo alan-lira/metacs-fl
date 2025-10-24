@@ -1,5 +1,7 @@
 from copy import deepcopy
 from logging import Logger
+from math import ceil
+
 from numpy.random import default_rng, SeedSequence
 
 from metacs_fl.metaheuristic.lns import run_lns
@@ -333,6 +335,7 @@ class MetaCSFL:
                                    current_phase: str,
                                    candidate_clients: dict,
                                    num_tasks: int,
+                                   samples_per_task: int,
                                    cost_matrices: dict,
                                    time_limit: float,
                                    data_privacy_approach: str,
@@ -383,15 +386,17 @@ class MetaCSFL:
                                      time_costs,
                                      energy_costs,
                                      time_limit)
+        # Scale the assigned tasks back to sample-level counts (since distribution is based on samples per class).
+        X_init_scaled = [x_i * samples_per_task for x_i in X_init]
         # Distribute the type of tasks scheduled per client.
         X_init_dist = []
         match initial_solution_tasks_distribution_scheme:
             case "random":
-                X_init_dist = distribute_tasks_with_random_approach(X_init, class_capacity_vectors_list)
+                X_init_dist = distribute_tasks_with_random_approach(X_init_scaled, class_capacity_vectors_list)
             case "locally_balanced":
-                X_init_dist = distribute_tasks_with_locally_balanced_approach(X_init, class_capacity_vectors_list)
+                X_init_dist = distribute_tasks_with_locally_balanced_approach(X_init_scaled, class_capacity_vectors_list)
             case "globally_balanced":
-                X_init_dist = distribute_tasks_with_globally_balanced_approach(X_init, class_capacity_vectors_list)
+                X_init_dist = distribute_tasks_with_globally_balanced_approach(X_init_scaled, class_capacity_vectors_list)
         # Organize the tasks' distribution.
         X_init_dist = organize_tasks_distribution(X_init_dist, sorted_classes)
         # Log a 'initial solution generated' message.
@@ -406,6 +411,7 @@ class MetaCSFL:
                                           current_phase: str,
                                           candidate_clients: dict,
                                           num_tasks: int,
+                                          samples_per_task: int,
                                           profiling_rounds: list,
                                           cost_matrices: dict,
                                           time_limit: float,
@@ -422,6 +428,7 @@ class MetaCSFL:
                                                                   current_phase,
                                                                   candidate_clients,
                                                                   num_tasks,
+                                                                  samples_per_task,
                                                                   cost_matrices,
                                                                   time_limit,
                                                                   data_privacy_approach,
@@ -450,6 +457,7 @@ class MetaCSFL:
                         current_phase: str,
                         candidate_clients: dict,
                         num_tasks: int,
+                        samples_per_task: int,
                         base_learning_rate: float,
                         base_batch_size: int,
                         base_num_epochs: int,
@@ -470,6 +478,7 @@ class MetaCSFL:
                                                                      current_phase,
                                                                      candidate_clients,
                                                                      num_tasks,
+                                                                     samples_per_task,
                                                                      profiling_rounds,
                                                                      cost_matrices,
                                                                      time_limit,
@@ -546,23 +555,23 @@ class MetaCSFL:
             log_message(logger, message, "INFO")
             # Organize the tasks' distribution.
             if "X_dist" in X_best_costs:
-                # The best solution was found, so take the respective tasks' distribution.
-                X_best_dist = organize_tasks_distribution(X_best_costs["X_dist"], sorted_classes)
+                # The best solution already has its own distribution (in tasks);
+                # Scale from tasks → samples.
+                X_best_dist_scaled = [[x_ij * samples_per_task for x_ij in x_i] for x_i in X_best_costs["X_dist"]]
+                X_best_dist = organize_tasks_distribution(X_best_dist_scaled, sorted_classes)
             else:
-                # Otherwise, adjust the tasks' distribution of the initial solution
-                # considering the scheme defined for the metaheuristic solution.
-                metaheuristic_solution_tasks_distribution_scheme \
-                    = client_selection_settings["metaheuristic_solution_tasks_distribution_scheme"]
+                # Otherwise, adjust the distribution of the initial solution.
+                metaheuristic_solution_tasks_distribution_scheme = \
+                    client_selection_settings["metaheuristic_solution_tasks_distribution_scheme"]
+                # Scale from tasks → samples before distributing.
+                X_init_scaled = [x_i * samples_per_task for x_i in X_init]
                 match metaheuristic_solution_tasks_distribution_scheme:
                     case "random":
-                        X_best_dist = distribute_tasks_with_random_approach(X_init,
-                                                                            class_capacity_vectors_list)
+                        X_best_dist = distribute_tasks_with_random_approach(X_init_scaled, class_capacity_vectors_list)
                     case "locally_balanced":
-                        X_best_dist = distribute_tasks_with_locally_balanced_approach(X_init,
-                                                                                      class_capacity_vectors_list)
+                        X_best_dist = distribute_tasks_with_locally_balanced_approach(X_init_scaled, class_capacity_vectors_list)
                     case "globally_balanced":
-                        X_best_dist = distribute_tasks_with_globally_balanced_approach(X_init,
-                                                                                       class_capacity_vectors_list)
+                        X_best_dist = distribute_tasks_with_globally_balanced_approach(X_init_scaled, class_capacity_vectors_list)
                 X_best_dist = organize_tasks_distribution(X_best_dist, sorted_classes)
         # Set the lists of base training / testing instructions.
         learning_rate_list = []
@@ -596,24 +605,26 @@ class MetaCSFL:
         # Initialize the set of selected clients.
         selected_clients = {}
         for i, _ in enumerate(X_best):
-            # Get the number of tasks assigned to client i.
+            # Get the number of tasks assigned to client i (in tasks/minibatches).
             x_i = int(X_best[i])
-            # Get the tasks per class assigned to client i.
+            # Get the tasks-per-class distribution (already in samples).
             x_dist_i = X_best_dist[i]
-            x_dist_i_str = "|".join([str(k) + "=" + str(v) for k, v in x_dist_i.items()])
+            # Compute the total number of samples (tasks × samples_per_task).
+            num_samples_i = x_i * samples_per_task
+            x_dist_i_str = "|".join(["{0}={1}".format(k, v) for k, v in x_dist_i.items()])
             if x_i > 0:
                 # Update the set of selected clients.
                 client_id_str = "client_{0}".format(i)
                 client_proxy = candidate_clients[client_id_str]["client_proxy"]
-                client_task_assignment_capacities_phase_key = "client_task_assignment_capacities_{0}".format(current_phase)
-                client_task_assignment_capacities_phase \
-                    = candidate_clients[client_id_str][client_task_assignment_capacities_phase_key]
+                capacity_key = "client_task_assignment_capacities_{0}".format(current_phase)
+                client_task_assignment_capacities_phase = candidate_clients[client_id_str][capacity_key]
                 client_max_task_capacity = max(client_task_assignment_capacities_phase)
                 client_info = {"client_proxy": client_proxy,
-                               client_task_assignment_capacities_phase_key: client_task_assignment_capacities_phase,
+                               capacity_key: client_task_assignment_capacities_phase,
                                "client_max_task_capacity": client_max_task_capacity,
                                "client_num_tasks_scheduled": x_i,
-                               "client_num_tasks_per_class_scheduled": x_dist_i_str}
+                               "client_num_samples_scheduled": num_samples_i,
+                               "client_num_samples_per_class_scheduled": x_dist_i_str}
                 if current_phase == "train":
                     client_info.update({"client_learning_rate": learning_rate_list[i],
                                         "client_batch_size": batch_size_list[i],
@@ -631,6 +642,7 @@ class MetaCSFL:
         current_phase = kwargs["current_phase"]
         candidate_clients = kwargs["candidate_clients"]
         num_tasks = kwargs["num_tasks"]
+        samples_per_task = kwargs["samples_per_task"]
         base_learning_rate = kwargs["base_learning_rate"] if "base_learning_rate" in kwargs else 0
         base_batch_size = kwargs["base_batch_size"]
         base_num_epochs = kwargs["base_num_epochs"] if "base_num_epochs" in kwargs else 0
@@ -643,14 +655,16 @@ class MetaCSFL:
         # Get the necessary properties of the candidate clients.
         task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
                                            for _, client_map in candidate_clients.items()]
+        scaled_task_assignment_capacities_list = [sorted(set(capacities))
+                                                  for capacities in task_assignment_capacities_list]
         # Calculate the maximum number of tasks that can be scheduled.
-        max_num_tasks = sum(max(list(task_assignment_capacities_i))
-                            for task_assignment_capacities_i in task_assignment_capacities_list)
-        # Adjust the number of tasks to be scheduled (in case there are insufficient task assignment capacities).
-        if isinstance(num_tasks, int):
-            num_tasks = min(num_tasks, max_num_tasks)
-        elif isinstance(num_tasks, float):
-            num_tasks = min(int(num_tasks * max_num_tasks), max_num_tasks)
+        max_num_tasks = sum(max(capacities) for capacities in scaled_task_assignment_capacities_list)
+        # Convert num_tasks → task count (fraction adjustment).
+        if isinstance(num_tasks, float):
+            # Always treat as fraction of total capacity.
+            num_tasks = int(num_tasks * max_num_tasks)
+        # Clamp to valid range.
+        num_tasks = max(1, min(num_tasks, max_num_tasks))
         # Verify if the current round is a profiling round.
         if current_round in profiling_rounds:
             # Log a 'selecting all available clients' message.
@@ -674,6 +688,9 @@ class MetaCSFL:
                                                                   profiling_round=True,
                                                                   previous_schedules_to_avoid=profiling_rounds_previous_schedules,
                                                                   schedule_to_all_clients=True)
+            for client_id, client_info in selected_clients.items():
+                num_tasks_i = client_info.get("client_num_tasks_scheduled", 0)
+                client_info["client_num_samples_scheduled"] = num_tasks_i * samples_per_task
         else:
             # Verify if a new client selection is necessary.
             new_client_selection_is_needed = self._new_client_selection_needed(current_round,
@@ -688,6 +705,7 @@ class MetaCSFL:
                                                         current_phase,
                                                         candidate_clients,
                                                         num_tasks,
+                                                        samples_per_task,
                                                         base_learning_rate,
                                                         base_batch_size,
                                                         base_num_epochs,
@@ -721,5 +739,11 @@ class MetaCSFL:
         else:
             internal_selected_clients_history[current_round].update({current_phase: selected_clients})
         self._set_attribute("_internal_selected_clients_history", internal_selected_clients_history)
+        # Log a 'number of tasks → number of samples' per-client message.
+        for client_id, client_info in selected_clients.items():
+            message = "{0}: {1} tasks → {2} samples".format(client_id,
+                                                            client_info['client_num_tasks_scheduled'],
+                                                            client_info['client_num_samples_scheduled'])
+            log_message(logger, message, "INFO")
         # Return the set of selected clients.
         return selected_clients

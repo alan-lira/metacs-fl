@@ -288,6 +288,7 @@ class SBACPAD2024:
                              current_phase: str,
                              candidate_clients: dict,
                              num_tasks: int,
+                             samples_per_task: int,
                              cost_matrices: dict,
                              time_limit: float,
                              data_privacy_approach: str,
@@ -333,6 +334,9 @@ class SBACPAD2024:
                                                                           current_phase,
                                                                           profiling_round=True,
                                                                           schedule_to_all_clients=True)
+                    for client_id, client_info in selected_clients.items():
+                        num_tasks_i = client_info.get("client_num_tasks_scheduled", 0)
+                        client_info["client_num_samples_scheduled"] = num_tasks_i * samples_per_task
                 else:
                     # Select clients using the 'MEC' algorithm.
                     task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
@@ -358,6 +362,9 @@ class SBACPAD2024:
                                                                           current_phase,
                                                                           profiling_round=True,
                                                                           schedule_to_all_clients=True)
+                    for client_id, client_info in selected_clients.items():
+                        num_tasks_i = client_info.get("client_num_tasks_scheduled", 0)
+                        client_info["client_num_samples_scheduled"] = num_tasks_i * samples_per_task
                 else:
                     # Select clients using the 'ECMTC' algorithm.
                     task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
@@ -375,25 +382,31 @@ class SBACPAD2024:
             # Organize the tasks' distribution.
             X_dist = organize_tasks_distribution(X_dist, sorted_classes)
             for i, _ in enumerate(X):
-                # Get the number of tasks assigned to client i.
-                x_i = int(X[i])
                 # Get the tasks per class assigned to client i.
+                x_i = int(X[i])
                 x_dist_i = X_dist[i]
-                x_dist_i_str = "|".join([str(k) + "=" + str(v) for k, v in x_dist_i.items()])
+                total_samples_i = x_i * samples_per_task
+                x_dist_i_str = "|".join(["{0}={1}".format(k, v) for k, v in x_dist_i.items()])
                 if x_i > 0:
                     # Update the set of selected clients.
                     client_id_str = "client_{0}".format(i)
                     client_proxy = candidate_clients[client_id_str]["client_proxy"]
-                    client_task_assignment_capacities_phase_key = "client_task_assignment_capacities_{0}".format(current_phase)
-                    client_task_assignment_capacities_phase \
-                        = candidate_clients[client_id_str][client_task_assignment_capacities_phase_key]
+                    capacity_key = "client_task_assignment_capacities_{0}".format(current_phase)
+                    client_task_assignment_capacities_phase = candidate_clients[client_id_str][capacity_key]
                     client_max_task_capacity = max(client_task_assignment_capacities_phase)
                     client_info = {"client_proxy": client_proxy,
-                                   client_task_assignment_capacities_phase_key: client_task_assignment_capacities_phase,
+                                   capacity_key: client_task_assignment_capacities_phase,
                                    "client_max_task_capacity": client_max_task_capacity,
                                    "client_num_tasks_scheduled": x_i,
+                                   "client_num_samples_scheduled": total_samples_i,
                                    "client_num_tasks_per_class_scheduled": x_dist_i_str}
-                    selected_clients.update({client_id_str: client_info})
+                    selected_clients[client_id_str] = client_info
+        # Log a 'number of tasks → number of samples' per-client message.
+        for client_id, client_info in selected_clients.items():
+            message = "{0}: {1} tasks → {2} samples".format(client_id,
+                                                            client_info['client_num_tasks_scheduled'],
+                                                            client_info['client_num_samples_scheduled'])
+            log_message(logger, message, "INFO")
         # Get the clients' selection duration.
         selection_duration_in_seconds = process_time() - selection_duration_start
         # Log a 'clients' selection duration' message.
@@ -410,6 +423,7 @@ class SBACPAD2024:
                               current_phase: str,
                               candidate_clients: dict,
                               num_tasks: int,
+                              samples_per_task: int,
                               selected_clients_metrics_history: dict,
                               time_limit: float,
                               data_privacy_approach: str,
@@ -431,6 +445,7 @@ class SBACPAD2024:
                         current_phase,
                         candidate_clients,
                         num_tasks,
+                        samples_per_task,
                         cost_matrices,
                         time_limit,
                         data_privacy_approach,
@@ -448,6 +463,7 @@ class SBACPAD2024:
         candidate_clients = kwargs["candidate_clients"]
         num_rounds = kwargs["num_rounds"]
         num_tasks = kwargs["num_tasks"]
+        samples_per_task = kwargs["samples_per_task"]
         selected_clients_metrics_history = kwargs["selected_clients_metrics_history"]
         time_limit = kwargs["time_limit"]
         data_privacy_approach = kwargs["data_privacy_approach"]
@@ -459,14 +475,16 @@ class SBACPAD2024:
         # Get the necessary properties of the candidate clients.
         task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
                                            for _, client_map in candidate_clients.items()]
+        scaled_task_assignment_capacities_list = [sorted(set(capacities))
+                                                  for capacities in task_assignment_capacities_list]
         # Calculate the maximum number of tasks that can be scheduled.
-        max_num_tasks = sum(max(list(task_assignment_capacities_i))
-                            for task_assignment_capacities_i in task_assignment_capacities_list)
-        # Adjust the number of tasks to be scheduled (in case there are insufficient task assignment capacities).
-        if isinstance(num_tasks, int):
-            num_tasks = min(num_tasks, max_num_tasks)
-        elif isinstance(num_tasks, float):
-            num_tasks = min(int(num_tasks * max_num_tasks), max_num_tasks)
+        max_num_tasks = sum(max(capacities) for capacities in scaled_task_assignment_capacities_list)
+        # Convert num_tasks → task count (fraction adjustment).
+        if isinstance(num_tasks, float):
+            # Always treat as fraction of total capacity.
+            num_tasks = int(num_tasks * max_num_tasks)
+        # Clamp to valid range.
+        num_tasks = max(1, min(num_tasks, max_num_tasks))
         # Set the list of rounds to select clients.
         rounds_to_select_clients = []
         if not select_clients_for_immediate_next_round_while_executing_current_phase or current_round == 1:
@@ -494,6 +512,7 @@ class SBACPAD2024:
                                                                   current_phase,
                                                                   candidate_clients,
                                                                   num_tasks,
+                                                                  samples_per_task,
                                                                   selected_clients_metrics_history,
                                                                   time_limit,
                                                                   data_privacy_approach,

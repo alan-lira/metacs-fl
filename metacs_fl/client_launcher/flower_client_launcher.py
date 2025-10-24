@@ -14,8 +14,7 @@ from metacs_fl.energy_monitor.powerjoular_energy_monitor import PowerJoularEnerg
 from metacs_fl.energy_monitor.pyjoules_energy_monitor import PyJoulesEnergyMonitor
 from metacs_fl.flower_simulator.logger_actor import RemoteLoggerAdapter
 from metacs_fl.utils.config_parser_util import parse_config_section
-from metacs_fl.utils.dataset_loader_util import get_classes_distribution, get_task_assignment_capacities, \
-    instantiate_fds, load_dataset
+from metacs_fl.utils.dataset_loader_util import instantiate_fds, load_dataset
 from metacs_fl.utils.logger_util import load_logger, log_message
 from metacs_fl.utils.model_loader_util import load_model
 
@@ -108,15 +107,6 @@ class FlowerClientLauncher:
         message = ("[Client {0}] The dataset loading took {1} seconds."
                    .format(self._client_id, dataset_loading_duration))
         log_message(self._logger, message, "DEBUG")
-        # Get the task assignment capacities.
-        task_assignment_capacities_settings = self.get_attribute("_task_assignment_capacities_settings")
-        self._train_task_capacities, self._test_task_capacities \
-            = get_task_assignment_capacities(self._x_train,
-                                             self._x_test,
-                                             task_assignment_capacities_settings)
-        # Get the tasks' occurrence per class.
-        self._tasks_per_class_train = get_classes_distribution(self._y_train)
-        self._tasks_per_class_test = get_classes_distribution(self._y_test)
         # Load the energy monitor.
         self._energy_monitor = None
         #self._energy_monitor = self._load_energy_monitor()
@@ -314,6 +304,7 @@ class FlowerClientLauncher:
         logger = self.get_attribute("_logger")
         daemon_settings = self.get_attribute("_daemon_settings")
         affinity_settings = self.get_attribute("_affinity_settings")
+        task_assignment_capacities_settings = self.get_attribute("_task_assignment_capacities_settings")
         callbacks_settings = self.get_attribute("_callbacks_settings")
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
         simulation_resources_settings = self.get_attribute("_simulation_resources_settings")
@@ -326,10 +317,6 @@ class FlowerClientLauncher:
         y_train = self.get_attribute("_y_train")
         x_test = self.get_attribute("_x_test")
         y_test = self.get_attribute("_y_test")
-        train_task_capacities = self.get_attribute("_train_task_capacities")
-        test_task_capacities = self.get_attribute("_test_task_capacities")
-        tasks_per_class_train = self.get_attribute("_tasks_per_class_train")
-        tasks_per_class_test = self.get_attribute("_tasks_per_class_test")
         energy_monitor = self.get_attribute("_energy_monitor")
         # Verify if the energy consumptions monitor to be used is PowerJoular
         # and if only one monitoring process is allowed to run in the system.
@@ -347,13 +334,10 @@ class FlowerClientLauncher:
                                    y_train=y_train,
                                    x_test=x_test,
                                    y_test=y_test,
-                                   task_assignment_capacities_train=train_task_capacities,
-                                   task_assignment_capacities_test=test_task_capacities,
-                                   tasks_per_class_train=tasks_per_class_train,
-                                   tasks_per_class_test=tasks_per_class_test,
                                    energy_monitor=energy_monitor,
                                    daemon_settings=daemon_settings,
                                    affinity_settings=affinity_settings,
+                                   task_assignment_capacities_settings=task_assignment_capacities_settings,
                                    callbacks_settings=callbacks_settings,
                                    device_emulation_settings=device_emulation_settings,
                                    logger=logger,

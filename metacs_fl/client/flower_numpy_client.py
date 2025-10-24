@@ -40,6 +40,7 @@ from metacs_fl.energy_monitor.pyjoules_energy_monitor import PyJoulesEnergyMonit
 from metacs_fl.network_simulator.network_simulator import NetworkSimulator
 from metacs_fl.utils.battery_util import get_remaining_battery_energy_from_file, \
     initialize_remaining_battery_energy_file, update_remaining_battery_energy_file
+from metacs_fl.utils.dataset_loader_util import get_task_assignment_capacities, get_classes_distribution
 from metacs_fl.utils.logger_util import log_message
 from metacs_fl.utils.model_loader_util import load_model_from_file, save_model_to_file
 from metacs_fl.utils.system_modeler_util import calculate_computation_time, \
@@ -311,13 +312,10 @@ class FlowerNumpyClient(NumPyClient):
                  y_train: NDArray,
                  x_test: NDArray,
                  y_test: NDArray,
-                 task_assignment_capacities_train: list,
-                 task_assignment_capacities_test: list,
-                 tasks_per_class_train: dict,
-                 tasks_per_class_test: dict,
                  energy_monitor: any,
                  daemon_settings: dict,
                  affinity_settings: dict,
+                 task_assignment_capacities_settings: dict,
                  callbacks_settings: dict,
                  device_emulation_settings: dict,
                  logger: Logger,
@@ -334,13 +332,10 @@ class FlowerNumpyClient(NumPyClient):
         self._y_train = y_train
         self._x_test = x_test
         self._y_test = y_test
-        self._task_assignment_capacities_train = task_assignment_capacities_train
-        self._task_assignment_capacities_test = task_assignment_capacities_test
-        self._tasks_per_class_train = tasks_per_class_train
-        self._tasks_per_class_test = tasks_per_class_test
         self._energy_monitor = energy_monitor
         self._daemon_settings = daemon_settings
         self._affinity_settings = affinity_settings
+        self._task_assignment_capacities_settings = task_assignment_capacities_settings
         self._device_emulation_settings = device_emulation_settings
         self._simulation_resources_settings = simulation_resources_settings
         self._root_output_folder = root_output_folder
@@ -715,26 +710,36 @@ class FlowerNumpyClient(NumPyClient):
         if "client_num_testing_examples_available" in config:
             client_num_testing_examples_available = len(self.get_attribute("_x_test"))
             config.update({"client_num_testing_examples_available": client_num_testing_examples_available})
-        if "client_task_assignment_capacities_train" in config:
-            client_task_assignment_capacities_train = self.get_attribute("_task_assignment_capacities_train")
-            client_task_assignment_capacities_train_str \
-                = "|".join([str(capacity) for capacity in client_task_assignment_capacities_train])
-            config.update({"client_task_assignment_capacities_train": client_task_assignment_capacities_train_str})
-        if "client_task_assignment_capacities_test" in config:
-            client_task_assignment_capacities_test = self.get_attribute("_task_assignment_capacities_test")
-            client_task_assignment_capacities_test_str \
-                = "|".join([str(capacity) for capacity in client_task_assignment_capacities_test])
-            config.update({"client_task_assignment_capacities_test": client_task_assignment_capacities_test_str})
-        if "client_tasks_per_class_train" in config:
-            client_tasks_per_class_train = self.get_attribute("_tasks_per_class_train")
-            client_tasks_per_class_train_str = "|".join([str(k) + "=" + str(v)
-                                                         for k, v in client_tasks_per_class_train.items()])
-            config.update({"client_tasks_per_class_train": client_tasks_per_class_train_str})
-        if "client_tasks_per_class_test" in config:
-            client_tasks_per_class_test = self.get_attribute("_tasks_per_class_test")
-            client_tasks_per_class_test_str = "|".join([str(k) + "=" + str(v)
-                                                        for k, v in client_tasks_per_class_test.items()])
-            config.update({"client_tasks_per_class_test": client_tasks_per_class_test_str})
+        task_properties = ["client_task_assignment_capacities_train", "client_task_assignment_capacities_test",
+                           "client_tasks_per_class_train", "client_tasks_per_class_test"]
+        if any(task_property in config for task_property in task_properties):
+            samples_per_task = config["samples_per_task"]
+            # Get the task assignment capacities.
+            task_assignment_capacities_settings = self.get_attribute("_task_assignment_capacities_settings")
+            client_task_assignment_capacities_train, client_task_assignment_capacities_test \
+                = get_task_assignment_capacities(self._x_train,
+                                                 self._x_test,
+                                                 task_assignment_capacities_settings,
+                                                 samples_per_task)
+            # Get the tasks' occurrence per class.
+            client_tasks_per_class_train = get_classes_distribution(self._y_train)
+            client_tasks_per_class_test = get_classes_distribution(self._y_test)
+            if "client_task_assignment_capacities_train" in config:
+                client_task_assignment_capacities_train_str \
+                    = "|".join([str(capacity) for capacity in client_task_assignment_capacities_train])
+                config.update({"client_task_assignment_capacities_train": client_task_assignment_capacities_train_str})
+            if "client_task_assignment_capacities_test" in config:
+                client_task_assignment_capacities_test_str \
+                    = "|".join([str(capacity) for capacity in client_task_assignment_capacities_test])
+                config.update({"client_task_assignment_capacities_test": client_task_assignment_capacities_test_str})
+            if "client_tasks_per_class_train" in config:
+                client_tasks_per_class_train_str = "|".join([str(k) + "=" + str(v)
+                                                             for k, v in client_tasks_per_class_train.items()])
+                config.update({"client_tasks_per_class_train": client_tasks_per_class_train_str})
+            if "client_tasks_per_class_test" in config:
+                client_tasks_per_class_test_str = "|".join([str(k) + "=" + str(v)
+                                                            for k, v in client_tasks_per_class_test.items()])
+                config.update({"client_tasks_per_class_test": client_tasks_per_class_test_str})
         if "client_remaining_battery_energy" in config:
             remaining_battery_energy_file = self.get_attribute("_remaining_battery_energy_file")
             remaining_battery_energy_in_joules = get_remaining_battery_energy_from_file(remaining_battery_energy_file)

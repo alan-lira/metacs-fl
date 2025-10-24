@@ -378,7 +378,7 @@ class FlowerServer(Strategy):
                     # Set the class-index mapping.
                     self._clients_histograms["class_index_map"] = class_index_map
                     # Query DP histograms, if not cached.
-                    class_index_map_str = "|".join(f"{k}={v}" for k, v in class_index_map.items())
+                    class_index_map_str = "|".join("{0}={1}".format(k, v) for k, v in class_index_map.items())
                     for _, client_proxy in available_clients.items():
                         client_info_cached = self._clients_histograms[client_proxy]
                         if "client_dp_histogram" not in client_info_cached:
@@ -419,7 +419,8 @@ class FlowerServer(Strategy):
                             client_mean_power_consumption_idle_mode_property: "?",
                             client_current_download_bandwidth_in_bytes_per_second_property: "?",
                             client_current_upload_bandwidth_in_bytes_per_second_property: "?",
-                            client_current_latency_in_milliseconds_property: "?"}
+                            client_current_latency_in_milliseconds_property: "?",
+                            "samples_per_task": server_strategy_settings["samples_per_task"]}
                 gpi_dict.update(idle_events_data_dict)
                 gpi = GetPropertiesIns(gpi_dict)
                 client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
@@ -522,12 +523,12 @@ class FlowerServer(Strategy):
             selected_client_config.update({"client_selection_time_in_seconds": selection_duration_in_seconds})
             if current_round in profiling_rounds:
                 selected_client_config.update({"profiling_round": True})
-            if "client_num_tasks_scheduled" in client_info:
+            if "client_num_samples_scheduled" in client_info:
                 selected_client_config.update({"num_{0}ing_examples_to_use".format(current_phase):
-                                                   client_info["client_num_tasks_scheduled"]})
-            if "client_num_tasks_per_class_scheduled" in client_info:
+                                                   client_info["client_num_samples_scheduled"]})
+            if "client_num_samples_per_class_scheduled" in client_info:
                 selected_client_config.update({"num_{0}ing_examples_per_class_to_use".format(current_phase):
-                                                   client_info["client_num_tasks_per_class_scheduled"]})
+                                                   client_info["client_num_samples_per_class_scheduled"]})
             if "client_learning_rate" in client_info:
                 selected_client_config.update({"learning_rate": client_info["client_learning_rate"]})
             if "client_batch_size" in client_info:
@@ -1118,6 +1119,8 @@ class FlowerServer(Strategy):
         candidate_clients = self._map_available_clients(server_round, client_manager)
         # Get the number of tasks to be scheduled to the selected clients.
         num_tasks = server_strategy_settings["num_tasks_training"]
+        # Get the number of samples per task.
+        samples_per_task = server_strategy_settings["samples_per_task"]
         # Get the base training instructions to be used by the selected clients.
         fit_config = self.get_attribute("_fit_config")
         base_learning_rate = fit_config["learning_rate"]
@@ -1137,6 +1140,7 @@ class FlowerServer(Strategy):
                   "candidate_clients": candidate_clients,
                   "num_rounds": num_rounds,
                   "num_tasks": num_tasks,
+                  "samples_per_task": samples_per_task,
                   "base_learning_rate": base_learning_rate,
                   "base_batch_size": base_batch_size,
                   "base_num_epochs": base_num_epochs,
@@ -1288,6 +1292,8 @@ class FlowerServer(Strategy):
         candidate_clients = self._map_available_clients(server_round, client_manager)
         # Get the number of tasks to be scheduled to the selected clients.
         num_tasks = server_strategy_settings["num_tasks_testing"]
+        # Get the number of samples per task.
+        samples_per_task = server_strategy_settings["samples_per_task"]
         # Get the base testing instructions to be used by the selected clients.
         evaluate_config = self.get_attribute("_evaluate_config")
         base_batch_size = evaluate_config["batch_size"]
@@ -1305,6 +1311,7 @@ class FlowerServer(Strategy):
                   "candidate_clients": candidate_clients,
                   "num_rounds": num_rounds,
                   "num_tasks": num_tasks,
+                  "samples_per_task": samples_per_task,
                   "base_batch_size": base_batch_size,
                   "selected_clients_history": selected_clients_history,
                   "selected_clients_metrics_history": selected_clients_metrics_history,
