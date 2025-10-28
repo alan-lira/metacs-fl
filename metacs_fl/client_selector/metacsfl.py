@@ -1,6 +1,5 @@
 from copy import deepcopy
 from logging import Logger
-from math import ceil
 
 from numpy.random import default_rng, SeedSequence
 

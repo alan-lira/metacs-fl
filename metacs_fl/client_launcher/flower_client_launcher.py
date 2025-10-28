@@ -305,8 +305,10 @@ class FlowerClientLauncher:
         daemon_settings = self.get_attribute("_daemon_settings")
         affinity_settings = self.get_attribute("_affinity_settings")
         task_assignment_capacities_settings = self.get_attribute("_task_assignment_capacities_settings")
+        model_settings = self.get_attribute("_model_settings")
         callbacks_settings = self.get_attribute("_callbacks_settings")
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
+        host_profile = self.get_attribute("_host_profile")
         simulation_resources_settings = self.get_attribute("_simulation_resources_settings")
         root_output_folder = self.get_attribute("_root_output_folder")
         all_cpu_cores_available = self.get_attribute("_all_cpu_cores_available")
@@ -338,8 +340,10 @@ class FlowerClientLauncher:
                                    daemon_settings=daemon_settings,
                                    affinity_settings=affinity_settings,
                                    task_assignment_capacities_settings=task_assignment_capacities_settings,
+                                   model_settings=model_settings,
                                    callbacks_settings=callbacks_settings,
                                    device_emulation_settings=device_emulation_settings,
+                                   host_profile=host_profile,
                                    logger=logger,
                                    initialization_duration_in_seconds=initialization_duration_in_seconds,
                                    simulation_resources_settings = simulation_resources_settings,

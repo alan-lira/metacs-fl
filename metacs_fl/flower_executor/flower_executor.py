@@ -11,6 +11,7 @@ from metacs_fl.devices.edge_devices import generate_edge_devices
 from metacs_fl.networks.networks import generate_networks
 from metacs_fl.server_launcher.flower_server_launcher import FlowerServerLauncher
 from metacs_fl.utils.config_parser_util import parse_config_section, get_all_section_names
+from metacs_fl.utils.host_profiler_util import HostProfiler
 from metacs_fl.utils.system_modeler_util import get_cpu_cores_available
 
 
@@ -75,6 +76,7 @@ class FlowerExecutor:
                                               current_execution_devices: list | None = None) -> dict:
         # Initialize the personalized_settings dictionary.
         personalized_settings = {}
+        execution_output_folder = None
         if execution_dict:
             # Get the execution name and settings.
             execution_name = next(iter(execution_dict))
@@ -94,6 +96,10 @@ class FlowerExecutor:
         if current_execution_devices:
             device_emulation_settings = current_execution_devices[client_id][1]
             personalized_settings.update({"_device_emulation_settings": device_emulation_settings})
+        # Profile the client's host.
+        host_profiler = HostProfiler(Path(execution_output_folder))
+        host_profile = host_profiler.profile_host_n_times(client_id)
+        personalized_settings["_host_profile"] = host_profile
         # Return the personalized_settings dictionary.
         return personalized_settings
 

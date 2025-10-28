@@ -11,7 +11,7 @@ environ["CUDA_VISIBLE_DEVICES"] = "-1"
 from csv import reader as csv_reader
 from datetime import datetime
 from flwr.common import NDArrays
-from keras import losses, Model, utils
+from keras import layers, losses, Model, utils
 from math import atan2, ceil, cos, inf, radians, sin, sqrt
 from numpy import dtype as np_dtype, ndarray, unique
 from os import kill, sched_setaffinity
@@ -836,11 +836,29 @@ def get_known_networks_info(network_bandwidth_unit: str = "mbps") -> dict:
 
 def generate_dummy_sample_batch(batch_size: int,
                                 input_shape: tuple,
-                                num_output_classes: int) -> tuple:
+                                num_output_classes: int,
+                                model: Model,
+                                model_settings: dict) -> tuple:
     # Generate a batch of dummy samples (size of batch_size).
-    x_dummy_batch = tf_random.normal((batch_size,) + input_shape)
-    y_dummy_batch = utils.to_categorical(tf_random.uniform((batch_size,), minval=0, maxval=num_output_classes, dtype=int32),
-                                         num_classes=num_output_classes)
+    if model and any(isinstance(layer, layers.LSTM) for layer in model.layers):
+        # Integer token sequences for LSTM (mask_zero=True).
+        model_provider = model_settings["provider"]
+        model_provider_settings = model_settings[model_provider]
+        model_name = model_provider_settings["model_name"]
+        model_provider_specific_settings = model_settings[model_name]
+        vocab_size = model_provider_specific_settings["vocab_size"]
+        x_dummy_batch = tf_random.uniform((batch_size, input_shape[0]), minval=1, maxval=vocab_size, dtype=int32)
+        # Output: one-hot if multi-class, else 0/1 float for binary.
+        if num_output_classes > 1:
+            y_dummy_batch = utils.to_categorical(tf_random.uniform((batch_size,), minval=0, maxval=num_output_classes, dtype=int32),
+                                                 num_classes=num_output_classes)
+        else:
+            y_dummy_batch = tf_random.uniform((batch_size, 1), minval=0, maxval=2, dtype=int32)
+    else:
+        # Float input for CNN or other models.
+        x_dummy_batch = tf_random.normal((batch_size,) + input_shape)
+        y_dummy_batch = utils.to_categorical(tf_random.uniform((batch_size,), minval=0, maxval=num_output_classes, dtype=int32),
+                                             num_classes=num_output_classes)
     # Return the generated batch of dummy samples.
     return x_dummy_batch, y_dummy_batch
 
@@ -1474,7 +1492,7 @@ def calculate_effective_flop_throughput_i_r(client_attributes: dict,
     # Calculate the effective floating-point operations throughput of the client when training/testing the model (in flops per second).
     etp_m_i = nc_cpu_i * fpocc_m_i * fq_cpu_i
     # Return the effective floating-point operations throughput.
-    return etp_m_i
+    return max(etp_m_i, 1.0)
 
 
 def estimate_mt_m_device(mt_m_node: float,
@@ -1485,7 +1503,10 @@ def estimate_mt_m_device(mt_m_node: float,
     # Assuming similar memory access patterns and no drastic changes in model architecture...
     mem_bw_ratio = mem_bw_device / mem_bw_node
     cpu_gflops_ratio = cpu_gflops_device / cpu_gflops_node
-    mt_m_device = mt_m_node * (mem_bw_ratio / cpu_gflops_ratio)
+    mt_m_device = mt_m_node * (cpu_gflops_ratio / mem_bw_ratio)
+    if mt_m_device <= 0:
+        mt_m_device = mt_m_node
+    mt_m_device = max(1e-3, min(mt_m_device, 1e4))
     return mt_m_device
 
 

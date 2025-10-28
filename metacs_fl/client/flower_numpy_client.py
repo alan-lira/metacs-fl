@@ -316,8 +316,10 @@ class FlowerNumpyClient(NumPyClient):
                  daemon_settings: dict,
                  affinity_settings: dict,
                  task_assignment_capacities_settings: dict,
+                 model_settings: dict,
                  callbacks_settings: dict,
                  device_emulation_settings: dict,
+                 host_profile: dict,
                  logger: Logger,
                  initialization_duration_in_seconds: float,
                  simulation_resources_settings: dict = None,
@@ -336,7 +338,9 @@ class FlowerNumpyClient(NumPyClient):
         self._daemon_settings = daemon_settings
         self._affinity_settings = affinity_settings
         self._task_assignment_capacities_settings = task_assignment_capacities_settings
+        self._model_settings = model_settings
         self._device_emulation_settings = device_emulation_settings
+        self._host_profile = host_profile
         self._simulation_resources_settings = simulation_resources_settings
         self._root_output_folder = root_output_folder
         self._all_cpu_cores_available = all_cpu_cores_available
@@ -1036,7 +1040,9 @@ class FlowerNumpyClient(NumPyClient):
         device_peak_memory_bandwidth_in_Bps = device_emulation_settings["peak_memory_bandwidth_in_bytes_per_second"]
         # Initializations.
         actual_computation_time_in_seconds = 0
+        total_float_ops = 0
         x_size = len(x_train)
+        learning_rate = fit_config["learning_rate"]
         batch_size = fit_config["batch_size"]
         epochs = fit_config["epochs"]
         client_model_metrics = {}
@@ -1088,14 +1094,18 @@ class FlowerNumpyClient(NumPyClient):
             # Load the local model from the file.
             model_file = self.get_attribute("_model_file")
             model = load_model_from_file(model_file)
+            # Get the model settings.
+            model_settings = self.get_attribute("_model_settings")
             # Get the input shape of the model.
             model_input_shape = get_model_input_shape(model)
             # Get the number of output classes of the model.
             model_num_output_classes = get_model_output_classes(model)
             # Generate a batch of dummy samples for training (size of batch_size).
-            x_train_dummy, y_train_dummy = generate_dummy_sample_batch(fit_config["batch_size"],
+            x_train_dummy, y_train_dummy = generate_dummy_sample_batch(batch_size,
                                                                        model_input_shape,
-                                                                       model_num_output_classes)
+                                                                       model_num_output_classes,
+                                                                       model,
+                                                                       model_settings)
             # Build the concrete training function that will be used by the profiler.
             profiling_module = ProfilingModule(model)
             silent_profiler_options = profiling_module.create_silent_profiler_options()
@@ -1154,9 +1164,9 @@ class FlowerNumpyClient(NumPyClient):
                                                                        cpu_gflops_device)
         # Add the number of examples, learning rate, batch size, and epochs to the client model metrics.
         client_model_metrics.update({"num_examples": x_size,
-                                     "learning_rate": fit_config["learning_rate"],
-                                     "batch_size": fit_config["batch_size"],
-                                     "epochs": fit_config["epochs"]})
+                                     "learning_rate": learning_rate,
+                                     "batch_size": batch_size,
+                                     "epochs": epochs})
         # Save the client model metrics to file.
         if not model_metrics_file.is_file():
             # Append the header line.
@@ -1166,6 +1176,7 @@ class FlowerNumpyClient(NumPyClient):
         self._append_data_to_file(model_metrics_file, model_metrics_data)
         # Initialize the set of client computation metrics.
         client_comp_metrics = {"fpo_train_m": fpo_train_m,
+                               "total_float_ops": total_float_ops,
                                "bs_train_i": batch_size,
                                "ds_train_i": x_size,
                                "e_i": epochs,
@@ -1183,6 +1194,65 @@ class FlowerNumpyClient(NumPyClient):
         self._append_data_to_file(comp_metrics_file, comp_metrics_data)
         # Return the actual computation time (in seconds).
         return actual_computation_time_in_seconds
+
+    def _estimate_device_computation_time_in_seconds_via_scaling(self,
+                                                                 perf_log_file: Path,
+                                                                 comp_metrics_file: Path,
+                                                                 comm_round: int,
+                                                                 host_actual_computation_time_in_seconds: float,
+                                                                 scaling_approach: str = "flop") -> float:
+        # Get the set of client computation metrics from the corresponding file.
+        client_comp_metrics = self._read_client_metrics_from_file(comp_metrics_file, comm_round)
+        total_float_ops = client_comp_metrics["total_float_ops"]
+        # Get the client's host profile dictionary.
+        host_profile = self.get_attribute("_host_profile")
+        # Get the client's device emulation dictionary.
+        device_emulation_settings = self.get_attribute("_device_emulation_settings")
+        # Get the 'alpha' parameter value (cpu_ratio x mem_ratio).
+        alpha = 0.7  # Default fallback for the alpha parameter.
+        perf_events_to_extract = ["memory_traffic_in_bytes", "sustained_gflops", "bandwidth_gbs"]
+        if perf_log_file.is_file():
+            parsed_perf_log = parse_perf_log_file(perf_log_file, perf_events_to_extract)
+            perf_events_metrics = summarize_perf_metrics(parsed_perf_log)
+            if total_float_ops > 0:
+                bytes_moved = perf_events_metrics.get("memory_traffic_in_bytes", 1)
+                operational_intensity = total_float_ops / bytes_moved
+                peak_flops_per_s = host_profile["compute"]["sustained_gflops"] * 1e9
+                peak_bw_per_s = max(1e9, host_profile["memory"]["bandwidth_gbs"] * 1e9)
+                machine_balance = peak_flops_per_s / peak_bw_per_s
+                alpha = operational_intensity / (operational_intensity + machine_balance)
+                alpha = float(clip(alpha, 0.05, 0.95))
+                cache_misses = perf_events_metrics.get("cache-misses", 0)
+                cache_references = perf_events_metrics.get("cache-references", 1)
+                miss_ratio = cache_misses / cache_references
+                alpha *= max(0.1, (1 - miss_ratio))
+        # Compute actual achieved GFLOPS on host.
+        actual_host_gflops = total_float_ops / (host_actual_computation_time_in_seconds * 1e9)
+        eta_host = actual_host_gflops / host_profile["compute"]["sustained_gflops"]
+        eta_device = eta_host * 0.8
+        # Macro scaling approach.
+        cpu_ratio = host_profile["compute"]["sustained_gflops"] / device_emulation_settings["peak_cpu_gflops"]
+        mem_ratio = host_profile["memory"]["bandwidth_gbs"] / device_emulation_settings["peak_memory_bandwidth_in_gigabytes_per_second"]
+        scaled_device_computation_time_macro = host_actual_computation_time_in_seconds * (alpha * cpu_ratio + (1 - alpha) * mem_ratio)
+        # FLOP-based scaling approach.
+        scaled_device_computation_time_flop = total_float_ops / (device_emulation_settings["peak_cpu_gflops"] * 1e9 * eta_device)
+        # Get the client's device scaled computation time dictionary.
+        scaled_device_computation_time_dict = {"scaled_device_computation_time_macro": scaled_device_computation_time_macro,
+                                               "scaled_device_computation_time_flop": scaled_device_computation_time_flop,
+                                               "eta_host": eta_host,
+                                               "eta_device": eta_device,
+                                               "actual_host_gflops": actual_host_gflops}
+        # Get the client's device scaled computation time (in seconds).
+        estimate_device_computation_time_in_seconds = 0
+        match scaling_approach:
+            case "macro":
+                estimate_device_computation_time_in_seconds \
+                    = scaled_device_computation_time_dict["scaled_device_computation_time_macro"]
+            case "flop":
+                estimate_device_computation_time_in_seconds \
+                    = scaled_device_computation_time_dict["scaled_device_computation_time_flop"]
+        # Return the estimated computation time (in seconds).
+        return estimate_device_computation_time_in_seconds
 
     def _estimate_computation_time_in_seconds(self,
                                               comp_metrics_file: Path,
@@ -1316,9 +1386,10 @@ class FlowerNumpyClient(NumPyClient):
         # Get the set of client computation metrics from the corresponding file.
         client_comp_metrics = self._read_client_metrics_from_file(comp_metrics_file, comm_round)
         # Estimate the time spent by this client during the computation event of round r.
-        computation_time_in_seconds = self._estimate_computation_time_in_seconds(comp_metrics_file,
-                                                                                 comm_round,
-                                                                                 phase)
+        computation_time_in_seconds = self._estimate_device_computation_time_in_seconds_via_scaling(perf_log_file,
+                                                                                                    comp_metrics_file,
+                                                                                                    comm_round,
+                                                                                                    actual_computation_time_in_seconds)
         # Estimate the energy consumed by this client during the computation event of round r.
         computation_energy_in_joules = self._estimate_computation_energy_in_joules(computation_time_in_seconds)
         # Record the energy consumed by this client during the computation event of round r.
@@ -1522,6 +1593,7 @@ class FlowerNumpyClient(NumPyClient):
         device_peak_memory_bandwidth_in_Bps = device_emulation_settings["peak_memory_bandwidth_in_bytes_per_second"]
         # Initializations.
         actual_computation_time_in_seconds = 0
+        total_float_ops = 0
         x_size = len(x_test)
         batch_size = evaluate_config["batch_size"]
         client_model_metrics = {}
@@ -1578,14 +1650,18 @@ class FlowerNumpyClient(NumPyClient):
             # Load the local model from the file.
             model_file = self.get_attribute("_model_file")
             model = load_model_from_file(model_file)
+            # Get the model settings.
+            model_settings = self.get_attribute("_model_settings")
             # Get the input shape of the model.
             model_input_shape = get_model_input_shape(model)
             # Get the number of output classes of the model.
             model_num_output_classes = get_model_output_classes(model)
             # Generate a batch of dummy samples for testing (size of batch_size).
-            x_test_dummy, _ = generate_dummy_sample_batch(evaluate_config["batch_size"],
+            x_test_dummy, _ = generate_dummy_sample_batch(batch_size,
                                                           model_input_shape,
-                                                          model_num_output_classes)
+                                                          model_num_output_classes,
+                                                          model,
+                                                          model_settings)
             # Build the concrete testing function that will be used by the profiler.
             profiling_module = ProfilingModule(model)
             silent_profiler_options = profiling_module.create_silent_profiler_options()
@@ -1644,7 +1720,7 @@ class FlowerNumpyClient(NumPyClient):
                                                                        cpu_gflops_device)
         # Add the number of examples and batch size to the client model metrics.
         client_model_metrics.update({"num_examples": x_size,
-                                     "batch_size": evaluate_config["batch_size"]})
+                                     "batch_size": batch_size})
         # Save the client model metrics to file.
         if not model_metrics_file.is_file():
             # Append the header line.
@@ -1654,6 +1730,7 @@ class FlowerNumpyClient(NumPyClient):
         self._append_data_to_file(model_metrics_file, model_metrics_data)
         # Initialize the set of client computation metrics.
         client_comp_metrics = {"fpo_test_m": fpo_test_m,
+                               "total_float_ops": total_float_ops,
                                "bs_test_i": batch_size,
                                "ds_test_i": x_size,
                                "nc_cpu_i": device_cpu_num_cores,
@@ -1780,9 +1857,10 @@ class FlowerNumpyClient(NumPyClient):
         # Get the set of client computation metrics from the corresponding file.
         client_comp_metrics = self._read_client_metrics_from_file(comp_metrics_file, comm_round)
         # Estimate the time spent by this client during the computation event of round r.
-        computation_time_in_seconds = self._estimate_computation_time_in_seconds(comp_metrics_file,
-                                                                                 comm_round,
-                                                                                 phase)
+        computation_time_in_seconds = self._estimate_device_computation_time_in_seconds_via_scaling(perf_log_file,
+                                                                                                    comp_metrics_file,
+                                                                                                    comm_round,
+                                                                                                    actual_computation_time_in_seconds)
         # Estimate the energy consumed by this client during the computation event of round r.
         computation_energy_in_joules = self._estimate_computation_energy_in_joules(computation_time_in_seconds)
         # Record the energy consumed by this client during the computation event of round r.
