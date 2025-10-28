@@ -1210,7 +1210,8 @@ class FlowerNumpyClient(NumPyClient):
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
         # Get the 'alpha' parameter value (cpu_ratio x mem_ratio).
         alpha = 0.7  # Default fallback for the alpha parameter.
-        perf_events_to_extract = ["memory_traffic_in_bytes", "sustained_gflops", "bandwidth_gbs"]
+        perf_events_to_extract = ["cache-misses", "cache-references", "instructions", "cycles", "LLC-load-misses",
+                                  "LLC-store-misses", "seconds time elapsed"]
         if perf_log_file.is_file():
             parsed_perf_log = parse_perf_log_file(perf_log_file, perf_events_to_extract)
             perf_events_metrics = summarize_perf_metrics(parsed_perf_log)
