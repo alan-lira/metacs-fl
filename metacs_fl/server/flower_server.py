@@ -325,7 +325,8 @@ class FlowerServer(Strategy):
                                 client_tasks_per_class_test_property = "client_tasks_per_class_test"
                                 gpi_dict = {client_id_property: "?",
                                             client_tasks_per_class_train_property: "?",
-                                            client_tasks_per_class_test_property: "?"}
+                                            client_tasks_per_class_test_property: "?",
+                                            "samples_per_task": server_strategy_settings["samples_per_task"]}
                                 gpi = GetPropertiesIns(gpi_dict)
                                 client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
                                 client_id = client_prompted.properties[client_id_property]
