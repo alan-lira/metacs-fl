@@ -306,11 +306,21 @@ def load_custom_lstm_sentiment140(model_provider_specific_settings: dict) -> Mod
     # Embedding layer to map tokens to dense vectors.
     model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length, mask_zero=True))
     # LSTM layer to capture sequential dependencies and context.
-    model.add(layers.LSTM(128, return_sequences=False))
+    model.add(layers.LSTM(128, return_sequences=False, dropout=0.3, recurrent_dropout=0.3))
+    # Batch normalization for stable training.
+    model.add(layers.BatchNormalization())
     # Fully connected layer for learned feature projection.
     model.add(layers.Dense(64, activation="relu"))
+    # Batch normalization.
+    model.add(layers.BatchNormalization())
     # Dropout layer to prevent overfitting.
-    model.add(layers.Dropout(0.5))
+    model.add(layers.Dropout(0.4))
+    # Extra dense layer.
+    model.add(layers.Dense(32, activation="relu"))
+    # Batch normalization.
+    model.add(layers.BatchNormalization())
+    # Light dropout for extra dense layer.
+    model.add(layers.Dropout(0.2))
     # Output layer for binary sentiment classification (sigmoid activation).
     model.add(layers.Dense(1, activation="sigmoid"))
     # Return the model architecture.
