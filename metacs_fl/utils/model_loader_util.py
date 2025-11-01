@@ -14,6 +14,7 @@ from keras.metrics import BinaryAccuracy, Metric, SparseCategoricalAccuracy
 from keras.optimizers import Adam, Optimizer, SGD
 from keras.optimizers.schedules import CosineDecay, ExponentialDecay
 from keras.saving import load_model as keras_load_model, save_model as keras_save_model
+from keras.src.saving import register_keras_serializable
 from numpy import load, save, savez
 from pathlib import Path
 
@@ -294,37 +295,62 @@ def load_custom_cnn_sentiment140(model_provider_specific_settings: dict) -> Mode
 
 
 def load_custom_lstm_sentiment140(model_provider_specific_settings: dict) -> Model:
-    """Long Short-Term Memory (LSTM) model for Sentiment140."""
+    """LSTM2 model from the paper 'Federated Learning for Sentiment Analysis in Presence of Non-IID Data:
+    Sensitivity of Deep Learning Models' (Gholamiangonabadi & Grolinger, 2024)"""
     # Get the model specific settings.
     vocab_size = model_provider_specific_settings["vocab_size"]
     max_length = model_provider_specific_settings["max_length"]
     embedding_dim = model_provider_specific_settings["embedding_dim"]
     # Initialize the model architecture.
     model = Sequential()
-    # Input Layer.
+    # Input layer (sequence of token indices).
     model.add(layers.Input(shape=(max_length,)))
-    # Embedding layer to map tokens to dense vectors.
-    model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length, mask_zero=True))
-    # LSTM layer to capture sequential dependencies and context.
-    model.add(layers.LSTM(128, return_sequences=False, dropout=0.3, recurrent_dropout=0.3))
-    # Batch normalization for stable training.
-    model.add(layers.BatchNormalization())
+    # Embedding layer to map tokens to low-dimensional dense vectors.
+    model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
+    # LSTM layer to capture sequential dependencies.
+    model.add(layers.LSTM(32, return_sequences=False))
     # Fully connected layer for learned feature projection.
     model.add(layers.Dense(64, activation="relu"))
-    # Batch normalization.
-    model.add(layers.BatchNormalization())
-    # Dropout layer to prevent overfitting.
-    model.add(layers.Dropout(0.4))
-    # Extra dense layer.
-    model.add(layers.Dense(32, activation="relu"))
-    # Batch normalization.
-    model.add(layers.BatchNormalization())
-    # Light dropout for extra dense layer.
-    model.add(layers.Dropout(0.2))
-    # Output layer for binary sentiment classification (sigmoid activation).
-    model.add(layers.Dense(1, activation="sigmoid"))
+    # Output layer for binary sentiment classification (two classes with softmax activation).
+    model.add(layers.Dense(2, activation="softmax"))
     # Return the model architecture.
     return model
+
+
+@register_keras_serializable()
+class SelfAttention(layers.Layer):
+    """Wrapper for MultiHeadAttention that works inside a Sequential model."""
+    def __init__(self,
+                 num_heads,
+                 key_dim,
+                 dropout=0.1,
+                 **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.key_dim = key_dim
+        self.dropout_rate = dropout
+        self.mha = layers.MultiHeadAttention(num_heads=num_heads, key_dim=key_dim)
+        self.norm = layers.LayerNormalization()
+        self.dropout = layers.Dropout(dropout)
+
+    def call(self,
+             inputs,
+             training=False) -> layers.LayerNormalization:
+        attn_output = self.mha(inputs, inputs)  # query = value = inputs
+        attn_output = self.dropout(attn_output, training=training)
+        return self.norm(inputs + attn_output)
+
+    def get_config(self) -> dict:
+        config = super().get_config()
+        config.update({"num_heads": self.num_heads,
+                       "key_dim": self.key_dim,
+                       "dropout": self.dropout_rate})
+        return config
+
+    @classmethod
+    def from_config(cls,
+                    config):
+        return cls(**config)
 
 
 def load_custom_transformer_sentiment140(model_provider_specific_settings: dict) -> Model:
@@ -334,7 +360,6 @@ def load_custom_transformer_sentiment140(model_provider_specific_settings: dict)
     max_length = model_provider_specific_settings["max_length"]
     embedding_dim = model_provider_specific_settings["embedding_dim"]
     # Initialize the model architecture.
-    # Sequential is used for structural consistency (Transformer blocks typically use functional API).
     model = Sequential()
     # Input Layer.
     model.add(layers.Input(shape=(max_length,)))
@@ -342,10 +367,8 @@ def load_custom_transformer_sentiment140(model_provider_specific_settings: dict)
     model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
     # Layer normalization to stabilize and scale the embeddings.
     model.add(layers.LayerNormalization())
-    # Single Transformer encoder block (multi-head self-attention + normalization).
-    model.add(layers.MultiHeadAttention(num_heads=4, key_dim=embedding_dim))
-    model.add(layers.Dropout(0.5))
-    model.add(layers.LayerNormalization())
+    # MultiHeadAttention layer.
+    model.add(SelfAttention(num_heads=4, key_dim=embedding_dim, dropout=0.5))
     # Feed-forward projection layer.
     model.add(layers.Dense(128, activation="relu"))
     # Global average pooling to aggregate sequence representations.
@@ -600,8 +623,8 @@ def load_model(model_settings: dict,
         # Compile the Kera's model.
         if "Sentiment140" in model_name:
             # Simpler compile for text-based models.
-            model.compile(optimizer="adam",
-                          loss="binary_crossentropy",
+            model.compile(optimizer=optimizer,  # "adam",
+                          loss=loss_function,  # "binary_crossentropy",
                           metrics=metrics)
         else:
             # Full compile for image models.

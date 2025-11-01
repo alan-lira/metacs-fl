@@ -16,6 +16,7 @@ from flwr.server.client_proxy import ClientProxy
 from flwr.server.strategy.strategy import Strategy
 
 from metacs_fl.client_selector.metacsfl import MetaCSFL
+from metacs_fl.client_selector.random import Random
 from metacs_fl.client_selector.sbacpad_2024 import SBACPAD2024
 from metacs_fl.metrics_aggregator.flower_weighted_average import aggregate_loss_by_weighted_average, \
     aggregate_metrics_by_weighted_average
@@ -66,6 +67,9 @@ class FlowerServer(Strategy):
         client_selector = None
         strategy = server_strategy_settings["strategy"]
         match strategy:
+            case "Random":
+                # Instantiate the Random's client selector.
+                client_selector = Random(server_strategy_settings, seed)
             case "SBAC-PAD_2024":
                 # Instantiate the SBAC-PAD_2024's client selector.
                 client_selector = SBACPAD2024(server_strategy_settings, seed)
@@ -303,7 +307,7 @@ class FlowerServer(Strategy):
             # Get the available clients data distribution, if allowed.
             data_privacy_approach_name = "Non_Private"
             data_privacy_approach_settings = {}
-            query_clients_data_distribution = server_strategy_settings["query_clients_data_distribution"]
+            query_clients_data_distribution = server_strategy_settings.get("query_clients_data_distribution", False)
             if query_clients_data_distribution:
                 if "data_privacy_approach" in server_strategy_settings:
                     data_privacy_approach_settings = server_strategy_settings["data_privacy_approach"]
@@ -326,7 +330,7 @@ class FlowerServer(Strategy):
                                 gpi_dict = {client_id_property: "?",
                                             client_tasks_per_class_train_property: "?",
                                             client_tasks_per_class_test_property: "?",
-                                            "samples_per_task": server_strategy_settings["samples_per_task"]}
+                                            "samples_per_task": server_strategy_settings.get("samples_per_task", 1)}
                                 gpi = GetPropertiesIns(gpi_dict)
                                 client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
                                 client_id = client_prompted.properties[client_id_property]
@@ -421,7 +425,7 @@ class FlowerServer(Strategy):
                             client_current_download_bandwidth_in_bytes_per_second_property: "?",
                             client_current_upload_bandwidth_in_bytes_per_second_property: "?",
                             client_current_latency_in_milliseconds_property: "?",
-                            "samples_per_task": server_strategy_settings["samples_per_task"]}
+                            "samples_per_task": server_strategy_settings.get("samples_per_task", 1)}
                 gpi_dict.update(idle_events_data_dict)
                 gpi = GetPropertiesIns(gpi_dict)
                 client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
@@ -635,8 +639,8 @@ class FlowerServer(Strategy):
         candidate_clients_history = self.get_attribute("_candidate_clients_history")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
-        num_tasks = sum([client_info["client_num_tasks_scheduled"]
-                         for _, client_info in selected_clients_history[current_round][current_phase].items()])
+        is_task_based_selection = all("client_num_tasks_scheduled" in client_info
+                                      for client_info in selected_clients_history[current_round][current_phase].values())
         num_available_clients = len(candidate_clients_history[current_round][current_phase])
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         client_selector = server_strategy_settings["strategy"]
@@ -649,9 +653,13 @@ class FlowerServer(Strategy):
             client_metrics_copy.pop("client_id")
             clients_metrics_dicts.append({client_id_str: client_metrics_copy})
         current_round_values = {"client_selector": client_selector,
-                                "num_tasks": num_tasks,
                                 "num_available_clients": num_available_clients,
                                 "clients_metrics_dicts": clients_metrics_dicts}
+        if is_task_based_selection:
+            # Conditionally insert "num_tasks".
+            num_tasks = sum([client_info["client_num_tasks_scheduled"]
+                             for _, client_info in selected_clients_history[current_round][current_phase].items()])
+            current_round_values.update({"num_tasks": num_tasks})
         if current_round not in selected_clients_metrics_history:
             selected_clients_metrics_history.update({current_round: {current_phase: current_round_values}})
         else:
@@ -715,14 +723,18 @@ class FlowerServer(Strategy):
     def _initialize_history_output_files(self,
                                          phase: str) -> None:
         # Get the necessary attributes.
+        server_strategy_settings = self.get_attribute("_server_strategy_settings")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
         output_settings = self.get_attribute("_output_settings")
         remove_output_files = output_settings["remove_output_files"]
         phase_substrings = []
+        is_task_based_selection = False
         if phase == "train":
             phase_substrings = ["fit", "train"]
+            is_task_based_selection = "num_tasks_training" in server_strategy_settings
         elif phase == "test":
             phase_substrings = ["evaluate", "test"]
+            is_task_based_selection = "num_tasks_testing" in server_strategy_settings
         output_files_phase = [{k: v} for k, v in output_settings.items()
                               if any(substring in k for substring in phase_substrings)]
         # Remove the history output files, if removing is enabled.
@@ -740,15 +752,14 @@ class FlowerServer(Strategy):
             header_line = None
             match history_output_file_key:
                 case "selected_fit_clients_history_file":
-                    header_line = ("{0},{1},{2},{3},{4},{5},{6},{7}\n"
-                                   .format("comm_round",
-                                           "client_selector",
-                                           "selection_duration",
-                                           "num_tasks",
-                                           "num_available_clients",
-                                           "available_clients",
-                                           "num_selected_clients",
-                                           "selected_clients"))
+                    # Base header columns.
+                    header_columns = ["comm_round", "client_selector", "selection_duration", "num_available_clients",
+                                      "available_clients", "num_selected_clients", "selected_clients"]
+                    # Conditionally insert "num_tasks".
+                    if is_task_based_selection:
+                        header_columns.insert(3, "num_tasks")
+                    # Build header line.
+                    header_line = ",".join(header_columns) + "\n"
                 case "individual_fit_metrics_history_file":
                     # Get the ordered set of fit metrics names.
                     fit_metrics_names = []
@@ -758,13 +769,15 @@ class FlowerServer(Strategy):
                         client_metrics = list(client_metrics_dict.values())[0]
                         fit_metrics_names.extend(client_metrics.keys())
                     fit_metrics_names = sorted(set(fit_metrics_names))
-                    header_line = ("{0},{1},{2},{3},{4},{5}\n"
-                                   .format("comm_round",
-                                           "client_selector",
-                                           "num_tasks",
-                                           "num_available_clients",
-                                           "client_id",
-                                           ",".join(fit_metrics_names)))
+                    # Base header columns.
+                    header_columns = ["comm_round", "client_selector", "num_available_clients", "client_id"]
+                    # Conditionally insert "num_tasks".
+                    if is_task_based_selection:
+                        header_columns.insert(2, "num_tasks")
+                    # Append metric names at the end.
+                    header_columns.extend(fit_metrics_names)
+                    # Build header line.
+                    header_line = ",".join(header_columns) + "\n"
                 case "metaheuristic_summary_fit_history_file":
                     header_line = ("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10}\n"
                                    .format("comm_round",
@@ -779,15 +792,14 @@ class FlowerServer(Strategy):
                                            "best_solution_costs",
                                            "diff_solutions_costs"))
                 case "selected_evaluate_clients_history_file":
-                    header_line = ("{0},{1},{2},{3},{4},{5},{6},{7}\n"
-                                   .format("comm_round",
-                                           "client_selector",
-                                           "selection_duration",
-                                           "num_tasks",
-                                           "num_available_clients",
-                                           "available_clients",
-                                           "num_selected_clients",
-                                           "selected_clients"))
+                    # Base header columns.
+                    header_columns = ["comm_round", "client_selector", "selection_duration", "num_available_clients",
+                                      "available_clients", "num_selected_clients", "selected_clients"]
+                    # Conditionally insert "num_tasks".
+                    if is_task_based_selection:
+                        header_columns.insert(3, "num_tasks")
+                    # Build header line.
+                    header_line = ",".join(header_columns) + "\n"
                 case "individual_evaluate_metrics_history_file":
                     # Get the ordered set of evaluate metrics names.
                     evaluate_metrics_names = []
@@ -797,13 +809,15 @@ class FlowerServer(Strategy):
                         client_metrics = list(client_metrics_dict.values())[0]
                         evaluate_metrics_names.extend(client_metrics.keys())
                     evaluate_metrics_names = sorted(set(evaluate_metrics_names))
-                    header_line = ("{0},{1},{2},{3},{4},{5}\n"
-                                   .format("comm_round",
-                                           "client_selector",
-                                           "num_tasks",
-                                           "num_available_clients",
-                                           "client_id",
-                                           ",".join(evaluate_metrics_names)))
+                    # Base header columns.
+                    header_columns = ["comm_round", "client_selector", "num_available_clients", "client_id"]
+                    # Conditionally insert "num_tasks".
+                    if is_task_based_selection:
+                        header_columns.insert(2, "num_tasks")
+                    # Append evaluation metric names at the end.
+                    header_columns.extend(evaluate_metrics_names)
+                    # Build header line.
+                    header_line = ",".join(header_columns) + "\n"
                 case "metaheuristic_summary_evaluate_history_file":
                     header_line = ("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10}\n"
                                    .format("comm_round",
@@ -849,10 +863,13 @@ class FlowerServer(Strategy):
         if round_timeout_in_seconds != "infinity":
             client_selector = client_selector + "_D{0}".format(round_timeout_in_seconds)
         phase_substrings = []
+        is_task_based_selection = False
         if current_phase == "train":
             phase_substrings = ["fit", "train"]
+            is_task_based_selection = "num_tasks_training" in server_strategy_settings
         elif current_phase == "test":
             phase_substrings = ["evaluate", "test"]
+            is_task_based_selection = "num_tasks_testing" in server_strategy_settings
         output_files_phase = [{k: v} for k, v in output_settings.items()
                               if any(substring in k for substring in phase_substrings)]
         # Write the data line to the history output files.
@@ -863,22 +880,23 @@ class FlowerServer(Strategy):
             match history_output_file_key:
                 case "selected_fit_clients_history_file":
                     selection_duration = client_selection_duration_history[current_round][current_phase]
-                    num_tasks = sum([client_info["client_num_tasks_scheduled"]
-                                     for _, client_info in selected_clients_history[current_round][current_phase].items()])
                     num_available_clients = len(candidate_clients_history[current_round][current_phase])
                     available_clients = "|".join(list(candidate_clients_history[current_round][current_phase].keys()))
                     num_selected_clients = len(selected_clients_history[current_round][current_phase])
                     selected_clients = "|".join([client_id
                                                  for client_id, _ in selected_clients_history[current_round][current_phase].items()])
-                    data_line = ("{0},{1},{2},{3},{4},{5},{6},{7}\n"
-                                 .format(current_round,
-                                         client_selector,
-                                         selection_duration,
-                                         num_tasks,
-                                         num_available_clients,
-                                         available_clients if available_clients else None,
-                                         num_selected_clients,
-                                         selected_clients if selected_clients else None))
+                    # Base data columns.
+                    data_values = [str(current_round), str(client_selector), str(selection_duration),
+                                   str(num_available_clients), str(available_clients if available_clients else None),
+                                   str(num_selected_clients), str(selected_clients if selected_clients else None)]
+                    # Conditionally insert "num_tasks".
+                    if is_task_based_selection:
+                        num_tasks = sum([client_info["client_num_tasks_scheduled"]
+                                         for _, client_info in
+                                         selected_clients_history[current_round][current_phase].items()])
+                        data_values.insert(3, str(num_tasks))
+                    # Build data line.
+                    data_line = ",".join(data_values) + "\n"
                     data_lines.append(data_line)
                 case "individual_fit_metrics_history_file":
                     current_round_values = selected_clients_metrics_history[current_round][current_phase]
@@ -888,7 +906,6 @@ class FlowerServer(Strategy):
                         client_metrics = list(client_metrics_dict.values())[0]
                         fit_metrics_names.extend(client_metrics.keys())
                     fit_metrics_names = sorted(set(fit_metrics_names))
-                    num_tasks = current_round_values["num_tasks"]
                     num_available_clients = current_round_values["num_available_clients"]
                     clients_metrics_dicts = current_round_values["clients_metrics_dicts"]
                     clients_metrics_dicts = sorted(clients_metrics_dicts, key=lambda x: list(x.keys()))
@@ -901,13 +918,17 @@ class FlowerServer(Strategy):
                             if fit_metric_name in client_metrics:
                                 fit_metric_value = str(client_metrics[fit_metric_name])
                             fit_metrics_values.append(fit_metric_value)
-                        data_line = ("{0},{1},{2},{3},{4},{5}\n"
-                                     .format(current_round,
-                                             client_selector,
-                                             num_tasks,
-                                             num_available_clients,
-                                             client_id_str,
-                                             ",".join(fit_metrics_values)))
+                        # Base data columns.
+                        data_values = [str(current_round), str(client_selector), str(num_available_clients),
+                                       str(client_id_str)]
+                        # Conditionally insert "num_tasks".
+                        if is_task_based_selection:
+                            num_tasks = current_round_values["num_tasks"]
+                            data_values.insert(2, str(num_tasks))
+                        # Append metrics at the end.
+                        data_values.extend(map(str, fit_metrics_values))
+                        # Build the data line.
+                        data_line = ",".join(data_values) + "\n"
                         data_lines.append(data_line)
                 case "metaheuristic_summary_fit_history_file":
                     metaheuristic_summary_fit_history = {}  # TODO
@@ -938,22 +959,23 @@ class FlowerServer(Strategy):
                         data_lines.append(data_line)
                 case "selected_evaluate_clients_history_file":
                     selection_duration = client_selection_duration_history[current_round][current_phase]
-                    num_tasks = sum([client_info["client_num_tasks_scheduled"]
-                                     for _, client_info in selected_clients_history[current_round][current_phase].items()])
                     num_available_clients = len(candidate_clients_history[current_round][current_phase])
                     available_clients = "|".join(list(candidate_clients_history[current_round][current_phase].keys()))
                     num_selected_clients = len(selected_clients_history[current_round][current_phase])
                     selected_clients = "|".join([client_id
                                                  for client_id, _ in selected_clients_history[current_round][current_phase].items()])
-                    data_line = ("{0},{1},{2},{3},{4},{5},{6},{7}\n"
-                                 .format(current_round,
-                                         client_selector,
-                                         selection_duration,
-                                         num_tasks,
-                                         num_available_clients,
-                                         available_clients if available_clients else None,
-                                         num_selected_clients,
-                                         selected_clients if selected_clients else None))
+                    # Base data columns.
+                    data_values = [str(current_round), str(client_selector), str(selection_duration),
+                                   str(num_available_clients), str(available_clients if available_clients else None),
+                                   str(num_selected_clients), str(selected_clients if selected_clients else None)]
+                    # Conditionally insert "num_tasks".
+                    if is_task_based_selection:
+                        num_tasks = sum([client_info["client_num_tasks_scheduled"]
+                                         for _, client_info in
+                                         selected_clients_history[current_round][current_phase].items()])
+                        data_values.insert(3, str(num_tasks))
+                    # Build data line.
+                    data_line = ",".join(data_values) + "\n"
                     data_lines.append(data_line)
                 case "individual_evaluate_metrics_history_file":
                     current_round_values = selected_clients_metrics_history[current_round][current_phase]
@@ -963,7 +985,6 @@ class FlowerServer(Strategy):
                         client_metrics = list(client_metrics_dict.values())[0]
                         evaluate_metrics_names.extend(client_metrics.keys())
                     evaluate_metrics_names = sorted(set(evaluate_metrics_names))
-                    num_tasks = current_round_values["num_tasks"]
                     num_available_clients = current_round_values["num_available_clients"]
                     clients_metrics_dicts = current_round_values["clients_metrics_dicts"]
                     clients_metrics_dicts = sorted(clients_metrics_dicts, key=lambda x: list(x.keys()))
@@ -976,13 +997,17 @@ class FlowerServer(Strategy):
                             if evaluate_metric_name in client_metrics:
                                 evaluate_metric_value = str(client_metrics[evaluate_metric_name])
                             evaluate_metrics_values.append(evaluate_metric_value)
-                        data_line = ("{0},{1},{2},{3},{4},{5}\n"
-                                     .format(current_round,
-                                             client_selector,
-                                             num_tasks,
-                                             num_available_clients,
-                                             client_id_str,
-                                             ",".join(evaluate_metrics_values)))
+                        # Base data columns.
+                        data_values = [str(current_round), str(client_selector), str(num_available_clients),
+                                       str(client_id_str)]
+                        # Conditionally insert "num_tasks".
+                        if is_task_based_selection:
+                            num_tasks = current_round_values["num_tasks"]
+                            data_values.insert(2, str(num_tasks))
+                        # Append evaluation metric values at the end.
+                        data_values.extend(map(str, evaluate_metrics_values))
+                        # Build data line.
+                        data_line = ",".join(data_values) + "\n"
                         data_lines.append(data_line)
                 case "metaheuristic_summary_evaluate_history_file":
                     metaheuristic_summary_evaluate_history = {}  # TODO
@@ -1118,10 +1143,6 @@ class FlowerServer(Strategy):
         phase = "train"
         # Get the set of active (candidate) clients.
         candidate_clients = self._map_available_clients(server_round, client_manager)
-        # Get the number of tasks to be scheduled to the selected clients.
-        num_tasks = server_strategy_settings["num_tasks_training"]
-        # Get the number of samples per task.
-        samples_per_task = server_strategy_settings["samples_per_task"]
         # Get the base training instructions to be used by the selected clients.
         fit_config = self.get_attribute("_fit_config")
         base_learning_rate = fit_config["learning_rate"]
@@ -1131,17 +1152,13 @@ class FlowerServer(Strategy):
         round_timeout_in_seconds = fl_settings["round_timeout_in_seconds"]
         if round_timeout_in_seconds == "infinity":
             round_timeout_in_seconds = inf
-        # Get the privacy approach.
-        data_privacy_approach = server_strategy_settings["data_privacy_approach"]["name"]
         # Start the clients' selection duration timer.
         selection_duration_start = process_time()
-        # Run the client selection procedure.
+        # Set the client selection procedure kwargs.
         kwargs = {"current_round": server_round,
                   "current_phase": phase,
                   "candidate_clients": candidate_clients,
                   "num_rounds": num_rounds,
-                  "num_tasks": num_tasks,
-                  "samples_per_task": samples_per_task,
                   "base_learning_rate": base_learning_rate,
                   "base_batch_size": base_batch_size,
                   "base_num_epochs": base_num_epochs,
@@ -1149,8 +1166,20 @@ class FlowerServer(Strategy):
                   "selected_clients_metrics_history": selected_clients_metrics_history,
                   "profiling_rounds": profiling_rounds,
                   "time_limit": round_timeout_in_seconds,
-                  "data_privacy_approach": data_privacy_approach,
                   "logger": logger}
+        if "num_tasks_training" in server_strategy_settings:
+            # Get the number of tasks to be scheduled to the selected clients.
+            num_tasks = server_strategy_settings["num_tasks_training"]
+            kwargs.update({"num_tasks": num_tasks})
+        if "samples_per_task" in server_strategy_settings:
+            # Get the number of samples per task.
+            samples_per_task = server_strategy_settings["samples_per_task"]
+            kwargs.update({"samples_per_task": samples_per_task})
+        if "data_privacy_approach" in server_strategy_settings:
+            # Get the privacy approach.
+            data_privacy_approach = server_strategy_settings["data_privacy_approach"]["name"]
+            kwargs.update({"data_privacy_approach": data_privacy_approach})
+        # Run the client selection procedure.
         selected_clients = client_selector.run_client_selection_procedure(**kwargs)
         if isinstance(selected_clients, list):
             # Monitor the future objects in a daemon thread (non-blocking).
@@ -1291,10 +1320,6 @@ class FlowerServer(Strategy):
         phase = "test"
         # Get the set of active (candidate) clients.
         candidate_clients = self._map_available_clients(server_round, client_manager)
-        # Get the number of tasks to be scheduled to the selected clients.
-        num_tasks = server_strategy_settings["num_tasks_testing"]
-        # Get the number of samples per task.
-        samples_per_task = server_strategy_settings["samples_per_task"]
         # Get the base testing instructions to be used by the selected clients.
         evaluate_config = self.get_attribute("_evaluate_config")
         base_batch_size = evaluate_config["batch_size"]
@@ -1302,24 +1327,32 @@ class FlowerServer(Strategy):
         round_timeout_in_seconds = fl_settings["round_timeout_in_seconds"]
         if round_timeout_in_seconds == "infinity":
             round_timeout_in_seconds = inf
-        # Get the privacy approach.
-        data_privacy_approach = server_strategy_settings["data_privacy_approach"]["name"]
         # Start the clients' selection duration timer.
         selection_duration_start = process_time()
-        # Run the client selection procedure.
+        # Set the client selection procedure kwargs.
         kwargs = {"current_round": server_round,
                   "current_phase": phase,
                   "candidate_clients": candidate_clients,
                   "num_rounds": num_rounds,
-                  "num_tasks": num_tasks,
-                  "samples_per_task": samples_per_task,
                   "base_batch_size": base_batch_size,
                   "selected_clients_history": selected_clients_history,
                   "selected_clients_metrics_history": selected_clients_metrics_history,
                   "profiling_rounds": profiling_rounds,
                   "time_limit": round_timeout_in_seconds,
-                  "data_privacy_approach": data_privacy_approach,
                   "logger": logger}
+        if "num_tasks_testing" in server_strategy_settings:
+            # Get the number of tasks to be scheduled to the selected clients.
+            num_tasks = server_strategy_settings["num_tasks_testing"]
+            kwargs.update({"num_tasks": num_tasks})
+        if "samples_per_task" in server_strategy_settings:
+            # Get the number of samples per task.
+            samples_per_task = server_strategy_settings["samples_per_task"]
+            kwargs.update({"samples_per_task": samples_per_task})
+        if "data_privacy_approach" in server_strategy_settings:
+            # Get the privacy approach.
+            data_privacy_approach = server_strategy_settings["data_privacy_approach"]["name"]
+            kwargs.update({"data_privacy_approach": data_privacy_approach})
+        # Run the client selection procedure.
         selected_clients = client_selector.run_client_selection_procedure(**kwargs)
         if isinstance(selected_clients, list):
             # Monitor the future objects in a daemon thread (non-blocking).

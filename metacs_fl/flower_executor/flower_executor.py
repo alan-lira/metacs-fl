@@ -97,8 +97,9 @@ class FlowerExecutor:
             device_emulation_settings = current_execution_devices[client_id][1]
             personalized_settings.update({"_device_emulation_settings": device_emulation_settings})
         # Profile the client's host.
+        num_host_profiles = execution_dict["num_host_profiles"]
         host_profiler = HostProfiler(Path(execution_output_folder))
-        host_profile = host_profiler.profile_host_n_times(client_id)
+        host_profile = host_profiler.profile_host_n_times(client_id, num_host_profiles)
         personalized_settings["_host_profile"] = host_profile
         # Return the personalized_settings dictionary.
         return personalized_settings

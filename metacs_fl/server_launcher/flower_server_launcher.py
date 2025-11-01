@@ -101,6 +101,17 @@ class FlowerServerLauncher:
         server_strategy_settings = parse_config_section(config_file, server_strategy_section)
         server_strategy = server_strategy_settings["strategy"]
         match server_strategy:
+            case "Random":
+                server_strategy_implementation_section = "{0} Settings".format(server_strategy)
+                server_strategy_implementation_settings = parse_config_section(config_file,
+                                                                               server_strategy_implementation_section)
+                model_aggregator = server_strategy_implementation_settings["model_aggregator"]
+                model_aggregator_section = "{0} Settings".format(model_aggregator)
+                model_aggregator_settings = parse_config_section(config_file, model_aggregator_section)
+                model_aggregator_settings["name"] = model_aggregator
+                server_strategy_implementation_settings["model_aggregator"] = model_aggregator_settings
+                server_strategy_settings.update(server_strategy_implementation_settings)
+                self._set_attribute("_server_strategy_settings", server_strategy_settings)
             case "SBAC-PAD_2024":
                 server_strategy_implementation_section = "{0} Settings".format(server_strategy)
                 server_strategy_implementation_settings = parse_config_section(config_file,
@@ -304,7 +315,7 @@ class FlowerServerLauncher:
         # Initialize the server strategy.
         server_strategy = None
         match strategy:
-            case x if x in ["SBAC-PAD_2024", "MetaCS-FL"]:
+            case x if x in ["Random", "SBAC-PAD_2024", "MetaCS-FL"]:
                 server_strategy = FlowerServer(id_=server_id,
                                                fl_settings=fl_settings,
                                                server_strategy_settings=server_strategy_settings,
