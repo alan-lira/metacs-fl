@@ -76,7 +76,6 @@ class FlowerExecutor:
                                               current_execution_devices: list | None = None) -> dict:
         # Initialize the personalized_settings dictionary.
         personalized_settings = {}
-        execution_output_folder = None
         if execution_dict:
             # Get the execution name and settings.
             execution_name = next(iter(execution_dict))
@@ -92,15 +91,15 @@ class FlowerExecutor:
             # Set the number of partitions based on the number of clients (same value for all clients).
             num_partitions = execution_settings["num_clients"]
             personalized_settings.update({"_federated_dataset_settings": {"num_partitions": num_partitions}})
+            # Profile the client's host.
+            num_host_profiles = execution_settings["num_host_profiles"]
+            host_profiler = HostProfiler(Path(execution_output_folder))
+            host_profile = host_profiler.profile_host_n_times(client_id, num_host_profiles)
+            personalized_settings["_host_profile"] = host_profile
         # Set the device emulation settings.
         if current_execution_devices:
             device_emulation_settings = current_execution_devices[client_id][1]
             personalized_settings.update({"_device_emulation_settings": device_emulation_settings})
-        # Profile the client's host.
-        num_host_profiles = execution_dict["num_host_profiles"]
-        host_profiler = HostProfiler(Path(execution_output_folder))
-        host_profile = host_profiler.profile_host_n_times(client_id, num_host_profiles)
-        personalized_settings["_host_profile"] = host_profile
         # Return the personalized_settings dictionary.
         return personalized_settings
 

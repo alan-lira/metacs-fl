@@ -5,6 +5,8 @@ from os import devnull, environ
 environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 sys.stderr = open(devnull, "w")
 
+from contractions import fix
+from emoji import demojize
 from flwr.common import NDArray
 from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import DirichletPartitioner, IidPartitioner, PathologicalPartitioner
@@ -14,10 +16,12 @@ from keras.applications.efficientnet_v2 import preprocess_input as efficientnet_
 from keras.applications.mobilenet_v2 import preprocess_input as mobilenet_v2_preprocess_input
 from keras.applications.resnet import preprocess_input as resnet50_preprocess_input
 from keras.applications.vgg16 import preprocess_input as vgg16_preprocess_input
-from numpy import array, empty, int64, ndarray, where
+from nltk.corpus import stopwords
+from numpy import array, empty, int64, ndarray, int32
 from pathlib import Path
 from PIL import Image
 from random import sample
+from re import sub
 from tensorflow import expand_dims
 from tensorflow.image import resize
 from tensorflow.keras.preprocessing.text import Tokenizer
@@ -41,17 +45,13 @@ def get_images_attributes(dataset_folder: Path) -> tuple:
 
 def get_classes_distribution(y: NDArray) -> dict:
     classes_distribution = {}
-    for index in range(0, len(y)):
-        y_label = None
-        if type(y[index]) == ndarray:
-            y_label = str(y[index][0])
-        elif type(y[index]) == int64:
-            y_label = str(y[index])
-        if y_label not in classes_distribution:
-            classes_distribution.update({y_label: 1})
-        else:
-            classes_distribution[y_label] += 1
-    sorted_keys = sorted(list(classes_distribution.keys()), key=lambda x: (len(x), x))
+    for index in range(len(y)):
+        val = y[index]
+        if isinstance(val, ndarray):
+            val = val.item() if val.size == 1 else val[0]
+        y_label = str(int(val))
+        classes_distribution[y_label] = classes_distribution.get(y_label, 0) + 1
+    sorted_keys = sorted(classes_distribution.keys(), key=lambda x: (len(x), x))
     classes_distribution = {k: classes_distribution[k] for k in sorted_keys}
     return classes_distribution
 
@@ -287,53 +287,73 @@ def _reshape_images(x: NDArray,
     return x_reshaped
 
 
+def _normalize_sentiment140_text(text: str) -> str:
+    """Normalize a single tweet, based on the paper 'Federated Learning for Sentiment Analysis in Presence of Non-IID Data:
+    Sensitivity of Deep Learning Models' (Gholamiangonabadi & Grolinger, 2024)"""
+    # Replace emojis with descriptive words (e.g., ":)" → "smile").
+    text = demojize(text, delimiters=(" ", " "))
+    # Expand contractions (e.g., "don't" → "do not").
+    text = fix(text)
+    # Lowercase all characters.
+    text = text.lower()
+    # Remove URLs, mentions, and hashtags (keep hashtag words).
+    text = sub(r"http\S+|www\S+", "", text)
+    text = sub(r"@\w+", "", text)
+    text = sub(r"#", "", text)
+    # Remove punctuation, numbers, and non-alphabetic characters.
+    text = sub(r"[^a-z\s]", " ", text)
+    # Collapse multiple spaces.
+    text = sub(r"\s+", " ", text).strip()
+    # Remove stopwords except "no", "not", "none".
+    stopwords_list = set(stopwords.words("english")) - {"no", "not", "none"}
+    words = [w for w in text.split() if w not in stopwords_list]
+    return " ".join(words)
+
+
 def _pre_process_sentiment140_text_dataset(texts: NDArray,
                                            labels: NDArray,
                                            vocab_size: int,
                                            max_length: int,
-                                           tokenizer = None) -> tuple:
-    # Convert to list and handle empty texts.
+                                           tokenizer: Tokenizer | None = None) -> tuple:
+    # Ensure list input.
     texts = list(texts) if not isinstance(texts, list) else texts
-    # Filter out None, empty, or whitespace-only texts.
-    valid_indices = []
-    valid_texts = []
+    # Filter out None or empty strings.
+    valid_indices, valid_texts = [], []
     for i, text in enumerate(texts):
         if text is not None and str(text).strip():
             valid_indices.append(i)
             valid_texts.append(str(text).strip())
     if not valid_texts:
         print("Warning: No valid texts found after filtering")
-        if labels is not None:
-            return array([]), array([]), tokenizer
-        return array([]), None, tokenizer
-    # Create and fit tokenizer if not provided.
+        empty = array([])
+        return (empty, empty if labels is not None else None, tokenizer)
+    # Normalization step.
+    normalized_texts = [_normalize_sentiment140_text(t) for t in valid_texts]
+    # Tokenization step.
     if tokenizer is None:
         tokenizer = Tokenizer(num_words=vocab_size, oov_token="<OOV>")
-        tokenizer.fit_on_texts(valid_texts)
-    # Convert texts to sequences.
-    sequences = tokenizer.texts_to_sequences(valid_texts)
-    # Filter out empty sequences (texts that become empty after tokenization).
-    non_empty_sequences = []
-    non_empty_indices = []
+        tokenizer.fit_on_texts(normalized_texts)
+    # Convert texts to integer sequences.
+    sequences = tokenizer.texts_to_sequences(normalized_texts)
+    # Remove empty sequences.
+    non_empty_sequences, non_empty_indices = [], []
     for i, seq in enumerate(sequences):
         if len(seq) > 0:
             non_empty_sequences.append(seq)
             non_empty_indices.append(valid_indices[i])
     if not non_empty_sequences:
-        print("All sequences are empty after tokenization!")
-        if labels is not None:
-            return array([]), array([]), tokenizer
-        return array([]), None, tokenizer
+        print("Warning: All sequences empty after tokenization")
+        empty = array([])
+        return (empty, empty if labels is not None else None, tokenizer)
     # Pad sequences.
     padded_sequences = pad_sequences(non_empty_sequences, maxlen=max_length, padding="post")
-    # Process labels if provided.
+    # Get the labels.
     binary_labels = None
     if labels is not None:
-        # Filter labels to match the non-empty sequences.
         labels_array = array(labels)
         valid_labels = labels_array[non_empty_indices]
-        # Convert labels from Sentiment140 format (0,1) to binary (0,1).
-        binary_labels = where(valid_labels == 1, 1, 0)
+        # Dataset already uses 0/1, no remapping needed
+        binary_labels = valid_labels.astype(int32)
     return padded_sequences, binary_labels, tokenizer
 
 
