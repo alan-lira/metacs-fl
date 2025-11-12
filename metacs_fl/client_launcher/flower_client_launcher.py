@@ -76,6 +76,7 @@ class FlowerClientLauncher:
         # Load the logger.
         self._logger = self._load_logger()
         # Load the dataset.
+        dataset_loading_dict = {}
         loading_approach = self.get_attribute("_dataset_settings")["loading_approach"]
         local_dataset_settings = self.get_attribute("_local_dataset_settings")
         federated_dataset_settings = self.get_attribute("_federated_dataset_settings")
@@ -96,14 +97,18 @@ class FlowerClientLauncher:
                                                                self._logger))
         else:
             self._fds = instantiate_fds(federated_dataset_settings)
-            self._x_train, self._y_train, self._x_test, self._y_test, dataset_loading_duration \
-                = load_dataset(self._client_id,
-                               loading_approach,
-                               local_dataset_settings,
-                               federated_dataset_settings,
-                               model_settings,
-                               self._fds)
-        # Log the dataset loading duration.
+            dataset_loading_dict = load_dataset(self._client_id,
+                                                loading_approach,
+                                                local_dataset_settings,
+                                                federated_dataset_settings,
+                                                model_settings,
+                                                self._fds)
+            self._x_train = dataset_loading_dict["x_train"]
+            self._y_train = dataset_loading_dict["y_train"]
+            self._x_test = dataset_loading_dict["x_test"]
+            self._y_test = dataset_loading_dict["y_test"]
+            dataset_loading_duration = dataset_loading_dict["dataset_loading_duration"]
+                # Log the dataset loading duration.
         message = ("[Client {0}] The dataset loading took {1} seconds."
                    .format(self._client_id, dataset_loading_duration))
         log_message(self._logger, message, "DEBUG")
@@ -118,9 +123,12 @@ class FlowerClientLauncher:
             model_actor = self._ray_node_shared_actors["model_actor"]
             self._model, self._metrics_names \
                 = get(model_actor.load_model_for_client.remote(model_settings,
-                                                               learning_rate_schedule_settings))
+                                                               learning_rate_schedule_settings,
+                                                               dataset_loading_dict))
         else:
-            self._model, self._metrics_names = load_model(model_settings, learning_rate_schedule_settings)
+            self._model, self._metrics_names = load_model(model_settings,
+                                                          learning_rate_schedule_settings,
+                                                          dataset_loading_dict)
         # Get the client initialization duration.
         initialization_duration_in_seconds = perf_counter() - initialization_start
         # Log a 'client initialization duration' message.

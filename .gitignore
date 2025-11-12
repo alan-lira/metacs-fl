@@ -176,3 +176,6 @@ logging/
 output/
 output_execution/
 output_simulation/
+
+# Ignore GloVe embedding files.
+glove_embeddings

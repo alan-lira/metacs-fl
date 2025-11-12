@@ -248,12 +248,23 @@ def load_custom_ffnn_sentiment140(model_provider_specific_settings: dict) -> Mod
     vocab_size = model_provider_specific_settings["vocab_size"]
     max_length = model_provider_specific_settings["max_length"]
     embedding_dim = model_provider_specific_settings["embedding_dim"]
+    embedding_matrix = model_provider_specific_settings["embedding_matrix"]
     # Initialize the model architecture.
     model = Sequential()
     # Input Layer.
     model.add(layers.Input(shape=(max_length,)))
     # Embedding layer to learn word representations.
-    model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
+    if embedding_matrix is not None:
+        # Use pre-trained GloVe embeddings.
+        print("Using pre-trained GloVe embeddings...")
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
+                                   output_dim=embedding_matrix.shape[1],
+                                   weights=[embedding_matrix],
+                                   input_length=max_length,
+                                   trainable=False))
+    else:
+        print("Using randomly initialized embeddings...")
+        model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
     # Global average pooling to aggregate embeddings across the sequence.
     model.add(layers.GlobalAveragePooling1D())
     # Fully connected layer with ReLU activation.
@@ -272,12 +283,23 @@ def load_custom_cnn_sentiment140(model_provider_specific_settings: dict) -> Mode
     vocab_size = model_provider_specific_settings["vocab_size"]
     max_length = model_provider_specific_settings["max_length"]
     embedding_dim = model_provider_specific_settings["embedding_dim"]
+    embedding_matrix = model_provider_specific_settings["embedding_matrix"]
     # Initialize the model architecture.
     model = Sequential()
     # Input Layer.
     model.add(layers.Input(shape=(max_length,)))
     # Embedding layer to learn distributed representations of words.
-    model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
+    if embedding_matrix is not None:
+        # Use pre-trained GloVe embeddings.
+        print("Using pre-trained GloVe embeddings...")
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
+                                   output_dim=embedding_matrix.shape[1],
+                                   weights=[embedding_matrix],
+                                   input_length=max_length,
+                                   trainable=False))
+    else:
+        print("Using randomly initialized embeddings...")
+        model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
     # First convolutional block to extract local n-gram features.
     model.add(layers.Conv1D(filters=128, kernel_size=5, activation="relu", padding="same"))
     model.add(layers.MaxPooling1D(pool_size=2))
@@ -301,12 +323,23 @@ def load_custom_lstm_sentiment140(model_provider_specific_settings: dict) -> Mod
     vocab_size = model_provider_specific_settings["vocab_size"]
     max_length = model_provider_specific_settings["max_length"]
     embedding_dim = model_provider_specific_settings["embedding_dim"]
+    embedding_matrix = model_provider_specific_settings["embedding_matrix"]
     # Initialize the model architecture.
     model = Sequential()
     # Input layer (sequence of token indices).
     model.add(layers.Input(shape=(max_length,)))
     # Embedding layer to map tokens to low-dimensional dense vectors.
-    model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
+    if embedding_matrix is not None:
+        # Use pre-trained GloVe embeddings.
+        print("Using pre-trained GloVe embeddings...")
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
+                                   output_dim=embedding_matrix.shape[1],
+                                   weights=[embedding_matrix],
+                                   input_length=max_length,
+                                   trainable=False))
+    else:
+        print("Using randomly initialized embeddings...")
+        model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
     # LSTM layer to capture sequential dependencies.
     model.add(layers.LSTM(32, return_sequences=False))
     # Fully connected layer for learned feature projection.
@@ -359,12 +392,23 @@ def load_custom_transformer_sentiment140(model_provider_specific_settings: dict)
     vocab_size = model_provider_specific_settings["vocab_size"]
     max_length = model_provider_specific_settings["max_length"]
     embedding_dim = model_provider_specific_settings["embedding_dim"]
+    embedding_matrix = model_provider_specific_settings["embedding_matrix"]
     # Initialize the model architecture.
     model = Sequential()
     # Input Layer.
     model.add(layers.Input(shape=(max_length,)))
     # Embedding layer to represent input tokens.
-    model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
+    if embedding_matrix is not None:
+        # Use pre-trained GloVe embeddings.
+        print("Using pre-trained GloVe embeddings...")
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
+                                   output_dim=embedding_matrix.shape[1],
+                                   weights=[embedding_matrix],
+                                   input_length=max_length,
+                                   trainable=False))
+    else:
+        print("Using randomly initialized embeddings...")
+        model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
     # Layer normalization to stabilize and scale the embeddings.
     model.add(layers.LayerNormalization())
     # MultiHeadAttention layer.
@@ -572,7 +616,8 @@ def load_metrics(model_settings: dict) -> list[Metric]:
 
 
 def load_model(model_settings: dict,
-               learning_rate_schedule_settings: dict) -> tuple:
+               learning_rate_schedule_settings: dict,
+               dataset_loading_dict: dict) -> tuple:
     model_provider = model_settings["provider"]
     model_provider_settings = model_settings[model_provider]
     model_name = model_provider_settings["model_name"]
@@ -601,12 +646,20 @@ def load_model(model_settings: dict,
             case "Custom_CNN_CINIC-10":
                 model = load_custom_cnn_cinic_10()
             case "Custom_FFNN_Sentiment140":
+                embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
+                model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
                 model = load_custom_ffnn_sentiment140(model_provider_specific_settings)
             case "Custom_CNN_Sentiment140":
+                embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
+                model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
                 model = load_custom_cnn_sentiment140(model_provider_specific_settings)
             case "Custom_LSTM_Sentiment140":
+                embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
+                model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
                 model = load_custom_lstm_sentiment140(model_provider_specific_settings)
             case "Custom_Transformer_Sentiment140":
+                embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
+                model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
                 model = load_custom_transformer_sentiment140(model_provider_specific_settings)
             case "EfficientNetB0":
                 model = load_efficientnet_b0(model_provider_specific_settings)

@@ -20,12 +20,17 @@ class FederatedDatasetActor:
             return self._dataset[client_id]
         # Otherwise, load and cache the dataset for this particular client.
         fds = instantiate_fds(federated_dataset_settings)
-        x_train, y_train, x_test, y_test, dataset_loading_duration = load_dataset(client_id,
-                                                                                  loading_approach,
-                                                                                  local_dataset_settings,
-                                                                                  federated_dataset_settings,
-                                                                                  model_settings,
-                                                                                  fds)
+        dataset_loading_dict = load_dataset(client_id,
+                                            loading_approach,
+                                            local_dataset_settings,
+                                            federated_dataset_settings,
+                                            model_settings,
+                                            fds)
+        x_train = dataset_loading_dict["x_train"]
+        y_train = dataset_loading_dict["y_train"]
+        x_test = dataset_loading_dict["x_test"]
+        y_test = dataset_loading_dict["y_test"]
+        dataset_loading_duration = dataset_loading_dict["dataset_loading_duration"]
         self._dataset[client_id] = (x_train, y_train, x_test, y_test)
         # Return the dataset for this particular client.
         return x_train, y_train, x_test, y_test, dataset_loading_duration

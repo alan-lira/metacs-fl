@@ -1,5 +1,5 @@
 import sys
-from os import devnull, environ
+from os import devnull, environ, getpid
 
 # Suppress TensorFlow C++ log messages (redirecting stderr to null).
 environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -17,16 +17,21 @@ from keras.applications.mobilenet_v2 import preprocess_input as mobilenet_v2_pre
 from keras.applications.resnet import preprocess_input as resnet50_preprocess_input
 from keras.applications.vgg16 import preprocess_input as vgg16_preprocess_input
 from nltk.corpus import stopwords
-from numpy import array, empty, int64, ndarray, int32
+from numpy import array, asarray, empty, int64, ndarray, int32
+from numpy.random import normal
 from pathlib import Path
 from PIL import Image
 from random import sample
 from re import sub
+from requests import get
 from tensorflow import expand_dims
 from tensorflow.image import resize
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
-from time import perf_counter
+from time import perf_counter, sleep
+from tqdm import tqdm
+from urllib.request import urlretrieve
+from zipfile import ZipFile
 
 
 def get_images_count(dataset_folder: Path) -> int:
@@ -357,6 +362,89 @@ def _pre_process_sentiment140_text_dataset(texts: NDArray,
     return padded_sequences, binary_labels, tokenizer
 
 
+# Progress bar hook.
+class DownloadProgressBar(tqdm):
+
+    def update_to(self,
+                  b: int = 1,
+                  bsize: int = 1,
+                  tsize: int = None):
+        if tsize is not None:
+            self.total = tsize
+        self.update(b * bsize - self.n)
+
+
+def _ensure_glove_embeddings_are_available(embedding_dim: int = 100,
+                                           glove_source: str = "twitter",
+                                           glove_embeddings_folder: Path = "glove_embeddings") -> Path:
+    url = "https://nlp.stanford.edu/data/glove.{0}.27B.zip".format(glove_source)
+    glove_embeddings_folder.mkdir(parents=True, exist_ok=True)
+    glove_dir = glove_embeddings_folder / "glove.{0}.27B".format(glove_source)
+    zip_path = glove_embeddings_folder / "glove.{0}.27B.zip".format(glove_source)
+    txt_path = glove_dir / "glove.{0}.27B.{1}d.txt".format(glove_source, embedding_dim)
+    flag_path = glove_embeddings_folder / ".glove_download_in_progress.flag"
+    # If embeddings already available, just return.
+    if txt_path.exists():
+        return txt_path
+    # If another process is downloading, wait for it.
+    wait_time = 0
+    while flag_path.exists():
+        if wait_time % 5 == 0:
+            print("[PID: {0}] Another process is downloading embeddings, waiting...".format(getpid()))
+        sleep(2)
+        wait_time += 2
+        if wait_time > 1800:
+            raise TimeoutError("Waited too long for embedding download to finish! ({0} seconds)".format(wait_time))
+    # Start own download with exclusive flag.
+    try:
+        flag_path.touch(exist_ok=False)
+    except FileExistsError:
+        # Another process beat us to it, wait for completion.
+        return _ensure_glove_embeddings_are_available(embedding_dim, glove_source, glove_embeddings_folder)
+    try:
+        # Double-check if someone else already completed it.
+        if txt_path.exists():
+            flag_path.unlink(missing_ok=True)
+            return txt_path
+        # Download.
+        print("[PID: {0}] Downloading GloVe embeddings from {1} ...".format(getpid(), url))
+        with DownloadProgressBar(unit="B", unit_scale=True, miniters=1, desc="Downloading GloVe") as t:
+            urlretrieve(url, zip_path, reporthook=t.update_to)
+        # Extract.
+        print("PID: [{0}] Extracting {1} ...".format(getpid(), zip_path))
+        with ZipFile(zip_path, "r") as zf:
+            zf.extractall(glove_dir)
+        # Ready message.
+        print("[{0}] GloVe embeddings ready at {1}".format(getpid(), txt_path))
+    finally:
+        # Remove flag.
+        flag_path.unlink(missing_ok=True)
+    return txt_path
+
+
+def _load_glove_embeddings(tokenizer: Tokenizer,
+                           embedding_dim: int,
+                           glove_embedding_file: Path) -> ndarray:
+    if not glove_embedding_file.exists():
+        raise FileNotFoundError("GloVe file not found at {0}".format(glove_embedding_file))
+    word_index = tokenizer.word_index
+    vocab_size = min(len(word_index) + 1, tokenizer.num_words or len(word_index) + 1)
+    # Initialize with random small values.
+    embedding_matrix = normal(scale=0.6, size=(vocab_size, embedding_dim))
+    print("Loading GloVe embeddings from: {0}".format(glove_embedding_file))
+    with open(glove_embedding_file, encoding="utf8") as f:
+        for line in f:
+            values = line.split()
+            word = values[0]
+            if word in word_index:
+                vector = asarray(values[1:], dtype="float32")
+                idx = word_index[word]
+                if idx < vocab_size:
+                    embedding_matrix[idx] = vector
+    print("GloVe embedding matrix shape: {0}".format(embedding_matrix.shape))
+    return embedding_matrix
+
+
 def _pre_process_image_dataset(dataset: str,
                                model_settings: dict,
                                x_train: NDArray,
@@ -419,7 +507,9 @@ def load_dataset(client_id: int,
                  local_dataset_settings: dict,
                  federated_dataset_settings: dict,
                  model_settings: dict,
-                 fds: FederatedDataset) -> tuple:
+                 fds: FederatedDataset) -> dict:
+    # Initialize the dataset loading dict.
+    dataset_loading_dict = {}
     # Get the model specific settings (can be necessary for pre-processing of dataset).
     model_provider = model_settings["provider"]
     model_provider_settings = model_settings[model_provider]
@@ -455,14 +545,29 @@ def load_dataset(client_id: int,
                                                                    vocab_size,
                                                                    max_length,
                                                                    tokenizer=tokenizer)
+        # Load GloVe embeddings (aligned with the tokenizer) if configured.
+        embedding_matrix = None
+        use_glove_embedding = model_provider_specific_settings["use_glove_embedding"]
+        if use_glove_embedding:
+            embedding_dim = model_provider_specific_settings["embedding_dim"]
+            glove_source = model_provider_specific_settings["glove_source"]
+            glove_embeddings_folder = Path(model_provider_specific_settings["glove_embeddings_folder"])
+            glove_embedding_file = _ensure_glove_embeddings_are_available(embedding_dim, glove_source, glove_embeddings_folder)
+            embedding_matrix = _load_glove_embeddings(tokenizer, embedding_dim, glove_embedding_file)
+        dataset_loading_dict.update({"embedding_matrix": embedding_matrix})
     elif dataset in ["uoft-cs/cifar10", "uoft-cs/cifar100", "ylecun/mnist", "zalando-datasets/fashion_mnist",
                      "zh-plus/tiny-imagenet", "benjamin-paine/imagenet-1k", "ufldl-stanford/svhn", "flwrlabs/cinic10"]:
         # Pre-process the image dataset.
         x_train, x_test = _pre_process_image_dataset(dataset, model_settings, x_train, x_test)
     # Get the dataset load duration.
     dataset_loading_duration = perf_counter() - dataset_loading_duration_start
-    # Return the loaded dataset (x_train, y_train, x_test, and y_test).
-    return x_train, y_train, x_test, y_test, dataset_loading_duration
+    # Return the dataset loading dict.
+    dataset_loading_dict.update({"x_train": x_train,
+                                 "y_train": y_train,
+                                 "x_test": x_test,
+                                 "y_test": y_test,
+                                 "dataset_loading_duration": dataset_loading_duration})
+    return dataset_loading_dict
 
 
 def get_task_assignment_capacities(x_train: NDArray,
