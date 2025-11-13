@@ -94,7 +94,7 @@ class FlowerClientLauncher:
                                                                local_dataset_settings,
                                                                federated_dataset_settings,
                                                                model_settings,
-                                                               self._logger))
+                                                               self._root_output_folder))
         else:
             self._fds = instantiate_fds(federated_dataset_settings)
             dataset_loading_dict = load_dataset(self._client_id,
@@ -102,7 +102,8 @@ class FlowerClientLauncher:
                                                 local_dataset_settings,
                                                 federated_dataset_settings,
                                                 model_settings,
-                                                self._fds)
+                                                self._fds,
+                                                Path(self._root_output_folder))
             self._x_train = dataset_loading_dict["x_train"]
             self._y_train = dataset_loading_dict["y_train"]
             self._x_test = dataset_loading_dict["x_test"]

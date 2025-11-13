@@ -20,6 +20,7 @@ from nltk.corpus import stopwords
 from numpy import array, asarray, empty, int64, ndarray, int32
 from numpy.random import normal
 from pathlib import Path
+from pickle import dump as pickle_dump, load as pickle_load
 from PIL import Image
 from random import sample
 from re import sub
@@ -292,6 +293,58 @@ def _reshape_images(x: NDArray,
     return x_reshaped
 
 
+def _build_or_load_shared_tokenizer(client_id: int,
+                                    fds: FederatedDataset,
+                                    federated_dataset_settings: dict,
+                                    vocab_size: int,
+                                    root_output_folder: Path,
+                                    timeout: int = 1800) -> Tokenizer:
+    root_output_folder.mkdir(parents=True, exist_ok=True)
+    tokenizer_file = root_output_folder / "shared_tokenizer.pkl"
+    lock_path = tokenizer_file.with_suffix(".lock")
+    # If the tokenizer already exists, load it immediately.
+    if tokenizer_file.exists():
+        with tokenizer_file.open("rb") as f:
+            return pickle_load(f)
+    try:
+        # Try to acquire exclusive lock (atomic file creation).
+        with lock_path.open("x") as lock_file:
+            lock_file.write("locked")
+        print("[Client {0}] Lock acquired, building shared tokenizer...".format(client_id))
+        # Only the first client builds the tokenizer.
+        all_texts = []
+        num_partitions = federated_dataset_settings["num_partitions"]
+        # Collect all text data from every partition.
+        for cid in range(num_partitions):
+            partition = fds.load_partition(cid, "train")
+            partition.set_format("numpy")
+            all_texts.extend(partition["text"])
+        tokenizer = Tokenizer(num_words=vocab_size, oov_token="<OOV>")
+        tokenizer.fit_on_texts(all_texts)
+        # Save the shared tokenizer.
+        with tokenizer_file.open("wb") as f:
+            pickle_dump(tokenizer, f)
+        print("[Client {0}] Shared tokenizer saved at {1}".format(client_id, tokenizer_file))
+        return tokenizer
+    except FileExistsError:
+        # Another client is currently building the tokenizer.
+        print("[Client {0}] Waiting for shared tokenizer to be ready...".format(client_id))
+        waited = 0
+        while not tokenizer_file.exists():
+            sleep(2)
+            waited += 2
+            if waited > timeout:
+                raise TimeoutError("[Client {0}] Timeout after {1}s waiting for tokenizer.".format(client_id, timeout))
+        with tokenizer_file.open("rb") as f:
+            tokenizer = pickle_load(f)
+        print("[Client {0}] Loaded shared tokenizer after waiting.".format(client_id))
+        return tokenizer
+    finally:
+        # If this process created the lock, remove it after completion.
+        if lock_path.exists():
+            lock_path.unlink()
+
+
 def _normalize_sentiment140_text(text: str) -> str:
     """Normalize a single tweet, based on the paper 'Federated Learning for Sentiment Analysis in Presence of Non-IID Data:
     Sensitivity of Deep Learning Models' (Gholamiangonabadi & Grolinger, 2024)"""
@@ -424,23 +477,26 @@ def _ensure_glove_embeddings_are_available(embedding_dim: int = 100,
 
 def _load_glove_embeddings(tokenizer: Tokenizer,
                            embedding_dim: int,
-                           glove_embedding_file: Path) -> ndarray:
+                           glove_embedding_file: Path,
+                           global_vocab_size: int) -> ndarray:
     if not glove_embedding_file.exists():
         raise FileNotFoundError("GloVe file not found at {0}".format(glove_embedding_file))
-    word_index = tokenizer.word_index
-    vocab_size = min(len(word_index) + 1, tokenizer.num_words or len(word_index) + 1)
-    # Initialize with random small values.
-    embedding_matrix = normal(scale=0.6, size=(vocab_size, embedding_dim))
+    # Fix the matrix size to the global vocabulary.
+    embedding_matrix = normal(scale=0.6, size=(global_vocab_size, embedding_dim))
     print("Loading GloVe embeddings from: {0}".format(glove_embedding_file))
+    glove_embeddings = {}
     with open(glove_embedding_file, encoding="utf8") as f:
         for line in f:
             values = line.split()
             word = values[0]
-            if word in word_index:
-                vector = asarray(values[1:], dtype="float32")
-                idx = word_index[word]
-                if idx < vocab_size:
-                    embedding_matrix[idx] = vector
+            vector = asarray(values[1:], dtype="float32")
+            glove_embeddings[word] = vector
+    # Map words in tokenizer to embedding indices.
+    for word, idx in tokenizer.word_index.items():
+        if idx < global_vocab_size:
+            vector = glove_embeddings.get(word)
+            if vector is not None:
+                embedding_matrix[idx] = vector
     print("GloVe embedding matrix shape: {0}".format(embedding_matrix.shape))
     return embedding_matrix
 
@@ -507,7 +563,8 @@ def load_dataset(client_id: int,
                  local_dataset_settings: dict,
                  federated_dataset_settings: dict,
                  model_settings: dict,
-                 fds: FederatedDataset) -> dict:
+                 fds: FederatedDataset,
+                 root_output_folder: Path) -> dict:
     # Initialize the dataset loading dict.
     dataset_loading_dict = {}
     # Get the model specific settings (can be necessary for pre-processing of dataset).
@@ -533,12 +590,14 @@ def load_dataset(client_id: int,
         # Pre-process the text dataset (sentiment140).
         vocab_size = model_provider_specific_settings["vocab_size"]
         max_length = model_provider_specific_settings["max_length"]
+        # Build or load the "shared" tokenizer.
+        tokenizer = _build_or_load_shared_tokenizer(client_id, fds, federated_dataset_settings, vocab_size, root_output_folder)
         # Pre-process the training data (fits the tokenizer).
-        x_train, y_train, tokenizer = _pre_process_sentiment140_text_dataset(x_train,
-                                                                             y_train,
-                                                                             vocab_size,
-                                                                             max_length,
-                                                                             tokenizer=None)
+        x_train, y_train, _ = _pre_process_sentiment140_text_dataset(x_train,
+                                                                     y_train,
+                                                                     vocab_size,
+                                                                     max_length,
+                                                                     tokenizer=tokenizer)
         # Pre-process the test data (reuse the same tokenizer).
         x_test, y_test, _ = _pre_process_sentiment140_text_dataset(x_test,
                                                                    y_test,
@@ -553,7 +612,7 @@ def load_dataset(client_id: int,
             glove_source = model_provider_specific_settings["glove_source"]
             glove_embeddings_folder = Path(model_provider_specific_settings["glove_embeddings_folder"])
             glove_embedding_file = _ensure_glove_embeddings_are_available(embedding_dim, glove_source, glove_embeddings_folder)
-            embedding_matrix = _load_glove_embeddings(tokenizer, embedding_dim, glove_embedding_file)
+            embedding_matrix = _load_glove_embeddings(tokenizer, embedding_dim, glove_embedding_file, vocab_size)
         dataset_loading_dict.update({"embedding_matrix": embedding_matrix})
     elif dataset in ["uoft-cs/cifar10", "uoft-cs/cifar100", "ylecun/mnist", "zalando-datasets/fashion_mnist",
                      "zh-plus/tiny-imagenet", "benjamin-paine/imagenet-1k", "ufldl-stanford/svhn", "flwrlabs/cinic10"]:

@@ -1,3 +1,4 @@
+from pathlib import Path
 from ray import remote
 
 from metacs_fl.utils.dataset_loader_util import instantiate_fds, load_dataset
@@ -14,7 +15,8 @@ class FederatedDatasetActor:
                                 loading_approach: str,
                                 local_dataset_settings: dict,
                                 federated_dataset_settings: dict,
-                                model_settings: dict) -> tuple:
+                                model_settings: dict,
+                                root_output_folder: Path) -> tuple:
         # If already loaded, return the cached dataset of this particular client.
         if client_id in self._dataset:
             return self._dataset[client_id]
@@ -25,7 +27,8 @@ class FederatedDatasetActor:
                                             local_dataset_settings,
                                             federated_dataset_settings,
                                             model_settings,
-                                            fds)
+                                            fds,
+                                            root_output_folder)
         x_train = dataset_loading_dict["x_train"]
         y_train = dataset_loading_dict["y_train"]
         x_test = dataset_loading_dict["x_test"]
