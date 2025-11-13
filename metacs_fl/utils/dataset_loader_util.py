@@ -16,7 +16,9 @@ from keras.applications.efficientnet_v2 import preprocess_input as efficientnet_
 from keras.applications.mobilenet_v2 import preprocess_input as mobilenet_v2_preprocess_input
 from keras.applications.resnet import preprocess_input as resnet50_preprocess_input
 from keras.applications.vgg16 import preprocess_input as vgg16_preprocess_input
+from nltk import download
 from nltk.corpus import stopwords
+from nltk.data import find, path
 from numpy import array, asarray, empty, int64, ndarray, int32
 from numpy.random import normal
 from pathlib import Path
@@ -345,6 +347,47 @@ def _build_or_load_shared_tokenizer(client_id: int,
             lock_path.unlink()
 
 
+def _stopwords_available() -> bool:
+    try:
+        find("corpora/stopwords")
+        return True
+    except LookupError:
+        return False
+
+
+def _ensure_stopwords(timeout: int = 60) -> None:
+    # Check if already available (fast path).
+    try:
+        find("corpora/stopwords")
+        return
+    except LookupError:
+        pass  # Need to download.
+    nltk_data_dir = Path(path[0])
+    nltk_data_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = nltk_data_dir / "stopwords.lock"
+    # Try to acquire lock (exclusive creation).
+    try:
+        with lock_path.open("x") as lock_file:
+            lock_file.write("locked")
+        print("Lock acquired, downloading stopwords...")
+        download("stopwords", quiet=True)
+        print("Stopwords successfully downloaded.")
+    except FileExistsError:
+        # Another process is downloading...
+        print("Waiting for another process to finish download...")
+        waited = 0
+        while not _stopwords_available():
+            sleep(2)
+            waited += 2
+            if waited > timeout:
+                raise TimeoutError("Timeout: stopwords not available after {0} seconds.".format(timeout))
+        print("Stopwords detected after waiting.")
+    finally:
+        # Cleanup lock if it exists.
+        if lock_path.exists():
+            lock_path.unlink()
+
+
 def _normalize_sentiment140_text(text: str) -> str:
     """Normalize a single tweet, based on the paper 'Federated Learning for Sentiment Analysis in Presence of Non-IID Data:
     Sensitivity of Deep Learning Models' (Gholamiangonabadi & Grolinger, 2024)"""
@@ -386,6 +429,7 @@ def _pre_process_sentiment140_text_dataset(texts: NDArray,
         empty = array([])
         return (empty, empty if labels is not None else None, tokenizer)
     # Normalization step.
+    _ensure_stopwords()
     normalized_texts = [_normalize_sentiment140_text(t) for t in valid_texts]
     # Tokenization step.
     if tokenizer is None:
