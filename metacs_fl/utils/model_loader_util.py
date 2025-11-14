@@ -332,7 +332,7 @@ def load_custom_lstm_sentiment140(model_provider_specific_settings: dict) -> Mod
     if embedding_matrix is not None:
         # Use pre-trained GloVe embeddings.
         print("Using pre-trained GloVe embeddings...")
-        model.add(layers.Embedding(input_dim=vocab_size,  # embedding_matrix.shape[0] gives per-client embeddings (incompatible with standard FedAvg).
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
                                    output_dim=embedding_matrix.shape[1],
                                    weights=[embedding_matrix],
                                    input_length=max_length,

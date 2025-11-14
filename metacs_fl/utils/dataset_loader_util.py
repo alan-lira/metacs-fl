@@ -1,5 +1,5 @@
 import sys
-from os import devnull, environ, getpid
+from os import devnull, environ, fsync, getpid
 
 # Suppress TensorFlow C++ log messages (redirecting stderr to null).
 environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -7,6 +7,7 @@ sys.stderr = open(devnull, "w")
 
 from contractions import fix
 from emoji import demojize
+from fcntl import flock, LOCK_EX, LOCK_NB, LOCK_UN
 from flwr.common import NDArray
 from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import DirichletPartitioner, IidPartitioner, PathologicalPartitioner
@@ -31,7 +32,7 @@ from tensorflow import expand_dims
 from tensorflow.image import resize
 from tensorflow.keras.preprocessing.text import Tokenizer
 from tensorflow.keras.preprocessing.sequence import pad_sequences
-from time import perf_counter, sleep
+from time import perf_counter, sleep, time
 from tqdm import tqdm
 from urllib.request import urlretrieve
 from zipfile import ZipFile
@@ -300,51 +301,65 @@ def _build_or_load_shared_tokenizer(client_id: int,
                                     federated_dataset_settings: dict,
                                     vocab_size: int,
                                     root_output_folder: Path,
-                                    timeout: int = 1800) -> Tokenizer:
+                                    timeout: int = 1800,
+                                    poll_interval: float = 0.5) -> Tokenizer:
     root_output_folder.mkdir(parents=True, exist_ok=True)
     tokenizer_file = root_output_folder / "shared_tokenizer.pkl"
-    lock_path = tokenizer_file.with_suffix(".lock")
-    # If the tokenizer already exists, load it immediately.
-    if tokenizer_file.exists():
+    tmp_file = root_output_folder / "shared_tokenizer.pkl.tmp"
+    lock_file = root_output_folder / "shared_tokenizer.lock"
+    ready_file = root_output_folder / "shared_tokenizer.ready"
+    # Ready file exists -> tokenizer is complete.
+    if ready_file.exists() and tokenizer_file.exists():
         with tokenizer_file.open("rb") as f:
             return pickle_load(f)
-    try:
-        # Try to acquire exclusive lock (atomic file creation).
-        with lock_path.open("x") as lock_file:
-            lock_file.write("locked")
-        print("[Client {0}] Lock acquired, building shared tokenizer...".format(client_id))
-        # Only the first client builds the tokenizer.
-        all_texts = []
-        num_partitions = federated_dataset_settings["num_partitions"]
-        # Collect all text data from every partition.
-        for cid in range(num_partitions):
-            partition = fds.load_partition(cid, "train")
-            partition.set_format("numpy")
-            all_texts.extend(partition["text"])
-        tokenizer = Tokenizer(num_words=vocab_size, oov_token="<OOV>")
-        tokenizer.fit_on_texts(all_texts)
-        # Save the shared tokenizer.
-        with tokenizer_file.open("wb") as f:
-            pickle_dump(tokenizer, f)
-        print("[Client {0}] Shared tokenizer saved at {1}".format(client_id, tokenizer_file))
-        return tokenizer
-    except FileExistsError:
-        # Another client is currently building the tokenizer.
-        print("[Client {0}] Waiting for shared tokenizer to be ready...".format(client_id))
-        waited = 0
-        while not tokenizer_file.exists():
-            sleep(2)
-            waited += 2
-            if waited > timeout:
-                raise TimeoutError("[Client {0}] Timeout after {1}s waiting for tokenizer.".format(client_id, timeout))
-        with tokenizer_file.open("rb") as f:
-            tokenizer = pickle_load(f)
-        print("[Client {0}] Loaded shared tokenizer after waiting.".format(client_id))
-        return tokenizer
-    finally:
-        # If this process created the lock, remove it after completion.
-        if lock_path.exists():
-            lock_path.unlink()
+    start = time()
+    # Try to acquire lock (non-blocking loop with timeout).
+    with lock_file.open("a+b") as lock_f:
+        while True:
+            try:
+                flock(lock_f, LOCK_EX | LOCK_NB)
+                break
+            except BlockingIOError:
+                # If ready file appears while waiting, load and return.
+                if ready_file.exists() and tokenizer_file.exists():
+                    with tokenizer_file.open("rb") as f:
+                        return pickle_load(f)
+                if (time() - start) > timeout:
+                    raise TimeoutError("[Client {0}] Timeout waiting for tokenizer lock.".format(client_id))
+                sleep(poll_interval)
+        try:
+            if ready_file.exists() and tokenizer_file.exists():
+                with tokenizer_file.open("rb") as f:
+                    return pickle_load(f)
+            print("[Client {0}] Lock acquired; building shared tokenizer...".format(client_id))
+            all_texts = []
+            num_partitions = int(federated_dataset_settings["num_partitions"])
+            for cid in range(num_partitions):
+                partition = fds.load_partition(cid, "train")
+                partition.set_format("numpy")
+                all_texts.extend(partition["text"])
+            tokenizer = Tokenizer(num_words=vocab_size, oov_token="<OOV>")
+            tokenizer.fit_on_texts(all_texts)
+            # Write to temporary file first, then atomically replace.
+            with tmp_file.open("wb") as ftmp:
+                pickle_dump(tokenizer, ftmp)
+                ftmp.flush()
+                try:
+                    fsync(ftmp.fileno())
+                except Exception:
+                    pass
+            # Atomic replace.
+            tmp_file.replace(tokenizer_file)
+            # Create ready file to signal completeness.
+            ready_file.write_text("ready")
+            print("[Client {0}] Shared tokenizer saved at {1}".format(client_id, tokenizer_file))
+            return tokenizer
+        finally:
+            # Release lock.
+            try:
+                flock(lock_f, LOCK_UN)
+            except Exception:
+                pass
 
 
 def _stopwords_available() -> bool:
