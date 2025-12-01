@@ -9,7 +9,7 @@ from typing import Optional
 
 from flwr.client import Client, start_client
 
-from metacs_fl.client.flower_numpy_client import FlowerNumpyClient
+from metacs_fl.client.flower_client import FlowerClient
 from metacs_fl.energy_monitor.powerjoular_energy_monitor import PowerJoularEnergyMonitor
 from metacs_fl.energy_monitor.pyjoules_energy_monitor import PyJoulesEnergyMonitor
 from metacs_fl.flower_simulator.logger_actor import RemoteLoggerAdapter
@@ -338,27 +338,27 @@ class FlowerClientLauncher:
             powerjoular_unique_attributes = list(powerjoular_unique_attributes.items())
             energy_monitor = powerjoular_unique_attributes
         # Instantiate the flower client.
-        client = FlowerNumpyClient(id_=client_id,
-                                   model=model,
-                                   metrics_names=metrics_names,
-                                   x_train=x_train,
-                                   y_train=y_train,
-                                   x_test=x_test,
-                                   y_test=y_test,
-                                   energy_monitor=energy_monitor,
-                                   daemon_settings=daemon_settings,
-                                   affinity_settings=affinity_settings,
-                                   task_assignment_capacities_settings=task_assignment_capacities_settings,
-                                   model_settings=model_settings,
-                                   callbacks_settings=callbacks_settings,
-                                   device_emulation_settings=device_emulation_settings,
-                                   host_profile=host_profile,
-                                   logger=logger,
-                                   initialization_duration_in_seconds=initialization_duration_in_seconds,
-                                   simulation_resources_settings = simulation_resources_settings,
-                                   root_output_folder=root_output_folder,
-                                   all_cpu_cores_available=all_cpu_cores_available,
-                                   client_acquired_cpu_cores=client_acquired_cpu_cores)
+        client = FlowerClient(id_=client_id,
+                              model=model,
+                              metrics_names=metrics_names,
+                              x_train=x_train,
+                              y_train=y_train,
+                              x_test=x_test,
+                              y_test=y_test,
+                              energy_monitor=energy_monitor,
+                              daemon_settings=daemon_settings,
+                              affinity_settings=affinity_settings,
+                              task_assignment_capacities_settings=task_assignment_capacities_settings,
+                              model_settings=model_settings,
+                              callbacks_settings=callbacks_settings,
+                              device_emulation_settings=device_emulation_settings,
+                              host_profile=host_profile,
+                              logger=logger,
+                              initialization_duration_in_seconds=initialization_duration_in_seconds,
+                              simulation_resources_settings = simulation_resources_settings,
+                              root_output_folder=root_output_folder,
+                              all_cpu_cores_available=all_cpu_cores_available,
+                              client_acquired_cpu_cores=client_acquired_cpu_cores)
         client = client.to_client()
         # Return the flower client.
         return client

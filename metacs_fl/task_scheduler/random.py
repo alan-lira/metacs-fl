@@ -15,9 +15,8 @@ def random_selection(current_phase: str,
                                                           profiling_round=False,
                                                           schedule_to_all_clients=True)
     # Get the schedule provided by the 'Random' selection algorithm.
-    random_schedule = [0] * len(candidate_clients)
+    random_schedule = []
     for client_id, client_info in selected_clients.items():
-        client_id_int = int(client_id.split("client_")[1])
         client_num_tasks_scheduled = client_info["client_num_tasks_scheduled"]
-        random_schedule[client_id_int] = client_num_tasks_scheduled
+        random_schedule.append(client_num_tasks_scheduled)
     return random_schedule

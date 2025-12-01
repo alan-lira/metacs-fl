@@ -56,6 +56,7 @@ class FlowerServer(Strategy):
         self._client_selection_duration_history = {}
         self._selected_clients_metrics_history = {}
         self._clients_histograms = {}
+        self._clients_reliability_score_history = {}
         # Initialize the random number generator with a fixed seed to allow replicable results.
         seed = None
         if "seed" in self._server_strategy_settings:
@@ -74,13 +75,13 @@ class FlowerServer(Strategy):
                 # Instantiate the SBAC-PAD_2024's client selector.
                 client_selector = SBACPAD2024(server_strategy_settings, seed)
             case "MetaCS-FL":
-                # Set the list of profiling rounds (starting at the first round).
-                num_profiling_rounds = server_strategy_settings["num_profiling_rounds"]
-                if num_profiling_rounds > 0:
-                    profiling_rounds = list(range(1, num_profiling_rounds + 1))
-                    self._profiling_rounds = profiling_rounds
                 # Instantiate the MetaCS-FL's client selector.
                 client_selector = MetaCSFL(server_strategy_settings, seed)
+        # Set the list of profiling rounds (starting at the first round).
+        num_profiling_rounds = server_strategy_settings.get("num_profiling_rounds", 0)
+        if num_profiling_rounds > 0:
+            profiling_rounds = list(range(1, num_profiling_rounds + 1))
+            self._profiling_rounds = profiling_rounds
         self._profiling_rounds = profiling_rounds
         self._client_selector = client_selector
 
@@ -98,57 +99,69 @@ class FlowerServer(Strategy):
                                       current_round: int,
                                       phase_of_interest: str,
                                       x: int) -> dict:
-        # Get the necessary attributes.
-        last_round_on_history = list(selected_clients_metrics_history.items())[-1][0]
+        # Sort rounds in history.
+        history_rounds = sorted(selected_clients_metrics_history.keys())
+        last_round_on_history = history_rounds[-1]
+        # Clip current_round if it is beyond the last round in history.
         if current_round > last_round_on_history:
             current_round = last_round_on_history + 1
-        # Get the keys of the past x rounds.
-        past_rounds_keys = [r_idx for r_idx in list(range(current_round - x, current_round)) if r_idx > 0]
-        # Filter the selected clients metrics history, preserving only the past x rounds.
-        selected_clients_metrics_history_filtered = dict((past_round, v) for past_round, v in selected_clients_metrics_history.items()
-                                                         if past_round in past_rounds_keys)
-        # Initialize the metrics lists.
+        # Search backward for up to x valid past rounds.
+        valid_past_rounds = []
+        r = current_round - 1
+        while r > 0 and len(valid_past_rounds) < x:
+            if r in selected_clients_metrics_history:
+                round_data = selected_clients_metrics_history[r]
+                # Check if phase is present AND has non-empty metrics.
+                if (phase_of_interest in round_data and
+                        "clients_metrics_dicts" in round_data[phase_of_interest] and
+                        len(round_data[phase_of_interest]["clients_metrics_dicts"]) > 0):
+                    valid_past_rounds.append(r)
+            r -= 1
+        # Sort chronologically.
+        valid_past_rounds = sorted(valid_past_rounds)
+        # Filter history to only valid rounds.
+        selected_clients_metrics_history_filtered = {r: selected_clients_metrics_history[r]
+                                                     for r in valid_past_rounds}
+        # Initialize metric lists.
         makespans = []
         energy_consumptions = []
         weighted_mean_accuracies = []
-        # Get the clients' metrics of the past x rounds.
-        for past_round, _ in selected_clients_metrics_history_filtered.items():
-            clients_metrics_dicts = {}
-            if phase_of_interest in selected_clients_metrics_history_filtered[past_round]:
-                clients_metrics_dicts = selected_clients_metrics_history_filtered[past_round][phase_of_interest]["clients_metrics_dicts"]
+        # Compute metrics for each valid round.
+        for past_round in valid_past_rounds:
+            # Extract client metric dicts.
+            clients_metrics_dicts = selected_clients_metrics_history_filtered[past_round][phase_of_interest]["clients_metrics_dicts"]
+            # Initialize per-round accumulators.
             makespan = 0
             energy_consumption = 0
             sum_accuracy_product = 0
             sum_num_examples_used = 0
+            # Loop through each client's metrics.
             for client_metrics_dict in clients_metrics_dicts:
                 client_id = next(iter(client_metrics_dict))
                 client_metrics = client_metrics_dict[client_id]
                 # Get the number of tasks executed by the client i on round r.
-                num_examples_key = "num_examples"
-                x_i = client_metrics[num_examples_key]
+                x_i = client_metrics.get("num_examples", 0)
                 # Get the time cost of the client i on round r (if available).
                 time_key = "{0}ing_time_in_seconds".format(phase_of_interest)
-                time_i = client_metrics[time_key] if time_key in client_metrics else 0
+                time_i = client_metrics.get(time_key, 0)
                 # Update the makespan of round r.
-                if time_i > makespan:
-                    makespan = time_i
+                makespan = max(makespan, time_i)
                 # Get the energy cost of the client i on round r (if available).
                 energy_key = "{0}ing_energy_in_joules".format(phase_of_interest)
-                energy_i = client_metrics[energy_key] if energy_key in client_metrics else 0
-                # Update the energy consumption of round r.
+                energy_i = client_metrics.get(energy_key, 0)
                 energy_consumption += energy_i
                 # Get the accuracy "cost" of the client i on round r (if available).
-                accuracy_key = "accuracy"
                 accuracy_i = 0
-                for metric_key, _ in client_metrics.items():
-                    if accuracy_key in metric_key:
-                        accuracy_i = client_metrics[metric_key]
-                # Accumulate auxiliary values for the weighted mean accuracy calculation.
+                for metric_key, val in client_metrics.items():
+                    if "accuracy" in metric_key:
+                        accuracy_i = val
+                # Weighted accuracy accumulators.
                 sum_accuracy_product += x_i * accuracy_i
                 sum_num_examples_used += x_i
             # Update the weighted mean accuracy of round r.
-            weighted_mean_accuracy = sum_accuracy_product / sum_num_examples_used if sum_num_examples_used > 0 else 0
-            # Update the metrics lists.
+            weighted_mean_accuracy = (sum_accuracy_product / sum_num_examples_used
+                                      if sum_num_examples_used > 0 else 0)
+            # Store metrics.
             makespans.append(makespan)
             energy_consumptions.append(energy_consumption)
             weighted_mean_accuracies.append(weighted_mean_accuracy)
@@ -227,6 +240,7 @@ class FlowerServer(Strategy):
         client_selection_duration_history = self.get_attribute("_client_selection_duration_history")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
+        profiling_rounds = self.get_attribute("_profiling_rounds")
         # Get the list of past rounds.
         past_rounds = list(range(1, current_round + 1))
         # Initialize the summary of past rounds' idle events.
@@ -425,7 +439,9 @@ class FlowerServer(Strategy):
                             client_current_download_bandwidth_in_bytes_per_second_property: "?",
                             client_current_upload_bandwidth_in_bytes_per_second_property: "?",
                             client_current_latency_in_milliseconds_property: "?",
-                            "samples_per_task": server_strategy_settings.get("samples_per_task", 1)}
+                            "samples_per_task": server_strategy_settings.get("samples_per_task", 1),
+                            "comm_round": current_round,
+                            "is_profiling_round": current_round in profiling_rounds}
                 gpi_dict.update(idle_events_data_dict)
                 gpi = GetPropertiesIns(gpi_dict)
                 client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
@@ -450,7 +466,8 @@ class FlowerServer(Strategy):
                 client_current_download_bandwidth_in_bytes_per_second = client_prompted.properties[client_current_download_bandwidth_in_bytes_per_second_property]
                 client_current_upload_bandwidth_in_bytes_per_second = client_prompted.properties[client_current_upload_bandwidth_in_bytes_per_second_property]
                 client_current_latency_in_milliseconds = client_prompted.properties[client_current_latency_in_milliseconds_property]
-                if client_remaining_battery_energy > 0:
+                client_available = client_prompted.properties["client_available"]
+                if client_available:
                     client_id_str = "client_{0}".format(client_id)
                     client_map = {"client_proxy": client_proxy,
                                   "client_hostname": client_hostname,
@@ -527,7 +544,7 @@ class FlowerServer(Strategy):
             selected_client_config = deepcopy(phase_config)
             selected_client_config.update({"client_selection_time_in_seconds": selection_duration_in_seconds})
             if current_round in profiling_rounds:
-                selected_client_config.update({"profiling_round": True})
+                selected_client_config.update({"is_profiling_round": True})
             if "client_num_samples_scheduled" in client_info:
                 selected_client_config.update({"num_{0}ing_examples_to_use".format(current_phase):
                                                    client_info["client_num_samples_scheduled"]})
@@ -1040,6 +1057,56 @@ class FlowerServer(Strategy):
                 with open(file=history_output_file, mode="a", encoding="utf-8") as file:
                     file.writelines(data_lines)
 
+    def _update_clients_reliability_score_history(self,
+                                                  current_round: int,
+                                                  current_phase: str,
+                                                  completed_clients: dict | None = None) -> None:
+        # Get the necessary attributes.
+        candidate_clients_history = self.get_attribute("_candidate_clients_history")
+        selected_clients_history = self.get_attribute("_selected_clients_history")
+        clients_reliability_score_history = self.get_attribute("_clients_reliability_score_history")
+        server_strategy_settings = self.get_attribute("_server_strategy_settings")
+        clients_reliability_score = server_strategy_settings["clients_reliability_score"]
+        non_availability_penalty = clients_reliability_score["non_availability_penalty"]
+        non_completion_penalty = clients_reliability_score["non_completion_penalty"]
+        recency_weight = clients_reliability_score["recency_weight"]
+        if completed_clients is None:
+            completed_clients = {}
+        available_clients = candidate_clients_history.get(current_round, {}).get(current_phase, {})
+        selected_clients = selected_clients_history.get(current_round, {}).get(current_phase, {})
+        # Create round entry.
+        if current_round not in clients_reliability_score_history:
+            clients_reliability_score_history[current_round] = {}
+        current_scores = clients_reliability_score_history[current_round]
+        # Get the previous round reliability scores.
+        prev_scores = clients_reliability_score_history.get(current_round - 1, {})
+        # All clients that we may need to compute scores for.
+        all_client_ids = (set(prev_scores.keys())
+                        | set(available_clients.keys())
+                        | set(selected_clients.keys())
+                        | set(completed_clients.keys()))
+        all_client_ids = {cid for cid in all_client_ids if cid.startswith("client_")}
+        for client_id in all_client_ids:
+            # Previous reliability score (default 1.0 for new clients).
+            prev_score = prev_scores.get(client_id, 1.0)
+            # Compute penalty p_i(r).
+            if client_id in available_clients:
+                # Client was available but not selected.
+                if client_id not in selected_clients:
+                    p_ir = 0.0  # No penalty.
+                else:
+                    # Client was available and selected. Outcome depends on completion input.
+                    completed = completed_clients.get(client_id, False)
+                    p_ir = 0.0 if completed else non_completion_penalty # No penalty if completed.
+            else:
+                # Client was not available.
+                p_ir = non_availability_penalty
+            # Recency-weighted update.
+            new_score = prev_score * (1 - recency_weight) + (1 - p_ir) * recency_weight
+            current_scores[client_id] = new_score
+        # Store the updated client reliability scores.
+        self._set_attribute("_clients_reliability_score_history", clients_reliability_score_history)
+
     def _aggregate_evaluate_metrics(self,
                                     current_round: int,
                                     evaluate_metrics: list[tuple[int, Metrics]]) -> Optional[Metrics]:
@@ -1167,6 +1234,10 @@ class FlowerServer(Strategy):
                   "profiling_rounds": profiling_rounds,
                   "time_limit": round_timeout_in_seconds,
                   "logger": logger}
+        if server_strategy_settings.get("monitor_clients_reliability_score", False):
+            # Get the clients' reliability score history.
+            clients_reliability_score_history = self.get_attribute("_clients_reliability_score_history")
+            kwargs.update({"clients_reliability_score_history": clients_reliability_score_history})
         if "num_tasks_training" in server_strategy_settings:
             # Get the number of tasks to be scheduled to the selected clients.
             num_tasks = server_strategy_settings["num_tasks_training"]
@@ -1212,8 +1283,9 @@ class FlowerServer(Strategy):
         message = "[Server {0} | Round {1}] End of the 'configure_fit' call!".format(server_id, server_round)
         log_message(logger, message, "DEBUG")
         # Log the start of the current communication round.
-        message = "[Server {0} | Round {1}] Starting the {2}ing phase...".format(server_id, server_round, phase)
-        log_message(logger, message, "INFO")
+        if fit_pairs:
+            message = "[Server {0} | Round {1}] Starting the {2}ing phase...".format(server_id, server_round, phase)
+            log_message(logger, message, "INFO")
         # Return the list of (fit_client_proxy, fit_client_instructions) pairs.
         return fit_pairs
 
@@ -1282,6 +1354,10 @@ class FlowerServer(Strategy):
         self._append_round_data_to_history_files(server_round, phase)
         # Store the improved global parameters.
         self._set_attribute("_global_parameters", aggregated_model_parameters)
+        # Update the clients reliability score, if being monitored.
+        if server_strategy_settings.get("monitor_clients_reliability_score", False):
+            completed_clients = {"client_{0}".format(result.metrics["client_id"]): True for _, result in results}
+            self._update_clients_reliability_score_history(server_round, phase, completed_clients)
         # Log an 'end of the aggregate_fit call' debug message.
         message = "[Server {0} | Round {1}] End of the 'aggregate_fit' call!".format(server_id, server_round)
         log_message(logger, message, "DEBUG")
@@ -1340,6 +1416,10 @@ class FlowerServer(Strategy):
                   "profiling_rounds": profiling_rounds,
                   "time_limit": round_timeout_in_seconds,
                   "logger": logger}
+        if server_strategy_settings.get("monitor_clients_reliability_score", False):
+            # Get the clients' reliability score history.
+            clients_reliability_score_history = self.get_attribute("_clients_reliability_score_history")
+            kwargs.update({"clients_reliability_score_history": clients_reliability_score_history})
         if "num_tasks_testing" in server_strategy_settings:
             # Get the number of tasks to be scheduled to the selected clients.
             num_tasks = server_strategy_settings["num_tasks_testing"]
@@ -1385,8 +1465,9 @@ class FlowerServer(Strategy):
         message = "[Server {0} | Round {1}] End of the 'configure_evaluate' call!".format(server_id, server_round)
         log_message(logger, message, "DEBUG")
         # Log the start of the current communication round.
-        message = "[Server {0} | Round {1}] Starting the {2}ing phase...".format(server_id, server_round, phase)
-        log_message(logger, message, "INFO")
+        if evaluate_pairs:
+            message = "[Server {0} | Round {1}] Starting the {2}ing phase...".format(server_id, server_round, phase)
+            log_message(logger, message, "INFO")
         # Return the list of (evaluate_client_proxy, evaluate_client_instructions) pairs.
         return evaluate_pairs
 
@@ -1402,6 +1483,7 @@ class FlowerServer(Strategy):
         server_id = self.get_attribute("_server_id")
         fl_settings = self.get_attribute("_fl_settings")
         accept_clients_failures = fl_settings["accept_clients_failures"]
+        server_strategy_settings = self.get_attribute("_server_strategy_settings")
         logger = self.get_attribute("_logger")
         # Log a 'start of the aggregate_evaluate call' debug message.
         message = "[Server {0} | Round {1}] Start of the 'aggregate_evaluate' call!".format(server_id, server_round)
@@ -1428,6 +1510,10 @@ class FlowerServer(Strategy):
             self._initialize_history_output_files(phase)
         # Append the communication round data to the testing history files.
         self._append_round_data_to_history_files(server_round, phase)
+        # Update the clients reliability score, if being monitored.
+        if server_strategy_settings.get("monitor_clients_reliability_score", False):
+            completed_clients = {"client_{0}".format(result.metrics["client_id"]): True for _, result in results}
+            self._update_clients_reliability_score_history(server_round, phase, completed_clients)
         # Log an 'end of the aggregate_evaluate call' debug message.
         message = "[Server {0} | Round {1}] End of the 'aggregate_evaluate' call!".format(server_id, server_round)
         log_message(logger, message, "DEBUG")

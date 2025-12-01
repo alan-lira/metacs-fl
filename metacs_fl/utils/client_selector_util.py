@@ -469,7 +469,21 @@ def schedule_tasks_to_selected_clients(num_tasks_to_schedule: int,
     start_time = time()
     if num_tasks_to_schedule == 0 or not selected_clients:
         return selected_clients
+    # Initialize the list of task assignment capacities per client.
+    task_assignment_capacities_list = []
+    # Set the key for the task assignment capacities per client (current phase).
     client_task_assignment_capacities_key = "client_task_assignment_capacities_{0}".format(phase)
+    for _, client_info in selected_clients.items():
+        # Get the task assignment capacities of client i.
+        client_task_assignment_capacities_phase = client_info[client_task_assignment_capacities_key]
+        # Append the task assignment capacities of client i to the list of task assignment capacities.
+        task_assignment_capacities_list.append(client_task_assignment_capacities_phase)
+    # Compute all the possible sums of task assignments, considering one assignment per client.
+    all_possible_task_assignment_sums = get_all_possible_sums(task_assignment_capacities_list)
+    # If the number of tasks to schedule is infeasible...
+    if num_tasks_to_schedule not in all_possible_task_assignment_sums:
+        # Set a new valid number of tasks to schedule.
+        num_tasks_to_schedule = take_closest(all_possible_task_assignment_sums, num_tasks_to_schedule)
     # Calculate min/max possible sums.
     min_possible_sum = 0
     max_possible_sum = 0

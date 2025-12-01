@@ -1,5 +1,6 @@
 from copy import deepcopy
 from multiprocessing import Barrier, Process
+from numpy import exp, zeros
 from numpy.random import default_rng
 from pathlib import Path
 from time import perf_counter, sleep
@@ -120,6 +121,20 @@ class FlowerExecutor:
         data_line = str(client_id) + "," + ",".join(map(str, filtered_device_emulation_settings.values())) + "\n"
         with open(file=output_file, mode="a", encoding="utf-8") as o_f:
             o_f.write(data_line)
+
+    def _generate_client_failure_probabilities(self,
+                                               num_clients: int,
+                                               poisson_failure_lambda_range: list) -> dict:
+        if not poisson_failure_lambda_range:
+            lambdas = zeros(num_clients)
+        else:
+            rng = self.get_attribute("_rng")
+            lambdas = rng.uniform(poisson_failure_lambda_range[0], poisson_failure_lambda_range[1], num_clients)
+        failure_probabilities = 1 - exp(-lambdas)  # Probability of ≥1 failure for Poisson(λ).
+        client_failure_probabilities = {}
+        for client_id, p in enumerate(failure_probabilities):
+            client_failure_probabilities.update({client_id: p})
+        return client_failure_probabilities
 
     def _launch_flower_server(self,
                               server_id: int) -> FlowerServerLauncher:
@@ -370,6 +385,14 @@ class FlowerExecutor:
                         current_execution_devices[idx][1]["battery_stored_energy_in_joules"] = initial_remaining_battery_energy_in_joules
                     # Update the current execution devices.
                     self._set_attribute("_current_execution_devices", current_execution_devices)
+                # Generate the clients' failure probabilities.
+                num_clients = execution_settings["num_clients"]
+                poisson_failure_lambda_range = execution_settings.get("poisson_failure_lambda_range", [])
+                client_failure_probabilities = self._generate_client_failure_probabilities(num_clients,
+                                                                                           poisson_failure_lambda_range)
+                current_execution_devices = self.get_attribute("_current_execution_devices")
+                for idx, _ in enumerate(current_execution_devices):
+                    current_execution_devices[idx][1]["client_failure_probability"] = client_failure_probabilities[idx]
             # Print the start of the execution.
             print("\nStarting the execution '{0}'...".format(execution_name))
             # Get the process wait time (after launching).

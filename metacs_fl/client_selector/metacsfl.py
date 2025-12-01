@@ -7,7 +7,8 @@ from metacs_fl.metaheuristic.lns import run_lns
 from metacs_fl.task_scheduler.ecmtc import ecmtc
 from metacs_fl.task_scheduler.mec import mec
 from metacs_fl.task_scheduler.random import random_selection
-from metacs_fl.utils.client_selector_util import select_all_available_clients, schedule_tasks_to_selected_clients
+from metacs_fl.utils.client_selector_util import get_all_possible_sums, schedule_tasks_to_selected_clients, \
+    select_all_available_clients, take_closest
 from metacs_fl.utils.logger_util import log_message
 from metacs_fl.utils.system_modeler_util import calculate_computation_time, calculate_computation_energy, \
     calculate_download_time, calculate_download_energy, calculate_upload_time, calculate_upload_energy
@@ -26,6 +27,7 @@ class MetaCSFL:
         self._initial_solution_generation_history = {}
         self._internal_candidate_clients_history = {}
         self._internal_selected_clients_history = {}
+        self._task_assignment_capacities_list = []
         # Initialize the random number generator with a fixed seed to allow replicable results.
         self._rng = default_rng(seed=seed)
 
@@ -37,6 +39,22 @@ class MetaCSFL:
     def get_attribute(self,
                       attribute_name: str) -> any:
         return getattr(self, attribute_name)
+
+    @staticmethod
+    def _get_trimmed_task_assignment_capacities(task_assignment_capacities_list: list,
+                                                clients_reliability_score_history: dict) -> list:
+        if not clients_reliability_score_history:
+            latest_client_reliability_scores = {}
+        else:
+            latest_key = max(clients_reliability_score_history.keys())
+            latest_client_reliability_scores = clients_reliability_score_history[latest_key]
+        trimmed_task_assignment_capacities_list = []
+        for idx, capacities in enumerate(task_assignment_capacities_list):
+            client_id_str = "client_{0}".format(idx)
+            client_score = latest_client_reliability_scores.get(client_id_str, 1.0)  # Default to full capacity.
+            client_task_capacities_cutoff = int(len(capacities) * client_score)
+            trimmed_task_assignment_capacities_list.append(capacities[:client_task_capacities_cutoff])
+        return trimmed_task_assignment_capacities_list
 
     @staticmethod
     def _get_latest_selection(selected_clients_history: dict,
@@ -290,6 +308,7 @@ class MetaCSFL:
     def _initial_solution_generation_needed(self,
                                             current_round: int,
                                             current_phase: str,
+                                            candidate_clients: dict,
                                             profiling_rounds: list,
                                             logger: Logger) -> bool:
         # Get the necessary attributes.
@@ -298,7 +317,14 @@ class MetaCSFL:
         # Initialize the lists of initial solution generation criteria and reasons.
         generate_initial_solution_criteria = []
         generate_initial_solution_reasons = []
-        # (i) The current round immediately follows the last profiling round?
+        # (i) The set of candidate clients differs from the previous round?
+        internal_candidate_clients_history = self.get_attribute("_internal_candidate_clients_history")
+        previous_round_candidate_clients = internal_candidate_clients_history[current_round - 1]
+        different_set_of_clients = set(candidate_clients.keys()) != set(previous_round_candidate_clients[current_phase].keys())
+        if different_set_of_clients:
+            generate_initial_solution_criteria.append(True)
+            generate_initial_solution_reasons.append("The set of candidate clients differs from the previous round.")
+        # (ii) The current round immediately follows the last profiling round?
         immediately_follows_last_profiling_round = profiling_rounds and current_round == profiling_rounds[-1] + 1
         if immediately_follows_last_profiling_round:
             generate_initial_solution_criteria.append(True)
@@ -364,8 +390,7 @@ class MetaCSFL:
                                           fraction_clients)
             case "MEC":
                 # Select clients using the 'MEC' algorithm.
-                task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
-                                                   for _, client_map in candidate_clients.items()]
+                task_assignment_capacities_list = self.get_attribute("_task_assignment_capacities_list")
                 time_costs = cost_matrices["time_costs"]
                 energy_costs = cost_matrices["energy_costs"]
                 X_init, _, _ = mec(len(candidate_clients),
@@ -375,8 +400,7 @@ class MetaCSFL:
                                    energy_costs)
             case "ECMTC":
                 # Select clients using the 'ECMTC' algorithm.
-                task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
-                                                   for _, client_map in candidate_clients.items()]
+                task_assignment_capacities_list = self.get_attribute("_task_assignment_capacities_list")
                 time_costs = cost_matrices["time_costs"]
                 energy_costs = cost_matrices["energy_costs"]
                 X_init, _, _ = ecmtc(len(candidate_clients),
@@ -419,6 +443,7 @@ class MetaCSFL:
         # Verify if an initial solution generation is necessary.
         initial_solution_generation_is_needed = self._initial_solution_generation_needed(current_round,
                                                                                          current_phase,
+                                                                                         candidate_clients,
                                                                                          profiling_rounds,
                                                                                          logger)
         if initial_solution_generation_is_needed:
@@ -442,7 +467,12 @@ class MetaCSFL:
         else:
             # Get the latest initial solution generated.
             initial_solution_generation_history = self.get_attribute("_initial_solution_generation_history")
-            last_generation_round, _ = next(reversed(initial_solution_generation_history.items()))
+            phase_rounds = [round_id
+                            for round_id, phases in initial_solution_generation_history.items()
+                            if current_phase in phases]
+            if not phase_rounds:
+                raise ValueError("No rounds found for phase '{0}'".format(current_phase))
+            last_generation_round = max(phase_rounds)
             X_init = initial_solution_generation_history[last_generation_round][current_phase]["X_init"]
             X_init_dist = initial_solution_generation_history[last_generation_round][current_phase]["X_init_dist"]
             # Log a 'using the latest initial solution generated' message.
@@ -484,8 +514,7 @@ class MetaCSFL:
                                                                      data_privacy_approach,
                                                                      logger)
         # Get the necessary properties of the candidate clients.
-        task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
-                                           for _, client_map in candidate_clients.items()]
+        task_assignment_capacities_list = self.get_attribute("_task_assignment_capacities_list")
         # Build the class capacity vectors list.
         class_capacity_vectors_list, sorted_classes = build_class_capacity_vectors_list(candidate_clients,
                                                                                         data_privacy_approach,
@@ -613,7 +642,7 @@ class MetaCSFL:
             x_dist_i_str = "|".join(["{0}={1}".format(k, v) for k, v in x_dist_i.items()])
             if x_i > 0:
                 # Update the set of selected clients.
-                client_id_str = "client_{0}".format(i)
+                client_id_str = list(candidate_clients.keys())[i]
                 client_proxy = candidate_clients[client_id_str]["client_proxy"]
                 capacity_key = "client_task_assignment_capacities_{0}".format(current_phase)
                 client_task_assignment_capacities_phase = candidate_clients[client_id_str][capacity_key]
@@ -640,6 +669,7 @@ class MetaCSFL:
         current_round = kwargs["current_round"]
         current_phase = kwargs["current_phase"]
         candidate_clients = kwargs["candidate_clients"]
+        clients_reliability_score_history = kwargs.get("clients_reliability_score_history", {})
         num_tasks = kwargs["num_tasks"]
         samples_per_task = kwargs["samples_per_task"]
         base_learning_rate = kwargs["base_learning_rate"] if "base_learning_rate" in kwargs else 0
@@ -654,7 +684,10 @@ class MetaCSFL:
         # Get the necessary properties of the candidate clients.
         task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
                                            for _, client_map in candidate_clients.items()]
-        scaled_task_assignment_capacities_list = [sorted(set(capacities))
+        task_assignment_capacities_list = self._get_trimmed_task_assignment_capacities(task_assignment_capacities_list,
+                                                                                       clients_reliability_score_history)
+        self._set_attribute("_task_assignment_capacities_list", task_assignment_capacities_list)
+        scaled_task_assignment_capacities_list = [sorted(set(capacities * samples_per_task))
                                                   for capacities in task_assignment_capacities_list]
         # Calculate the maximum number of tasks that can be scheduled.
         max_num_tasks = sum(max(capacities) for capacities in scaled_task_assignment_capacities_list)
@@ -664,6 +697,12 @@ class MetaCSFL:
             num_tasks = int(num_tasks * max_num_tasks)
         # Clamp to valid range.
         num_tasks = max(1, min(num_tasks, max_num_tasks))
+        # Compute all the possible sums of task assignments, considering one assignment per client.
+        all_possible_task_assignment_sums = get_all_possible_sums(scaled_task_assignment_capacities_list)
+        # If the number of tasks to schedule is infeasible...
+        if num_tasks not in all_possible_task_assignment_sums:
+            # Set a new valid number of tasks to schedule.
+            num_tasks = take_closest(all_possible_task_assignment_sums, num_tasks)
         # Verify if the current round is a profiling round.
         if current_round in profiling_rounds:
             # Log a 'selecting all available clients' message.

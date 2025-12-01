@@ -16,8 +16,8 @@ from keras.callbacks import Callback, EarlyStopping, ReduceLROnPlateau
 from keras.models import Model
 from logging import Logger
 from multiprocessing import Process, Queue, set_start_method
-from numpy import argmax, array, asarray, clip, float32, int8, linspace, mean, minimum, ndarray, ones, sum, unique, \
-    where, zeros
+from numpy import argmax, array, asarray, clip, float32, inf, int8, int32, linspace, mean, minimum, ndarray, ones, \
+    sum, unique, where, zeros
 from numpy.random import default_rng, laplace, rand
 from os import getpid
 from pandas import read_csv
@@ -31,8 +31,10 @@ from tensorflow.python.profiler.option_builder import ProfileOptionBuilder
 from tensorflow.types.experimental import PolymorphicFunction
 from time import perf_counter, process_time
 
-from flwr.client import NumPyClient
-from flwr.common import NDArray, NDArrays
+from flwr.client import Client
+from flwr.common import Code, EvaluateIns, EvaluateRes, FitIns, FitRes, GetParametersIns, GetParametersRes, \
+    GetPropertiesIns, GetPropertiesRes, NDArray, NDArrays, ndarrays_to_parameters, Parameters, parameters_to_ndarrays, \
+    Status
 
 from metacs_fl.dataset_slicer.round_robin_dataset_slicer import RoundRobinDatasetSlicer
 from metacs_fl.energy_monitor.powerjoular_energy_monitor import PowerJoularEnergyMonitor
@@ -302,7 +304,7 @@ class TestingMeasurementsCallback(Callback):
             self._set_attribute("_testing_energy_consumptions", testing_energy_consumptions)
 
 
-class FlowerNumpyClient(NumPyClient):
+class FlowerClient(Client):
 
     def __init__(self,
                  id_: int,
@@ -424,8 +426,9 @@ class FlowerNumpyClient(NumPyClient):
 
     @staticmethod
     def _deterministic_seed(client_id: int,
-                            comm_round: int) -> int:
-        seed_str = "{0}_{1}".format(client_id, comm_round)
+                            comm_round: int,
+                            phase: str) -> int:
+        seed_str = "{0}_{1}_{2}".format(client_id, comm_round, phase)
         hash_bytes = sha256(seed_str.encode()).digest()
         deterministic_seed = int.from_bytes(hash_bytes[:8], "big")
         return deterministic_seed
@@ -669,14 +672,19 @@ class FlowerNumpyClient(NumPyClient):
         scale = sensitivity / float(epsilon)
         noise = laplace(loc=0.0, scale=scale, size=hist.shape)
         noisy = hist + noise
-        noisy_clipped = clip(noisy, 0.0, None).astype(float32)
+        noisy_clipped = clip(noisy, 0.0, None)
+        noisy_clipped = noisy_clipped.round().astype(int32)
         return noisy_clipped
 
     def get_properties(self,
-                       config: dict) -> dict:
-        """ Implementation of the abstract method from the NumPyClient class."""
+                       ins: GetPropertiesIns) -> GetPropertiesRes:
+        """ Implementation of the abstract method from the Client class."""
+        # Get the necessary attributes.
+        config = ins.config
         # Record the energy consumed by this client during the past idle events, if needed.
         self._record_past_idle_events(config)
+        # Initialize the client availability status.
+        config.update({"client_available": True})
         if "client_dp_presence" in config:
             y_train = self.get_attribute("_y_train")
             local_classes = asarray(unique(y_train))
@@ -748,6 +756,9 @@ class FlowerNumpyClient(NumPyClient):
             remaining_battery_energy_file = self.get_attribute("_remaining_battery_energy_file")
             remaining_battery_energy_in_joules = get_remaining_battery_energy_from_file(remaining_battery_energy_file)
             config.update({"client_remaining_battery_energy": remaining_battery_energy_in_joules})
+            # Set client unavailable, if there is no remaining battery...
+            if remaining_battery_energy_in_joules == 0:
+                config.update({"client_available": False})
         if "client_mean_power_consumption_idle_mode" in config:
             device_emulation_settings = self.get_attribute("_device_emulation_settings")
             mpc_idle_i = device_emulation_settings["mean_power_consumption_idle_in_watts"]
@@ -791,8 +802,24 @@ class FlowerNumpyClient(NumPyClient):
             base_latency_unit = device_emulation_settings["base_latency_unit"]
             current_latency_in_milliseconds = convert_duration(current_latency, base_latency_unit, "ms")
             config.update({"client_current_latency_in_milliseconds": current_latency_in_milliseconds})
+            # Set client unavailable, if client is unreachable...
+            if current_latency_in_milliseconds == inf:
+                config.update({"client_available": False})
+        # Simulate if the client is unavailable for the current round (Bernoulli trial).
+        # For now, the client will be available if the current round is for profiling purposes.
+        is_profiling_round = config.get("is_profiling_round", False)
+        if not is_profiling_round:
+            device_emulation_settings = self.get_attribute("_device_emulation_settings")
+            client_failure_probability = device_emulation_settings["client_failure_probability"]
+            client_id = self.get_attribute("_client_id")
+            comm_round = config.get("comm_round", 0)
+            phase = "get_properties"
+            seed = self._deterministic_seed(client_id, comm_round, phase)
+            rng = default_rng(seed)
+            if rng.random() < client_failure_probability:
+                config.update({"client_available": False})
         # Return the properties requested by the server.
-        return config
+        return GetPropertiesRes(status=Status(code=Code.OK, message="Success"), properties=config)
 
     def _estimate_initial_parameters_upload_time_in_seconds(self,
                                                             model: Model) -> float:
@@ -824,8 +851,8 @@ class FlowerNumpyClient(NumPyClient):
         return initial_parameters_upload_time_in_seconds
 
     def get_parameters(self,
-                       config: dict) -> NDArrays:
-        """ Implementation of the abstract method from the NumPyClient class."""
+                       ins: GetParametersIns) -> GetParametersRes:
+        """ Implementation of the abstract method from the Client class."""
         # Load the local model from the file.
         model_file = self.get_attribute("_model_file")
         model = load_model_from_file(model_file)
@@ -844,7 +871,8 @@ class FlowerNumpyClient(NumPyClient):
         # Get the initial model parameters.
         local_model_parameters = model.get_weights()
         # Return the current parameters (weights) of the local model requested by the server.
-        return local_model_parameters
+        return GetParametersRes(status=Status(code=Code.OK, message="Success"),
+                                parameters=ndarrays_to_parameters(local_model_parameters))
 
     @staticmethod
     def _get_client_selection_time_in_seconds(config: dict) -> float:
@@ -1150,7 +1178,7 @@ class FlowerNumpyClient(NumPyClient):
         device_cpu_num_cores = device_emulation_settings["cpu_num_cores"]
         device_cpu_frequency_in_hertz = device_emulation_settings["cpu_frequency_in_hertz"]
         # Select randomly the device's float operations per cycle per CPU core performance during the training.
-        seed = self._deterministic_seed(client_id, comm_round)
+        seed = self._deterministic_seed(client_id, comm_round, phase)
         rng = default_rng(seed)
         fpocc_training = device_emulation_settings["fpocc_training"]
         device_cpu_float_ops_per_cycle_per_core = rng.choice(linspace(fpocc_training[0], fpocc_training[1], num=1000))
@@ -1278,10 +1306,11 @@ class FlowerNumpyClient(NumPyClient):
         return computation_energy_in_joules
 
     def fit(self,
-            global_parameters: NDArrays,
-            fit_config: dict) -> tuple[NDArrays, int, dict]:
-        """ Implementation of the abstract method from the NumPyClient class."""
+            ins: FitIns) -> FitRes:
+        """ Implementation of the abstract method from the Client class."""
         # Get the necessary attributes.
+        global_parameters = parameters_to_ndarrays(ins.parameters)
+        fit_config = ins.config
         client_id = self.get_attribute("_client_id")
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
         x_train = self.get_attribute("_x_train")
@@ -1344,7 +1373,10 @@ class FlowerNumpyClient(NumPyClient):
         remaining_battery_energy_in_joules = get_remaining_battery_energy_from_file(remaining_battery_energy_file)
         if remaining_battery_energy_in_joules == 0:
             # Client has dropped due to lack of battery level.
-            return [], 0, {}
+            return FitRes(status=Status(code=Code.FIT_NOT_IMPLEMENTED, message="Client has dropped due to lack of battery level"),
+                          parameters=Parameters(tensor_type="", tensors=[]),
+                          num_examples=0,
+                          metrics={})
         # Estimate the time spent by this client during the download event of round r.
         download_time_in_seconds = self._estimate_download_time_in_seconds(down_metrics_file,
                                                                            comm_round,
@@ -1365,7 +1397,10 @@ class FlowerNumpyClient(NumPyClient):
         remaining_battery_energy_in_joules = get_remaining_battery_energy_from_file(remaining_battery_energy_file)
         if remaining_battery_energy_in_joules == 0:
             # Client has dropped due to lack of battery level.
-            return [], 0, {}
+            return FitRes(status=Status(code=Code.FIT_NOT_IMPLEMENTED, message="Client has dropped due to lack of battery level"),
+                          parameters=Parameters(tensor_type="", tensors=[]),
+                          num_examples=0,
+                          metrics={})
         # Log a 'training my model' message.
         message = "[Client {0} | Round {1}] Training my model...".format(client_id, comm_round)
         log_message(logger, message, "INFO")
@@ -1403,7 +1438,10 @@ class FlowerNumpyClient(NumPyClient):
         remaining_battery_energy_in_joules = get_remaining_battery_energy_from_file(remaining_battery_energy_file)
         if remaining_battery_energy_in_joules == 0:
             # Client has dropped due to lack of battery level.
-            return [], 0, {}
+            return FitRes(status=Status(code=Code.FIT_NOT_IMPLEMENTED, message="Client has dropped due to lack of battery level"),
+                          parameters=Parameters(tensor_type="", tensors=[]),
+                          num_examples=0,
+                          metrics={})
         # Append the client download metrics to the set of training metrics.
         training_metrics = training_metrics | client_down_metrics
         # Append the client model metrics to the set of training metrics.
@@ -1436,7 +1474,24 @@ class FlowerNumpyClient(NumPyClient):
         remaining_battery_energy_in_joules = get_remaining_battery_energy_from_file(remaining_battery_energy_file)
         if remaining_battery_energy_in_joules == 0:
             # Client has dropped due to lack of battery level.
-            return [], 0, {}
+            return FitRes(status=Status(code=Code.FIT_NOT_IMPLEMENTED, message="Client has dropped due to lack of battery level"),
+                          parameters=Parameters(tensor_type="", tensors=[]),
+                          num_examples=0,
+                          metrics={})
+        # Simulate if the client succeeded the training for the current round (Bernoulli trial).
+        # For now, the client will succeed if the current round is for profiling purposes.
+        is_profiling_round = fit_config.get("is_profiling_round", False)
+        if not is_profiling_round:
+            device_emulation_settings = self.get_attribute("_device_emulation_settings")
+            client_failure_probability = device_emulation_settings["client_failure_probability"]
+            seed = self._deterministic_seed(client_id, comm_round, phase)
+            rng = default_rng(seed)
+            if rng.random() < client_failure_probability:
+                # Client has failed.
+                return FitRes(status=Status(code=Code.FIT_NOT_IMPLEMENTED, message="Client has failed"),
+                              parameters=Parameters(tensor_type="", tensors=[]),
+                              num_examples=0,
+                              metrics={})
         # Append the client upload metrics to the set of training metrics.
         training_metrics = training_metrics | client_up_metrics
         # Calculate the total time spent by this client during the training phase event of round r.
@@ -1485,7 +1540,10 @@ class FlowerNumpyClient(NumPyClient):
                    .format(self._client_id, fit_config["comm_round"], sum(model.get_weights()[0])))
         log_message(self._logger, message, "DEBUG")
         # Send to the server the local model parameters (weights), number of examples used, and training metrics.
-        return local_model_parameters, num_examples, training_metrics
+        return FitRes(status=Status(code=Code.OK, message="Success"),
+                      parameters=ndarrays_to_parameters(local_model_parameters),
+                      num_examples=num_examples,
+                      metrics=training_metrics)
 
     @staticmethod
     def _evaluate_relatively_to_local_labels(model: Model,
@@ -1707,7 +1765,7 @@ class FlowerNumpyClient(NumPyClient):
         device_cpu_num_cores = device_emulation_settings["cpu_num_cores"]
         device_cpu_frequency_in_hertz = device_emulation_settings["cpu_frequency_in_hertz"]
         # Select randomly the device's float operations per cycle per CPU core performance during the testing.
-        seed = self._deterministic_seed(client_id, comm_round)
+        seed = self._deterministic_seed(client_id, comm_round, phase)
         rng = default_rng(seed)
         fpocc_inference = device_emulation_settings["fpocc_inference"]
         device_cpu_float_ops_per_cycle_per_core = rng.choice(linspace(fpocc_inference[0], fpocc_inference[1], num=1000))
@@ -1750,10 +1808,11 @@ class FlowerNumpyClient(NumPyClient):
         return actual_computation_time_in_seconds
 
     def evaluate(self,
-                 global_parameters: NDArrays,
-                 evaluate_config: dict) -> tuple[float, int, dict]:
-        """ Implementation of the abstract method from the NumPyClient class."""
+                 ins: EvaluateIns) -> EvaluateRes:
+        """ Implementation of the abstract method from the Client class."""
         # Get the necessary attributes.
+        global_parameters = parameters_to_ndarrays(ins.parameters)
+        evaluate_config = ins.config
         client_id = self.get_attribute("_client_id")
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
         x_test = self.get_attribute("_x_test")
@@ -1815,7 +1874,10 @@ class FlowerNumpyClient(NumPyClient):
         remaining_battery_energy_in_joules = get_remaining_battery_energy_from_file(remaining_battery_energy_file)
         if remaining_battery_energy_in_joules == 0:
             # Client has dropped due to lack of battery level.
-            return 0, 0, {}
+            return EvaluateRes(status=Status(code=Code.EVALUATE_NOT_IMPLEMENTED, message="Client has dropped due to lack of battery level"),
+                               loss=0.0,
+                               num_examples=0,
+                               metrics={})
         # Estimate the time spent by this client during the download event of round r.
         download_time_in_seconds = self._estimate_download_time_in_seconds(down_metrics_file,
                                                                            comm_round,
@@ -1836,7 +1898,10 @@ class FlowerNumpyClient(NumPyClient):
         remaining_battery_energy_in_joules = get_remaining_battery_energy_from_file(remaining_battery_energy_file)
         if remaining_battery_energy_in_joules == 0:
             # Client has dropped due to lack of battery level.
-            return 0, 0, {}
+            return EvaluateRes(status=Status(code=Code.EVALUATE_NOT_IMPLEMENTED, message="Client has dropped due to lack of battery level"),
+                               loss=0.0,
+                               num_examples=0,
+                               metrics={})
         # Log a 'testing my model' message.
         message = "[Client {0} | Round {1}] Testing my model...".format(client_id, comm_round)
         log_message(logger, message, "INFO")
@@ -1874,7 +1939,10 @@ class FlowerNumpyClient(NumPyClient):
         remaining_battery_energy_in_joules = get_remaining_battery_energy_from_file(remaining_battery_energy_file)
         if remaining_battery_energy_in_joules == 0:
             # Client has dropped due to lack of battery level.
-            return 0, 0, {}
+            return EvaluateRes(status=Status(code=Code.EVALUATE_NOT_IMPLEMENTED, message="Client has dropped due to lack of battery level"),
+                               loss=0.0,
+                               num_examples=0,
+                               metrics={})
         # Append the client download metrics to the set of testing metrics.
         testing_metrics = testing_metrics | client_down_metrics
         # Append the client model metrics to the set of testing metrics.
@@ -1909,7 +1977,24 @@ class FlowerNumpyClient(NumPyClient):
         remaining_battery_energy_in_joules = get_remaining_battery_energy_from_file(remaining_battery_energy_file)
         if remaining_battery_energy_in_joules == 0:
             # Client has dropped due to lack of battery level.
-            return 0, 0, {}
+            return EvaluateRes(status=Status(code=Code.EVALUATE_NOT_IMPLEMENTED, message="Client has dropped due to lack of battery level"),
+                               loss=0.0,
+                               num_examples=0,
+                               metrics={})
+        # Simulate if the client succeeded the testing for the current round (Bernoulli trial).
+        # For now, the client will succeed if the current round is for profiling purposes.
+        is_profiling_round = evaluate_config.get("is_profiling_round", False)
+        if not is_profiling_round:
+            device_emulation_settings = self.get_attribute("_device_emulation_settings")
+            client_failure_probability = device_emulation_settings["client_failure_probability"]
+            seed = self._deterministic_seed(client_id, comm_round, phase)
+            rng = default_rng(seed)
+            if rng.random() < client_failure_probability:
+                # Client has failed.
+                return EvaluateRes(status=Status(code=Code.EVALUATE_NOT_IMPLEMENTED, message="Client has failed"),
+                                   loss=0.0,
+                                   num_examples=0,
+                                   metrics={})
         # Append the client upload metrics to the set of testing metrics.
         testing_metrics = testing_metrics | client_up_metrics
         # Calculate the total time spent by this client during the testing phase event of round r.
@@ -1954,4 +2039,7 @@ class FlowerNumpyClient(NumPyClient):
                           round(testing_energy_in_joules, 2)))
         log_message(logger, message, "INFO")
         # Send to the server the loss, number of examples used, and testing metrics.
-        return loss, num_examples, testing_metrics
+        return EvaluateRes(status=Status(code=Code.OK, message="Success"),
+                           loss=loss,
+                           num_examples=num_examples,
+                           metrics=testing_metrics)
