@@ -1238,6 +1238,8 @@ class FlowerServer(Strategy):
             # Get the clients' reliability score history.
             clients_reliability_score_history = self.get_attribute("_clients_reliability_score_history")
             kwargs.update({"clients_reliability_score_history": clients_reliability_score_history})
+            apply_clients_reliability_filter = server_strategy_settings.get("apply_clients_reliability_filter", False)
+            kwargs.update({"apply_clients_reliability_filter": apply_clients_reliability_filter})
         if "num_tasks_training" in server_strategy_settings:
             # Get the number of tasks to be scheduled to the selected clients.
             num_tasks = server_strategy_settings["num_tasks_training"]
@@ -1354,10 +1356,9 @@ class FlowerServer(Strategy):
         self._append_round_data_to_history_files(server_round, phase)
         # Store the improved global parameters.
         self._set_attribute("_global_parameters", aggregated_model_parameters)
-        # Update the clients reliability score, if being monitored.
-        if server_strategy_settings.get("monitor_clients_reliability_score", False):
-            completed_clients = {"client_{0}".format(result.metrics["client_id"]): True for _, result in results}
-            self._update_clients_reliability_score_history(server_round, phase, completed_clients)
+        # Update the clients reliability score.
+        completed_clients = {"client_{0}".format(result.metrics["client_id"]): True for _, result in results}
+        self._update_clients_reliability_score_history(server_round, phase, completed_clients)
         # Log an 'end of the aggregate_fit call' debug message.
         message = "[Server {0} | Round {1}] End of the 'aggregate_fit' call!".format(server_id, server_round)
         log_message(logger, message, "DEBUG")
@@ -1420,6 +1421,8 @@ class FlowerServer(Strategy):
             # Get the clients' reliability score history.
             clients_reliability_score_history = self.get_attribute("_clients_reliability_score_history")
             kwargs.update({"clients_reliability_score_history": clients_reliability_score_history})
+            apply_clients_reliability_filter = server_strategy_settings.get("apply_clients_reliability_filter", False)
+            kwargs.update({"apply_clients_reliability_filter": apply_clients_reliability_filter})
         if "num_tasks_testing" in server_strategy_settings:
             # Get the number of tasks to be scheduled to the selected clients.
             num_tasks = server_strategy_settings["num_tasks_testing"]
@@ -1510,10 +1513,9 @@ class FlowerServer(Strategy):
             self._initialize_history_output_files(phase)
         # Append the communication round data to the testing history files.
         self._append_round_data_to_history_files(server_round, phase)
-        # Update the clients reliability score, if being monitored.
-        if server_strategy_settings.get("monitor_clients_reliability_score", False):
-            completed_clients = {"client_{0}".format(result.metrics["client_id"]): True for _, result in results}
-            self._update_clients_reliability_score_history(server_round, phase, completed_clients)
+        # Update the clients reliability score.
+        completed_clients = {"client_{0}".format(result.metrics["client_id"]): True for _, result in results}
+        self._update_clients_reliability_score_history(server_round, phase, completed_clients)
         # Log an 'end of the aggregate_evaluate call' debug message.
         message = "[Server {0} | Round {1}] End of the 'aggregate_evaluate' call!".format(server_id, server_round)
         log_message(logger, message, "DEBUG")

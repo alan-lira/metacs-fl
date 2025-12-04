@@ -1,7 +1,7 @@
 from copy import deepcopy
 from math import floor, inf
 from numpy import ndarray
-from numpy.random import default_rng, Generator
+from numpy.random import Generator
 from time import perf_counter
 
 from metacs_fl.utils.task_scheduler_util import calculate_percentage_change, estimate_costs, normalize_costs, \
@@ -56,57 +56,124 @@ def lns_destroy(rng: Generator,
     return X_dest, dest_idx
 
 
+def safe_index(A_i: list,
+               x_i: int) -> int | None:
+    for idx, v in enumerate(A_i):
+        if v == x_i:
+            return idx
+    return None
+
+
+def prev_capacity(A_i: list,
+                  x_i: int) -> int:
+    pos = safe_index(A_i, x_i)
+    if pos is None:
+        prevs = [v for v in A_i if v < x_i]
+        return max(prevs) if prevs else A_i[0]
+    if pos > 0:
+        return A_i[pos - 1]
+    return A_i[0]
+
+
+def next_capacity(A_i: list,
+                  x_i: int) -> int:
+    pos = safe_index(A_i, x_i)
+    if pos is None:
+        nexts = [v for v in A_i if v > x_i]
+        return min(nexts) if nexts else A_i[-1]
+    if pos < len(A_i) - 1:
+        return A_i[pos + 1]
+    return A_i[-1]
+
+
 def lns_repair(rng: Generator,
                t: int,
                A: ndarray,
                X_dest: list,
-               dest_indices: list) -> list:
-    # Initialize the repaired solution (copy of X_dest).
+               dest_indices: list,
+               max_inner_iters: int = 10000) -> list:
     X_rpr = deepcopy(X_dest)
     # Get all client indices.
-    I = [i for i in range(0, len(X_rpr))]
-    while True:
-        # Get the current number of scheduled tasks.
+    I = list(range(len(X_rpr)))
+    prev_sum = None
+    stalled = 0
+    stall_limit = 200
+    for _ in range(max_inner_iters):
         t_asg = sum(X_rpr)
         if t_asg == t:
-            # The solution was successfully repaired.
-            break
-        if t_asg > t:
-            # Get the clients' indices, that do not belong to the list of destroyed indices,
-            # with at least one task scheduled and removal capacity.
-            I_non_dest_with_tasks_and_removal_capacity = [i for i in I
-                                                          if i not in dest_indices and X_rpr[i] > 0 and
-                                                          list(A[i]).index(X_rpr[i]) != 0]
-            if I_non_dest_with_tasks_and_removal_capacity:
-                # Randomly sample a client index.
-                i = rng.choice(I_non_dest_with_tasks_and_removal_capacity, size=1, replace=False)[0]
-                # Set the assignment of client i to its previous valid capacity (remove tasks from i).
-                X_rpr[i] = A[i][list(A[i]).index(X_rpr[i]) - 1]
+            return X_rpr
+        # Detect stalling.
+        if prev_sum is not None and t_asg == prev_sum:
+            stalled += 1
         else:
-            # Get the clients' indices, that do not belong to the list of destroyed indices,
-            # with at least one task scheduled and addition capacity.
-            I_non_dest_with_tasks_and_addition_capacity = [i for i in I
-                                                           if i not in dest_indices and X_rpr[i] > 0 and
-                                                           list(A[i]).index(X_rpr[i]) != len(A[i]) - 1]
-            # Get the clients' indices, that do not belong to the list of destroyed indices,
-            # with no tasks scheduled and addition capacity.
-            I_non_dest_non_tasks_and_addition_capacity = [i for i in I
-                                                          if i not in dest_indices and X_rpr[i] == 0 and
-                                                          list(A[i]).index(X_rpr[i]) != len(A[i]) - 1]
-            # Get the clients' indices, that belong to the list of destroyed indices,
-            # with addition capacity.
-            I_dest_with_addition_capacity = [i for i in I
-                                             if i in dest_indices and
-                                             list(A[i]).index(X_rpr[i]) != len(A[i]) - 1]
-            # Randomly sample a client index.
-            if I_non_dest_with_tasks_and_addition_capacity:
-                i = rng.choice(I_non_dest_with_tasks_and_addition_capacity, size=1, replace=False)[0]
-            elif I_non_dest_non_tasks_and_addition_capacity:
-                i = rng.choice(I_non_dest_non_tasks_and_addition_capacity, size=1, replace=False)[0]
+            stalled = 0
+        prev_sum = t_asg
+        # Case 1: Too many tasks → remove.
+        if t_asg > t:
+            # Preferred: non-destroyed with removal capacity.
+            cand = [i for i in I
+                    if i not in dest_indices and
+                    safe_index(A[i], X_rpr[i]) not in (None, 0)]
+            # Fallback: any with removal capacity.
+            if not cand:
+                cand = [i for i in I
+                        if safe_index(A[i], X_rpr[i]) not in (None, 0)]
+            # Final fallback (stalled): any client with X>0.
+            if not cand and stalled > stall_limit:
+                cand = [i for i in I if X_rpr[i] > 0]
+            if cand:
+                i = rng.choice(cand, size=1, replace=False)[0]
+                X_rpr[i] = prev_capacity(A[i], X_rpr[i])
             else:
-                i = rng.choice(I_dest_with_addition_capacity, size=1, replace=False)[0]
-            # Set the assignment of client i to its next valid capacity (schedule tasks to i).
-            X_rpr[i] = A[i][list(A[i]).index(X_rpr[i]) + 1]
+                # No removal possible → break for best-effort return.
+                break
+        # Case 2: Too few tasks → add.
+        else:
+            # Preferred: non-destroyed with tasks and addition capacity.
+            cand = [i for i in I
+                    if i not in dest_indices and X_rpr[i] > 0 and
+                    safe_index(A[i], X_rpr[i]) not in (None, len(A[i]) - 1)]
+            # Fallback: non-destroyed with no tasks.
+            if not cand:
+                cand = [i for i in I
+                        if i not in dest_indices and X_rpr[i] == 0 and
+                        safe_index(A[i], X_rpr[i]) not in (None, len(A[i]) - 1)]
+            # Fallback: destroyed with addition capacity.
+            if not cand:
+                cand = [i for i in I
+                        if i in dest_indices and
+                        safe_index(A[i], X_rpr[i]) not in (None, len(A[i]) - 1)]
+            # Global fallback: any addition capacity.
+            if not cand:
+                cand = [i for i in I
+                        if safe_index(A[i], X_rpr[i]) not in (None, len(A[i]) - 1)]
+            # Final fallback if stalled: any client (may already be max, no-op).
+            if not cand and stalled > stall_limit:
+                cand = I[:]
+            if cand:
+                i = rng.choice(cand, size=1, replace=False)[0]
+                X_rpr[i] = next_capacity(A[i], X_rpr[i])
+            else:
+                break
+    # Exact repair failed... Return the best-effort solution (closest sum).
+    t_asg = sum(X_rpr)
+    diff = t_asg - t
+    if diff > 0:
+        # Remove diff tasks if possible.
+        for _ in range(abs(diff)):
+            removable = [i for i in I if safe_index(A[i], X_rpr[i]) not in (None, 0)]
+            if not removable:
+                break
+            i = rng.choice(removable, size=1, replace=False)[0]
+            X_rpr[i] = prev_capacity(A[i], X_rpr[i])
+    elif diff < 0:
+        # Add -diff tasks if possible.
+        for _ in range(abs(diff)):
+            addable = [i for i in I if safe_index(A[i], X_rpr[i]) not in (None, len(A[i]) - 1)]
+            if not addable:
+                break
+            i = rng.choice(addable, size=1, replace=False)[0]
+            X_rpr[i] = next_capacity(A[i], X_rpr[i])
     return X_rpr
 
 

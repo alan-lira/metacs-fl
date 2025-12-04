@@ -670,6 +670,7 @@ class MetaCSFL:
         current_phase = kwargs["current_phase"]
         candidate_clients = kwargs["candidate_clients"]
         clients_reliability_score_history = kwargs.get("clients_reliability_score_history", {})
+        apply_clients_reliability_filter = kwargs.get("apply_clients_reliability_filter", False)
         num_tasks = kwargs["num_tasks"]
         samples_per_task = kwargs["samples_per_task"]
         base_learning_rate = kwargs["base_learning_rate"] if "base_learning_rate" in kwargs else 0
@@ -684,8 +685,9 @@ class MetaCSFL:
         # Get the necessary properties of the candidate clients.
         task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
                                            for _, client_map in candidate_clients.items()]
-        task_assignment_capacities_list = self._get_trimmed_task_assignment_capacities(task_assignment_capacities_list,
-                                                                                       clients_reliability_score_history)
+        if apply_clients_reliability_filter:
+            task_assignment_capacities_list = self._get_trimmed_task_assignment_capacities(task_assignment_capacities_list,
+                                                                                           clients_reliability_score_history)
         self._set_attribute("_task_assignment_capacities_list", task_assignment_capacities_list)
         scaled_task_assignment_capacities_list = [sorted(set(capacities * samples_per_task))
                                                   for capacities in task_assignment_capacities_list]

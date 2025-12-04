@@ -1,7 +1,7 @@
 from copy import deepcopy
 from multiprocessing import Barrier, Process
 from numpy import exp, zeros
-from numpy.random import default_rng
+from numpy.random import default_rng, Generator
 from pathlib import Path
 from time import perf_counter, sleep
 from threading import BrokenBarrierError
@@ -123,12 +123,12 @@ class FlowerExecutor:
             o_f.write(data_line)
 
     def _generate_client_failure_probabilities(self,
+                                               rng: Generator,
                                                num_clients: int,
                                                poisson_failure_lambda_range: list) -> dict:
         if not poisson_failure_lambda_range:
             lambdas = zeros(num_clients)
         else:
-            rng = self.get_attribute("_rng")
             lambdas = rng.uniform(poisson_failure_lambda_range[0], poisson_failure_lambda_range[1], num_clients)
         failure_probabilities = 1 - exp(-lambdas)  # Probability of ≥1 failure for Poisson(λ).
         client_failure_probabilities = {}
@@ -386,9 +386,11 @@ class FlowerExecutor:
                     # Update the current execution devices.
                     self._set_attribute("_current_execution_devices", current_execution_devices)
                 # Generate the clients' failure probabilities.
+                rng = self.get_attribute("_rng")
                 num_clients = execution_settings["num_clients"]
                 poisson_failure_lambda_range = execution_settings.get("poisson_failure_lambda_range", [])
-                client_failure_probabilities = self._generate_client_failure_probabilities(num_clients,
+                client_failure_probabilities = self._generate_client_failure_probabilities(rng,
+                                                                                           num_clients,
                                                                                            poisson_failure_lambda_range)
                 current_execution_devices = self.get_attribute("_current_execution_devices")
                 for idx, _ in enumerate(current_execution_devices):

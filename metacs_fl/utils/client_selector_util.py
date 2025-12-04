@@ -54,6 +54,69 @@ def take_closest(values: list,
     return closest
 
 
+def find_multichoice_combination_closest(lists: list,
+                                         target: int,
+                                         prefer_lower: bool = False) -> tuple:
+    if not lists:
+        return [], 0
+    # Parents[stage]: dict mapping sum_after_stage -> (prev_sum_before_stage, chosen_value).
+    parents = []
+    reachable = {0}
+    # Iterate over stages (clients).
+    for choices in lists:
+        # Deterministic sorted unique choices.
+        choices_list = sorted(set(int(c) for c in choices))
+        new_reachable = set()
+        parent = {}
+        # Extend previous reachable sums with each choice.
+        for s in reachable:
+            for v in choices_list:
+                ns = s + v
+                # Record first parent seen for determinism.
+                if ns not in new_reachable:
+                    new_reachable.add(ns)
+                    parent[ns] = (s, v)
+        # If no sums reachable after including this client's choices,
+        # it means no valid combination exists that picks one per client up to this point.
+        if not new_reachable:
+            # Fallback: pick best among keys of parent.
+            if not parent:
+                return [], 0
+            best_sum = min(parent.keys(), key=lambda x: (abs(x - target), x if prefer_lower else -x))
+            # Backtrack across available parents (parents list may be shorter than lists).
+            stages = len(parents) + 1
+            combination = [0] * stages
+            cur_sum = best_sum
+            # Reconstruct last stage from parent dict.
+            prev_sum, val = parent[cur_sum]
+            combination[stages - 1] = val
+            cur_sum = prev_sum
+            # Reconstruct earlier stages.
+            for stage in range(len(parents) - 1, -1, -1):
+                p = parents[stage]
+                prev_sum, val = p[cur_sum]
+                combination[stage] = val
+                cur_sum = prev_sum
+            # Pad with zeros if somehow lists longer.
+            if len(combination) < len(lists):
+                combination += [0] * (len(lists) - len(combination))
+            return combination, best_sum
+        parents.append(parent)
+        reachable = new_reachable
+    # Choose reachable sum closest to target (tie-breaker prefers larger unless prefer_lower True).
+    best_sum = min(reachable, key=lambda x: (abs(x - target), x if prefer_lower else -x))
+    # Backtrack to build combination.
+    n = len(lists)
+    combination = [0] * n
+    cur_sum = best_sum
+    for stage in range(n - 1, -1, -1):
+        parent = parents[stage]
+        prev_sum, val = parent[cur_sum]
+        combination[stage] = val
+        cur_sum = prev_sum
+    return combination, best_sum
+
+
 def find_combination_dp(lists: list,
                         target: int) -> list | None:
     # Memoization table to store results for sub-problems (index, current_sum).
@@ -204,7 +267,7 @@ def find_different_schedule(selected_clients: dict,
     different_schedule = [selected_clients_copy[client]["client_num_tasks_scheduled"]
                           for client in sorted(selected_clients_copy)]
     # Check if the schedule is really different...
-    if different_schedule not in previous_schedules_to_avoid:
+    if previous_schedules_to_avoid is None or different_schedule not in previous_schedules_to_avoid:
         restore_noncopyable_attributes(selected_clients, selected_clients_copy)
         return selected_clients_copy
     # Return the original if no valid different schedule found.
@@ -471,6 +534,7 @@ def schedule_tasks_to_selected_clients(num_tasks_to_schedule: int,
         return selected_clients
     # Initialize the list of task assignment capacities per client.
     task_assignment_capacities_list = []
+    client_ids = list(selected_clients.keys())  # Preserve order.
     # Set the key for the task assignment capacities per client (current phase).
     client_task_assignment_capacities_key = "client_task_assignment_capacities_{0}".format(phase)
     for _, client_info in selected_clients.items():
@@ -478,6 +542,29 @@ def schedule_tasks_to_selected_clients(num_tasks_to_schedule: int,
         client_task_assignment_capacities_phase = client_info[client_task_assignment_capacities_key]
         # Append the task assignment capacities of client i to the list of task assignment capacities.
         task_assignment_capacities_list.append(client_task_assignment_capacities_phase)
+    # If scheduling to all clients: use multiple-choice DP to get explicit per-client assignment.
+    if schedule_to_all_clients:
+        cleaned_capacities = []
+        for caps in task_assignment_capacities_list:
+            cleaned_capacities.append([c for c in caps if c > 0])
+        combination, achieved_sum = find_multichoice_combination_closest(cleaned_capacities, num_tasks_to_schedule)
+        # Apply combination to selected_clients (aligned with client_ids).
+        for cid, chosen in zip(client_ids, combination):
+            selected_clients[cid]["client_num_tasks_scheduled"] = chosen
+        # If profiling, and we must avoid previous schedules, try a small swap to differ.
+        if profiling_round and previous_schedules_to_avoid:
+            current_schedule_tuple = tuple(selected_clients[cid]["client_num_tasks_scheduled"] for cid in sorted(selected_clients))
+            # If the schedule is in the avoid list, try to find a balanced alternative via swap.
+            if current_schedule_tuple in previous_schedules_to_avoid:
+                changed = find_balanced_alternative(selected_clients,
+                                                    {cid: sorted(selected_clients[cid][client_task_assignment_capacities_key]) for cid in selected_clients},
+                                                    previous_schedules_to_avoid)
+                if not changed:
+                    # No alternative found: return the DP result (best-effort).
+                    return selected_clients
+        # Return the DP-produced schedule (best-effort, explicit per-client assignment).
+        return selected_clients
+    # Otherwise (not scheduling to all clients)...
     # Compute all the possible sums of task assignments, considering one assignment per client.
     all_possible_task_assignment_sums = get_all_possible_sums(task_assignment_capacities_list)
     # If the number of tasks to schedule is infeasible...
@@ -545,9 +632,8 @@ def find_balanced_alternative(selected_clients: dict,
                 # Try the swap.
                 selected_clients[client_i]["client_num_tasks_scheduled"] = current_j
                 selected_clients[client_j]["client_num_tasks_scheduled"] = current_i
-
                 new_schedule = get_schedule_tuple(selected_clients)
-                if new_schedule not in previous_schedules_to_avoid:
+                if previous_schedules_to_avoid is None or new_schedule not in previous_schedules_to_avoid:
                     return True
                 # Swap back if not valid.
                 selected_clients[client_i]["client_num_tasks_scheduled"] = current_i
