@@ -1,5 +1,5 @@
 from bisect import bisect_left
-from numpy import array
+from numpy import array, ceil
 from numpy.linalg import linalg
 from random import sample
 from time import time
@@ -22,22 +22,53 @@ def select_all_available_clients(available_clients_map: dict,
 
 def select_random_fraction_available_clients(available_clients_map: dict,
                                              phase: str,
-                                             clients_fraction: float) -> dict:
+                                             clients_fraction: float,
+                                             num_tasks_to_schedule: int) -> dict:
     selected_clients = {}
-    if 0 < clients_fraction <= 1:
-        num_available_clients = len(available_clients_map)
-        num_clients_to_select = max(1, int(num_available_clients * clients_fraction))
-        sampled_clients_keys = sample(sorted(available_clients_map), num_clients_to_select)
-        for client_key in sampled_clients_keys:
-            client_map = available_clients_map[client_key]
-            client_proxy = client_map["client_proxy"]
-            client_task_assignment_capacities_phase_key = "client_task_assignment_capacities_{0}".format(phase)
-            client_task_assignment_capacities_phase = client_map[client_task_assignment_capacities_phase_key]
-            client_max_task_capacity = max(client_map["client_task_assignment_capacities_{0}".format(phase)])
-            selected_clients.update({client_key: {"client_proxy": client_proxy,
-                                                  client_task_assignment_capacities_phase_key: client_task_assignment_capacities_phase,
-                                                  "client_max_task_capacity": client_max_task_capacity,
-                                                  "client_num_tasks_scheduled": 0}})
+    if not (0 < clients_fraction <= 1):
+        return selected_clients
+    num_available = len(available_clients_map)
+    if num_available == 0:
+        return selected_clients
+    phase_key = "client_task_assignment_capacities_{0}".format(phase)
+    # Compute per-client max capacities.
+    max_caps = [max(client_map[phase_key]) for client_map in available_clients_map.values()]
+    total_possible_capacity = sum(max_caps)
+    # CASE A: Total capacity cannot satisfy required tasks.
+    if total_possible_capacity < num_tasks_to_schedule:
+        # Best-effort: select all clients (max chance).
+        n_select = num_available  # Select all.
+        sampled_keys = sample(sorted(available_clients_map.keys()), n_select)
+        for key in sampled_keys:
+            client_map = available_clients_map[key]
+            capacities = client_map[phase_key]
+            selected_clients[key] = {"client_proxy": client_map["client_proxy"],
+                                     phase_key: capacities,
+                                     "client_max_task_capacity": max(capacities),
+                                     "client_num_tasks_scheduled": 0}
+        return selected_clients
+    # CASE B: Enough capacity exists → enforce minimal fraction.
+    # Determine minimal number of clients needed.
+    sorted_caps = sorted(max_caps, reverse=True)
+    cumulative = 0
+    min_clients_needed = 0
+    for cap in sorted_caps:
+        cumulative += cap
+        min_clients_needed += 1
+        if cumulative >= num_tasks_to_schedule:
+            break
+    min_fraction = min_clients_needed / num_available
+    final_fraction = max(clients_fraction, min_fraction)
+    n_select = max(1, int(ceil(final_fraction * num_available)))
+    # Randomly sample clients.
+    sampled_keys = sample(sorted(available_clients_map.keys()), n_select)
+    for key in sampled_keys:
+        client_map = available_clients_map[key]
+        capacities = client_map[phase_key]
+        selected_clients[key] = {"client_proxy": client_map["client_proxy"],
+                                 phase_key: capacities,
+                                 "client_max_task_capacity": max(capacities),
+                                 "client_num_tasks_scheduled": 0}
     return selected_clients
 
 

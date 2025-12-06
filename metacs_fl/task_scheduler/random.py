@@ -7,7 +7,7 @@ def random_selection(current_phase: str,
                      candidate_clients: dict,
                      fraction_clients: float) -> list:
     # Select a random fraction of the candidate clients.
-    selected_clients = select_random_fraction_available_clients(candidate_clients, current_phase, fraction_clients)
+    selected_clients = select_random_fraction_available_clients(candidate_clients, current_phase, fraction_clients, num_tasks)
     # Schedule tasks to all selected clients, respecting assignment capacities.
     selected_clients = schedule_tasks_to_selected_clients(num_tasks,
                                                           selected_clients,
