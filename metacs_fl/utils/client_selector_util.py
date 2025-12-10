@@ -25,49 +25,41 @@ def select_random_fraction_available_clients(available_clients_map: dict,
                                              clients_fraction: float,
                                              num_tasks_to_schedule: int) -> dict:
     selected_clients = {}
-    if not (0 < clients_fraction <= 1):
-        return selected_clients
-    num_available = len(available_clients_map)
-    if num_available == 0:
-        return selected_clients
     phase_key = "client_task_assignment_capacities_{0}".format(phase)
-    # Compute per-client max capacities.
-    max_caps = [max(client_map[phase_key]) for client_map in available_clients_map.values()]
-    total_possible_capacity = sum(max_caps)
-    # CASE A: Total capacity cannot satisfy required tasks.
-    if total_possible_capacity < num_tasks_to_schedule:
-        # Best-effort: select all clients (max chance).
-        n_select = num_available  # Select all.
-        sampled_keys = sample(sorted(available_clients_map.keys()), n_select)
-        for key in sampled_keys:
-            client_map = available_clients_map[key]
-            capacities = client_map[phase_key]
-            selected_clients[key] = {"client_proxy": client_map["client_proxy"],
-                                     phase_key: capacities,
-                                     "client_max_task_capacity": max(capacities),
-                                     "client_num_tasks_scheduled": 0}
-        return selected_clients
-    # CASE B: Enough capacity exists → enforce minimal fraction.
-    # Determine minimal number of clients needed.
-    sorted_caps = sorted(max_caps, reverse=True)
+    # Extract max capacity per client.
+    items = []
+    for cid, cmap in available_clients_map.items():
+        cap = max(cmap[phase_key])
+        items.append((cid, cap))
+    # Sort by highest capacity first.
+    items.sort(key=lambda x: x[1], reverse=True)
+    # Pick minimal needed clients.
+    required = []
     cumulative = 0
-    min_clients_needed = 0
-    for cap in sorted_caps:
+    for cid, cap in items:
+        required.append((cid, cap))
         cumulative += cap
-        min_clients_needed += 1
         if cumulative >= num_tasks_to_schedule:
             break
-    min_fraction = min_clients_needed / num_available
-    final_fraction = max(clients_fraction, min_fraction)
-    n_select = max(1, int(ceil(final_fraction * num_available)))
-    # Randomly sample clients.
-    sampled_keys = sample(sorted(available_clients_map.keys()), n_select)
-    for key in sampled_keys:
-        client_map = available_clients_map[key]
-        capacities = client_map[phase_key]
-        selected_clients[key] = {"client_proxy": client_map["client_proxy"],
-                                 phase_key: capacities,
-                                 "client_max_task_capacity": max(capacities),
+    required_ids = {cid for cid, _ in required}
+    # Compute how many total we must return.
+    num_available = len(items)
+    target_total = max(1, int(ceil(clients_fraction * num_available)))
+    # Add random clients to reach target_total.
+    remaining_candidates = [cid for cid, _ in items if cid not in required_ids]
+    num_extra = max(0, target_total - len(required_ids))
+    if num_extra > 0:
+        extras = sample(remaining_candidates, num_extra)
+    else:
+        extras = []
+    final_ids = list(required_ids) + extras
+    # Build return structure.
+    for cid in final_ids:
+        cmap = available_clients_map[cid]
+        caps = cmap[phase_key]
+        selected_clients[cid] = {"client_proxy": cmap["client_proxy"],
+                                 phase_key: caps,
+                                 "client_max_task_capacity": max(caps),
                                  "client_num_tasks_scheduled": 0}
     return selected_clients
 

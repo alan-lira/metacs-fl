@@ -57,6 +57,7 @@ class FlowerServer(Strategy):
         self._selected_clients_metrics_history = {}
         self._clients_histograms = {}
         self._clients_reliability_score_history = {}
+        self._clients_consecutive_failures_history = {}
         # Initialize the random number generator with a fixed seed to allow replicable results.
         seed = None
         if "seed" in self._server_strategy_settings:
@@ -1060,16 +1061,19 @@ class FlowerServer(Strategy):
     def _update_clients_reliability_score_history(self,
                                                   current_round: int,
                                                   current_phase: str,
-                                                  completed_clients: dict | None = None) -> None:
+                                                  completed_clients: dict | None = None,
+                                                  failure_threshold: int = 3) -> None:
         # Get the necessary attributes.
         candidate_clients_history = self.get_attribute("_candidate_clients_history")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         clients_reliability_score_history = self.get_attribute("_clients_reliability_score_history")
+        clients_consecutive_failures_history = self.get_attribute("_clients_consecutive_failures_history")
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         clients_reliability_score = server_strategy_settings["clients_reliability_score"]
         non_availability_penalty = clients_reliability_score["non_availability_penalty"]
         non_completion_penalty = clients_reliability_score["non_completion_penalty"]
         recency_weight = clients_reliability_score["recency_weight"]
+        # Ensure completed_clients is a dict.
         if completed_clients is None:
             completed_clients = {}
         available_clients = candidate_clients_history.get(current_round, {}).get(current_phase, {})
@@ -1086,26 +1090,46 @@ class FlowerServer(Strategy):
                         | set(selected_clients.keys())
                         | set(completed_clients.keys()))
         all_client_ids = {cid for cid in all_client_ids if cid.startswith("client_")}
+        # Update each client.
         for client_id in all_client_ids:
             # Previous reliability score (default 1.0 for new clients).
             prev_score = prev_scores.get(client_id, 1.0)
-            # Compute penalty p_i(r).
+            # Case 1 — Client was available this round.
             if client_id in available_clients:
-                # Client was available but not selected.
+                # (A) Available but NOT selected => cannot fail → no penalty.
                 if client_id not in selected_clients:
-                    p_ir = 0.0  # No penalty.
+                    clients_consecutive_failures_history[client_id] = 0
+                    penalty = 0.0
                 else:
-                    # Client was available and selected. Outcome depends on completion input.
+                    # (B) Available AND selected.
                     completed = completed_clients.get(client_id, False)
-                    p_ir = 0.0 if completed else non_completion_penalty # No penalty if completed.
+                    if completed:
+                        # SUCCESS => reset failure counter.
+                        clients_consecutive_failures_history[client_id] = 0
+                        penalty = 0.0
+                    else:
+                        # FAILURE => increment counter.
+                        clients_consecutive_failures_history[client_id] += 1
+                        # Apply penalty ONLY if persistent failures.
+                        if clients_consecutive_failures_history[client_id] >= failure_threshold:
+                            penalty = non_completion_penalty
+                        else:
+                            penalty = 0.0  # ignore random failure
             else:
-                # Client was not available.
-                p_ir = non_availability_penalty
-            # Recency-weighted update.
-            new_score = prev_score * (1 - recency_weight) + (1 - p_ir) * recency_weight
+                # Case 2 — Client NOT available at all this round.
+                clients_consecutive_failures_history[client_id] += 1
+                # Apply penalty ONLY if persistent unavailability.
+                if clients_consecutive_failures_history[client_id] >= failure_threshold:
+                    penalty = non_availability_penalty
+                else:
+                    penalty = 0.0
+            # Exponential moving average (EMA) update.
+            new_score = prev_score * (1 - recency_weight) + (1 - penalty) * recency_weight
             current_scores[client_id] = new_score
         # Store the updated client reliability scores.
         self._set_attribute("_clients_reliability_score_history", clients_reliability_score_history)
+        # Store the updated client consecutive failures.
+        self._set_attribute("_clients_consecutive_failures_history", clients_consecutive_failures_history)
 
     def _aggregate_evaluate_metrics(self,
                                     current_round: int,
