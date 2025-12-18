@@ -232,16 +232,13 @@ class FlowerServer(Strategy):
         estimate = float(clip(estimate, 0.0, 1.0))
         return estimate
 
-    def _map_available_clients(self,
-                               current_round: int,
-                               client_manager: ClientManager | None) -> dict:
+    def _generate_idle_events_data(self,
+                                   current_round: int) -> dict:
         # Get the necessary attributes.
         candidate_clients_history = self.get_attribute("_candidate_clients_history")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         client_selection_duration_history = self.get_attribute("_client_selection_duration_history")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
-        server_strategy_settings = self.get_attribute("_server_strategy_settings")
-        profiling_rounds = self.get_attribute("_profiling_rounds")
         # Get the list of past rounds.
         past_rounds = list(range(1, current_round + 1))
         # Initialize the summary of past rounds' idle events.
@@ -315,192 +312,212 @@ class FlowerServer(Strategy):
                     if makespan_key in metrics:
                         var_name = "{0}_comm_round_{1}".format(makespan_key, r)
                         idle_events_data_dict[var_name] = metrics[makespan_key]
+        return idle_events_data_dict
+
+    def _get_available_clients_data_distribution(self,
+                                                 available_clients: dict) -> None:
+        server_strategy_settings = self.get_attribute("_server_strategy_settings")
+        data_privacy_approach_settings = server_strategy_settings.get("data_privacy_approach", {})
+        data_privacy_approach_name = data_privacy_approach_settings.get("name", "Non_Private")
+        query_clients_data_distribution = server_strategy_settings.get("query_clients_data_distribution", False)
+        if query_clients_data_distribution:
+            # Keep only active clients in the clients histograms cache.
+            active_client_proxies = set(available_clients.values())
+            self._clients_histograms = {client_proxy: client_info_cached
+                                        for client_proxy, client_info_cached in self._clients_histograms.items()
+                                        if client_proxy in active_client_proxies}
+            # Query client info, if not cached.
+            for _, client_proxy in available_clients.items():
+                client_info_cached = self._clients_histograms.get(client_proxy, {})
+                match data_privacy_approach_name:
+                    case "Non_Private":
+                        # Non-private: actual query counts per class.
+                        if "client_tasks_per_class_train" not in client_info_cached:
+                            client_id_property = "client_id"
+                            client_tasks_per_class_train_property = "client_tasks_per_class_train"
+                            client_tasks_per_class_test_property = "client_tasks_per_class_test"
+                            gpi_dict = {client_id_property: "?",
+                                        client_tasks_per_class_train_property: "?",
+                                        client_tasks_per_class_test_property: "?",
+                                        "samples_per_task": server_strategy_settings.get("samples_per_task", 1)}
+                            gpi = GetPropertiesIns(gpi_dict)
+                            client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                            client_id = client_prompted.properties[client_id_property]
+                            client_tasks_per_class_train_str = client_prompted.properties[client_tasks_per_class_train_property]
+                            client_tasks_per_class_train = {s.split("=")[0]: int(s.split("=")[1])
+                                                            for s in client_tasks_per_class_train_str.split("|") if s}
+                            client_tasks_per_class_test_str = client_prompted.properties[client_tasks_per_class_test_property]
+                            client_tasks_per_class_test = {s.split("=")[0]: int(s.split("=")[1])
+                                                           for s in client_tasks_per_class_test_str.split("|") if s}
+                            self._clients_histograms[client_proxy] = {"client_id": client_id,
+                                                                      "client_tasks_per_class_train": client_tasks_per_class_train,
+                                                                      "client_tasks_per_class_test": client_tasks_per_class_test}
+                    case "Differentially_Private":
+                        # Query presence and local classes claims, if not cached.
+                        true_presence_probability = data_privacy_approach_settings["true_presence_probability"]
+                        if "client_dp_presence" not in client_info_cached:
+                            client_id_property = "client_id"
+                            client_dp_presence_property = "client_dp_presence"
+                            client_local_classes_claimed_property = "client_local_classes_claimed"
+                            gpi_dict = {client_id_property: "?",
+                                        client_dp_presence_property: "?",
+                                        client_local_classes_claimed_property: "?",
+                                        "true_presence_probability": true_presence_probability}
+                            gpi = GetPropertiesIns(gpi_dict)
+                            client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                            client_id = client_prompted.properties[client_id_property]
+                            client_dp_presence_str = client_prompted.properties[client_dp_presence_property]
+                            client_dp_presence = list(map(int, client_dp_presence_str.split("|")))
+                            client_local_classes_claimed_str = client_prompted.properties[client_local_classes_claimed_property]
+                            client_local_classes_claimed = client_local_classes_claimed_str.split("|")
+                            self._clients_histograms[client_proxy] = {"client_id": client_id,
+                                                                      "client_dp_presence": client_dp_presence,
+                                                                      "client_local_classes_claimed": client_local_classes_claimed}
+            if data_privacy_approach_name == "Differentially_Private":
+                # Estimate the global classes and build the class-index mapping.
+                true_presence_probability = data_privacy_approach_settings["true_presence_probability"]
+                presence_cutoff = data_privacy_approach_settings["presence_cutoff"]
+                epsilon = data_privacy_approach_settings["epsilon"]
+                global_presence = defaultdict(list)
+                for client_proxy, _ in self._clients_histograms.items():
+                    client_dp_presence = self._clients_histograms[client_proxy]["client_dp_presence"]
+                    client_local_classes_claimed = self._clients_histograms[client_proxy]["client_local_classes_claimed"]
+                    for cls, bit in zip(client_local_classes_claimed, client_dp_presence):
+                        global_presence[cls].append(bit)
+                estimates = {cls: self._estimate_global_class_presence(bits, true_presence_probability)
+                             for cls, bits in global_presence.items()}
+                global_classes = [cls for cls, est in estimates.items() if est > presence_cutoff]
+                num_global_classes = len(global_classes)
+                class_index_map = {lbl: idx for idx, lbl in enumerate(global_classes)}
+                # Set the class-index mapping.
+                self._clients_histograms["class_index_map"] = class_index_map
+                # Query DP histograms, if not cached.
+                class_index_map_str = "|".join("{0}={1}".format(k, v) for k, v in class_index_map.items())
+                for _, client_proxy in available_clients.items():
+                    client_info_cached = self._clients_histograms[client_proxy]
+                    if "client_dp_histogram" not in client_info_cached:
+                        dp_histogram_property = "client_dp_histogram"
+                        gpi_dict = {dp_histogram_property: "?",
+                                    "num_global_classes": num_global_classes,
+                                    "class_index_map": class_index_map_str,
+                                    "epsilon": epsilon}
+                        gpi = GetPropertiesIns(gpi_dict)
+                        client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                        client_dp_histogram_str = client_prompted.properties[dp_histogram_property]
+                        client_dp_histogram = array(list(map(float, client_dp_histogram_str.split("|"))), dtype=float32)
+                        self._clients_histograms[client_proxy].update({"client_dp_histogram": client_dp_histogram})
+
+    def _generate_available_clients_map(self,
+                                        current_round: int,
+                                        available_clients: dict,
+                                        idle_events_data_dict: dict) -> dict:
+        server_strategy_settings = self.get_attribute("_server_strategy_settings")
+        data_privacy_approach_name = server_strategy_settings.get("data_privacy_approach", {}).get("name", "Non_Private")
+        query_clients_data_distribution = server_strategy_settings.get("query_clients_data_distribution", False)
+        profiling_rounds = self.get_attribute("_profiling_rounds")
         available_clients_map = {}
+        for _, client_proxy in available_clients.items():
+            client_id_property = "client_id"
+            client_hostname_property = "client_hostname"
+            client_num_cpus_property = "client_num_cpus"
+            client_cpu_cores_list_property = "client_cpu_cores_list"
+            client_num_training_examples_available_property = "client_num_training_examples_available"
+            client_num_testing_examples_available_property = "client_num_testing_examples_available"
+            client_task_assignment_capacities_train_property = "client_task_assignment_capacities_train"
+            client_task_assignment_capacities_test_property = "client_task_assignment_capacities_test"
+            client_remaining_battery_energy_property = "client_remaining_battery_energy"
+            client_mean_power_consumption_idle_mode_property = "client_mean_power_consumption_idle_mode"
+            client_current_download_bandwidth_in_bytes_per_second_property = "client_current_download_bandwidth_in_bytes_per_second"
+            client_current_upload_bandwidth_in_bytes_per_second_property = "client_current_upload_bandwidth_in_bytes_per_second"
+            client_current_latency_in_milliseconds_property = "client_current_latency_in_milliseconds"
+            gpi_dict = {client_id_property: "?",
+                        client_hostname_property: "?",
+                        client_num_cpus_property: "?",
+                        client_cpu_cores_list_property: "?",
+                        client_num_training_examples_available_property: "?",
+                        client_num_testing_examples_available_property: "?",
+                        client_task_assignment_capacities_train_property: "?",
+                        client_task_assignment_capacities_test_property: "?",
+                        client_remaining_battery_energy_property: "?",
+                        client_mean_power_consumption_idle_mode_property: "?",
+                        client_current_download_bandwidth_in_bytes_per_second_property: "?",
+                        client_current_upload_bandwidth_in_bytes_per_second_property: "?",
+                        client_current_latency_in_milliseconds_property: "?",
+                        "samples_per_task": server_strategy_settings.get("samples_per_task", 1),
+                        "comm_round": current_round,
+                        "is_profiling_round": current_round in profiling_rounds}
+            gpi_dict.update(idle_events_data_dict)
+            gpi = GetPropertiesIns(gpi_dict)
+            client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+            client_id = client_prompted.properties[client_id_property]
+            client_hostname = client_prompted.properties[client_hostname_property]
+            client_num_cpus = client_prompted.properties[client_num_cpus_property]
+            client_cpu_cores_list = client_prompted.properties[client_cpu_cores_list_property]
+            client_num_training_examples_available = \
+                client_prompted.properties[client_num_training_examples_available_property]
+            client_num_testing_examples_available = \
+                client_prompted.properties[client_num_testing_examples_available_property]
+            client_task_assignment_capacities_train = \
+                client_prompted.properties[client_task_assignment_capacities_train_property]
+            client_task_assignment_capacities_train = client_task_assignment_capacities_train.split("|")
+            client_task_assignment_capacities_train = [int(i) for i in client_task_assignment_capacities_train]
+            client_task_assignment_capacities_test = \
+                client_prompted.properties[client_task_assignment_capacities_test_property]
+            client_task_assignment_capacities_test = client_task_assignment_capacities_test.split("|")
+            client_task_assignment_capacities_test = [int(i) for i in client_task_assignment_capacities_test]
+            client_remaining_battery_energy = client_prompted.properties[client_remaining_battery_energy_property]
+            client_mean_power_consumption_idle_mode = client_prompted.properties[client_mean_power_consumption_idle_mode_property]
+            client_current_download_bandwidth_in_bytes_per_second = client_prompted.properties[client_current_download_bandwidth_in_bytes_per_second_property]
+            client_current_upload_bandwidth_in_bytes_per_second = client_prompted.properties[client_current_upload_bandwidth_in_bytes_per_second_property]
+            client_current_latency_in_milliseconds = client_prompted.properties[client_current_latency_in_milliseconds_property]
+            client_available = client_prompted.properties["client_available"]
+            if client_available:
+                client_id_str = "client_{0}".format(client_id)
+                client_map = {"client_proxy": client_proxy,
+                              "client_hostname": client_hostname,
+                              "client_num_cpus": client_num_cpus,
+                              "client_cpu_cores_list": client_cpu_cores_list,
+                              "client_num_training_examples_available": client_num_training_examples_available,
+                              "client_num_testing_examples_available": client_num_testing_examples_available,
+                              "client_task_assignment_capacities_train": client_task_assignment_capacities_train,
+                              "client_task_assignment_capacities_test": client_task_assignment_capacities_test,
+                              "client_remaining_battery_energy": client_remaining_battery_energy,
+                              "client_mean_power_consumption_idle_mode": client_mean_power_consumption_idle_mode,
+                              "client_current_download_bandwidth_in_bytes_per_second": client_current_download_bandwidth_in_bytes_per_second,
+                              "client_current_upload_bandwidth_in_bytes_per_second": client_current_upload_bandwidth_in_bytes_per_second,
+                              "client_current_latency_in_milliseconds": client_current_latency_in_milliseconds}
+                # Attach the data distribution info (histogram), if allowed.
+                if query_clients_data_distribution:
+                    if client_proxy in self._clients_histograms:
+                        client_info = self._clients_histograms[client_proxy]
+                        match data_privacy_approach_name:
+                            case "Non_Private":
+                                if "client_tasks_per_class_train" in client_info:
+                                    client_map.update({"client_tasks_per_class_train": client_info["client_tasks_per_class_train"]})
+                                if "client_tasks_per_class_test" in client_info:
+                                    client_map.update({"client_tasks_per_class_test": client_info["client_tasks_per_class_test"]})
+                            case "Differentially_Private":
+                                if "client_dp_histogram" in client_info:
+                                    client_map.update({"client_dp_histogram": client_info["client_dp_histogram"]})
+                                if "class_index_map" in self._clients_histograms:
+                                    client_map.update({"class_index_map": self._clients_histograms["class_index_map"]})
+                available_clients_map.update({client_id_str: client_map})
+        sorted_keys = sorted(list(available_clients_map.keys()), key=lambda x: (len(x), x))
+        available_clients_map = {k: available_clients_map[k] for k in sorted_keys}
+        return available_clients_map
+
+    def _map_available_clients(self,
+                               current_round: int,
+                               client_manager: ClientManager | None) -> dict:
+        # Generate the idle events' data.
+        idle_events_data_dict = self._generate_idle_events_data(current_round)
         if client_manager is not None:
             # Get the available clients.
             available_clients = client_manager.all()
             # Get the available clients data distribution, if allowed.
-            data_privacy_approach_name = "Non_Private"
-            data_privacy_approach_settings = {}
-            query_clients_data_distribution = server_strategy_settings.get("query_clients_data_distribution", False)
-            if query_clients_data_distribution:
-                if "data_privacy_approach" in server_strategy_settings:
-                    data_privacy_approach_settings = server_strategy_settings["data_privacy_approach"]
-                    data_privacy_approach_name = data_privacy_approach_settings["name"]
-                # Keep only active clients in the clients histograms cache.
-                active_client_proxies = set(available_clients.values())
-                self._clients_histograms = {client_proxy: client_info_cached
-                                            for client_proxy, client_info_cached in self._clients_histograms.items()
-                                            if client_proxy in active_client_proxies}
-                # Query client info, if not cached.
-                for _, client_proxy in available_clients.items():
-                    client_info_cached = self._clients_histograms.get(client_proxy, {})
-                    match data_privacy_approach_name:
-                        case "Non_Private":
-                            # Non-private: actual query counts per class.
-                            if "client_tasks_per_class_train" not in client_info_cached:
-                                client_id_property = "client_id"
-                                client_tasks_per_class_train_property = "client_tasks_per_class_train"
-                                client_tasks_per_class_test_property = "client_tasks_per_class_test"
-                                gpi_dict = {client_id_property: "?",
-                                            client_tasks_per_class_train_property: "?",
-                                            client_tasks_per_class_test_property: "?",
-                                            "samples_per_task": server_strategy_settings.get("samples_per_task", 1)}
-                                gpi = GetPropertiesIns(gpi_dict)
-                                client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
-                                client_id = client_prompted.properties[client_id_property]
-                                client_tasks_per_class_train_str = client_prompted.properties[client_tasks_per_class_train_property]
-                                client_tasks_per_class_train = {s.split("=")[0]: int(s.split("=")[1])
-                                                                for s in client_tasks_per_class_train_str.split("|") if s}
-                                client_tasks_per_class_test_str = client_prompted.properties[client_tasks_per_class_test_property]
-                                client_tasks_per_class_test = {s.split("=")[0]: int(s.split("=")[1])
-                                                               for s in client_tasks_per_class_test_str.split("|") if s}
-                                self._clients_histograms[client_proxy] = {"client_id": client_id,
-                                                                          "client_tasks_per_class_train": client_tasks_per_class_train,
-                                                                          "client_tasks_per_class_test": client_tasks_per_class_test}
-                        case "Differentially_Private":
-                            # Query presence and local classes claims, if not cached.
-                            true_presence_probability = data_privacy_approach_settings["true_presence_probability"]
-                            if "client_dp_presence" not in client_info_cached:
-                                client_id_property = "client_id"
-                                client_dp_presence_property = "client_dp_presence"
-                                client_local_classes_claimed_property = "client_local_classes_claimed"
-                                gpi_dict = {client_id_property: "?",
-                                            client_dp_presence_property: "?",
-                                            client_local_classes_claimed_property: "?",
-                                            "true_presence_probability": true_presence_probability}
-                                gpi = GetPropertiesIns(gpi_dict)
-                                client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
-                                client_id = client_prompted.properties[client_id_property]
-                                client_dp_presence_str = client_prompted.properties[client_dp_presence_property]
-                                client_dp_presence = list(map(int, client_dp_presence_str.split("|")))
-                                client_local_classes_claimed_str = client_prompted.properties[client_local_classes_claimed_property]
-                                client_local_classes_claimed = client_local_classes_claimed_str.split("|")
-                                self._clients_histograms[client_proxy] = {"client_id": client_id,
-                                                                          "client_dp_presence": client_dp_presence,
-                                                                          "client_local_classes_claimed": client_local_classes_claimed}
-                if data_privacy_approach_name == "Differentially_Private":
-                    # Estimate the global classes and build the class-index mapping.
-                    true_presence_probability = data_privacy_approach_settings["true_presence_probability"]
-                    presence_cutoff = data_privacy_approach_settings["presence_cutoff"]
-                    epsilon = data_privacy_approach_settings["epsilon"]
-                    global_presence = defaultdict(list)
-                    for client_proxy, _ in self._clients_histograms.items():
-                        client_dp_presence = self._clients_histograms[client_proxy]["client_dp_presence"]
-                        client_local_classes_claimed = self._clients_histograms[client_proxy]["client_local_classes_claimed"]
-                        for cls, bit in zip(client_local_classes_claimed, client_dp_presence):
-                            global_presence[cls].append(bit)
-                    estimates = {cls: self._estimate_global_class_presence(bits, true_presence_probability)
-                                 for cls, bits in global_presence.items()}
-                    global_classes = [cls for cls, est in estimates.items() if est > presence_cutoff]
-                    num_global_classes = len(global_classes)
-                    class_index_map = {lbl: idx for idx, lbl in enumerate(global_classes)}
-                    # Set the class-index mapping.
-                    self._clients_histograms["class_index_map"] = class_index_map
-                    # Query DP histograms, if not cached.
-                    class_index_map_str = "|".join("{0}={1}".format(k, v) for k, v in class_index_map.items())
-                    for _, client_proxy in available_clients.items():
-                        client_info_cached = self._clients_histograms[client_proxy]
-                        if "client_dp_histogram" not in client_info_cached:
-                            dp_histogram_property = "client_dp_histogram"
-                            gpi_dict = {dp_histogram_property: "?",
-                                        "num_global_classes": num_global_classes,
-                                        "class_index_map": class_index_map_str,
-                                        "epsilon": epsilon}
-                            gpi = GetPropertiesIns(gpi_dict)
-                            client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
-                            client_dp_histogram_str = client_prompted.properties[dp_histogram_property]
-                            client_dp_histogram = array(list(map(float, client_dp_histogram_str.split("|"))), dtype=float32)
-                            self._clients_histograms[client_proxy].update({"client_dp_histogram": client_dp_histogram})
+            self._get_available_clients_data_distribution(available_clients)
             # Generate the available clients map.
-            for _, client_proxy in available_clients.items():
-                client_id_property = "client_id"
-                client_hostname_property = "client_hostname"
-                client_num_cpus_property = "client_num_cpus"
-                client_cpu_cores_list_property = "client_cpu_cores_list"
-                client_num_training_examples_available_property = "client_num_training_examples_available"
-                client_num_testing_examples_available_property = "client_num_testing_examples_available"
-                client_task_assignment_capacities_train_property = "client_task_assignment_capacities_train"
-                client_task_assignment_capacities_test_property = "client_task_assignment_capacities_test"
-                client_remaining_battery_energy_property = "client_remaining_battery_energy"
-                client_mean_power_consumption_idle_mode_property = "client_mean_power_consumption_idle_mode"
-                client_current_download_bandwidth_in_bytes_per_second_property = "client_current_download_bandwidth_in_bytes_per_second"
-                client_current_upload_bandwidth_in_bytes_per_second_property = "client_current_upload_bandwidth_in_bytes_per_second"
-                client_current_latency_in_milliseconds_property = "client_current_latency_in_milliseconds"
-                gpi_dict = {client_id_property: "?",
-                            client_hostname_property: "?",
-                            client_num_cpus_property: "?",
-                            client_cpu_cores_list_property: "?",
-                            client_num_training_examples_available_property: "?",
-                            client_num_testing_examples_available_property: "?",
-                            client_task_assignment_capacities_train_property: "?",
-                            client_task_assignment_capacities_test_property: "?",
-                            client_remaining_battery_energy_property: "?",
-                            client_mean_power_consumption_idle_mode_property: "?",
-                            client_current_download_bandwidth_in_bytes_per_second_property: "?",
-                            client_current_upload_bandwidth_in_bytes_per_second_property: "?",
-                            client_current_latency_in_milliseconds_property: "?",
-                            "samples_per_task": server_strategy_settings.get("samples_per_task", 1),
-                            "comm_round": current_round,
-                            "is_profiling_round": current_round in profiling_rounds}
-                gpi_dict.update(idle_events_data_dict)
-                gpi = GetPropertiesIns(gpi_dict)
-                client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
-                client_id = client_prompted.properties[client_id_property]
-                client_hostname = client_prompted.properties[client_hostname_property]
-                client_num_cpus = client_prompted.properties[client_num_cpus_property]
-                client_cpu_cores_list = client_prompted.properties[client_cpu_cores_list_property]
-                client_num_training_examples_available = \
-                    client_prompted.properties[client_num_training_examples_available_property]
-                client_num_testing_examples_available = \
-                    client_prompted.properties[client_num_testing_examples_available_property]
-                client_task_assignment_capacities_train = \
-                    client_prompted.properties[client_task_assignment_capacities_train_property]
-                client_task_assignment_capacities_train = client_task_assignment_capacities_train.split("|")
-                client_task_assignment_capacities_train = [int(i) for i in client_task_assignment_capacities_train]
-                client_task_assignment_capacities_test = \
-                    client_prompted.properties[client_task_assignment_capacities_test_property]
-                client_task_assignment_capacities_test = client_task_assignment_capacities_test.split("|")
-                client_task_assignment_capacities_test = [int(i) for i in client_task_assignment_capacities_test]
-                client_remaining_battery_energy = client_prompted.properties[client_remaining_battery_energy_property]
-                client_mean_power_consumption_idle_mode = client_prompted.properties[client_mean_power_consumption_idle_mode_property]
-                client_current_download_bandwidth_in_bytes_per_second = client_prompted.properties[client_current_download_bandwidth_in_bytes_per_second_property]
-                client_current_upload_bandwidth_in_bytes_per_second = client_prompted.properties[client_current_upload_bandwidth_in_bytes_per_second_property]
-                client_current_latency_in_milliseconds = client_prompted.properties[client_current_latency_in_milliseconds_property]
-                client_available = client_prompted.properties["client_available"]
-                if client_available:
-                    client_id_str = "client_{0}".format(client_id)
-                    client_map = {"client_proxy": client_proxy,
-                                  "client_hostname": client_hostname,
-                                  "client_num_cpus": client_num_cpus,
-                                  "client_cpu_cores_list": client_cpu_cores_list,
-                                  "client_num_training_examples_available": client_num_training_examples_available,
-                                  "client_num_testing_examples_available": client_num_testing_examples_available,
-                                  "client_task_assignment_capacities_train": client_task_assignment_capacities_train,
-                                  "client_task_assignment_capacities_test": client_task_assignment_capacities_test,
-                                  "client_remaining_battery_energy": client_remaining_battery_energy,
-                                  "client_mean_power_consumption_idle_mode": client_mean_power_consumption_idle_mode,
-                                  "client_current_download_bandwidth_in_bytes_per_second": client_current_download_bandwidth_in_bytes_per_second,
-                                  "client_current_upload_bandwidth_in_bytes_per_second": client_current_upload_bandwidth_in_bytes_per_second,
-                                  "client_current_latency_in_milliseconds": client_current_latency_in_milliseconds}
-                    # Attach the data distribution info (histogram), if allowed.
-                    if query_clients_data_distribution:
-                        if client_proxy in self._clients_histograms:
-                            client_info = self._clients_histograms[client_proxy]
-                            match data_privacy_approach_name:
-                                case "Non_Private":
-                                    if "client_tasks_per_class_train" in client_info:
-                                        client_map.update({"client_tasks_per_class_train": client_info["client_tasks_per_class_train"]})
-                                    if "client_tasks_per_class_test" in client_info:
-                                        client_map.update({"client_tasks_per_class_test": client_info["client_tasks_per_class_test"]})
-                                case "Differentially_Private":
-                                    if "client_dp_histogram" in client_info:
-                                        client_map.update({"client_dp_histogram": client_info["client_dp_histogram"]})
-                                    if "class_index_map" in self._clients_histograms:
-                                        client_map.update({"class_index_map": self._clients_histograms["class_index_map"]})
-                    available_clients_map.update({client_id_str: client_map})
-            sorted_keys = sorted(list(available_clients_map.keys()), key=lambda x: (len(x), x))
-            available_clients_map = {k: available_clients_map[k] for k in sorted_keys}
+            available_clients_map = self._generate_available_clients_map(current_round, available_clients, idle_events_data_dict)
         else:
             available_clients_map = self.get_attribute("_available_clients_map_replay")
         return available_clients_map
