@@ -7,8 +7,7 @@ from metacs_fl.metaheuristic.lns import run_lns
 from metacs_fl.task_scheduler.ecmtc import ecmtc
 from metacs_fl.task_scheduler.mec import mec
 from metacs_fl.task_scheduler.random import random_selection
-from metacs_fl.utils.client_selector_util import get_all_possible_sums, schedule_tasks_to_selected_clients, \
-    select_all_available_clients, take_closest
+from metacs_fl.utils.client_selector_util import get_all_possible_sums, take_closest
 from metacs_fl.utils.logger_util import log_message
 from metacs_fl.utils.system_modeler_util import calculate_computation_time, calculate_computation_energy, \
     calculate_download_time, calculate_download_energy, calculate_upload_time, calculate_upload_energy
@@ -137,7 +136,6 @@ class MetaCSFL:
                                      current_phase: str,
                                      candidate_clients: dict,
                                      selected_clients_metrics_history: dict,
-                                     profiling_rounds: list,
                                      logger: Logger) -> bool:
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
@@ -145,110 +143,111 @@ class MetaCSFL:
         # Initialize the lists of new client selection criteria and reasons.
         new_client_selection_criteria = []
         new_client_selection_reasons = []
-        # (i) The set of candidate clients differs from the previous round?
-        internal_candidate_clients_history = self.get_attribute("_internal_candidate_clients_history")
-        previous_round_candidate_clients = internal_candidate_clients_history[current_round - 1]
-        different_set_of_clients = set(candidate_clients.keys()) != set(previous_round_candidate_clients[current_phase].keys())
-        if different_set_of_clients:
+        # (i) The current round immediately follows the initial profiling?
+        immediately_follows_profiling = (current_round == 1)
+        if immediately_follows_profiling:
             new_client_selection_criteria.append(True)
-            new_client_selection_reasons.append("The set of candidate clients differs from the previous round.")
-        # (ii) The current round immediately follows the last profiling round?
-        immediately_follows_last_profiling_round = profiling_rounds and current_round == profiling_rounds[-1] + 1
-        if immediately_follows_last_profiling_round:
-            new_client_selection_criteria.append(True)
-            new_client_selection_reasons.append("The current round immediately follows the last profiling round.")
-        # (iii) Any user-defined criterion for a new client selection is fulfilled?
-        for crit_key, crit_conf in new_client_selection_criteria_phase.items():
-            crit_name = crit_conf["name"]
-            match crit_name:
-                case "client_diversity_score_training":
-                    # (iii-a) The accumulative client diversity score over the past X rounds falls below Y during the training phase?
-                    phase_of_interest = "train"
-                    minimum_score = crit_conf["minimum_score"]
-                    num_past_rounds = crit_conf["num_past_rounds"]
-                    internal_candidate_clients_history = self.get_attribute("_internal_candidate_clients_history")
-                    internal_selected_clients_history = self.get_attribute("_internal_selected_clients_history")
-                    candidate_clients_history_ids = {}
-                    selected_clients_history_ids = {}
-                    for round_key, round_candidate_clients in internal_candidate_clients_history.items():
-                        if phase_of_interest in round_candidate_clients:
-                            candidate_clients_history_ids.update({round_key: list(round_candidate_clients[phase_of_interest].keys())})
-                    for round_key, round_selected_clients in internal_selected_clients_history.items():
-                        if phase_of_interest in round_selected_clients:
-                            selected_clients_history_ids.update({round_key: list(round_selected_clients[phase_of_interest].keys())})
-                    accumulative_client_diversity_score \
-                        = calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_clients_history_ids,
-                                                                                         selected_clients_history_ids,
-                                                                                         num_past_rounds)
-                    if accumulative_client_diversity_score < minimum_score:
-                        new_client_selection_criteria.append(True)
-                        new_client_selection_reasons.append("The accumulative client diversity score over the past {0} rounds has fallen below {1} during the training phase ({2})."
-                                                            .format(num_past_rounds, minimum_score, round(accumulative_client_diversity_score, 2)))
-                case "makespan_percentage_increase_training":
-                    # (iii-b) The makespan of the training phase has increased by more than X% in the past Y rounds?
-                    phase_of_interest = "train"
-                    maximum_increase = crit_conf["maximum_increase"]
-                    if 0 <= maximum_increase <= 1:
-                        maximum_increase *= 100
-                    num_past_rounds = crit_conf["num_past_rounds"]
-                    metrics_past_rounds = self._get_metrics_of_past_x_rounds(selected_clients_metrics_history,
-                                                                             current_round,
-                                                                             phase_of_interest,
-                                                                             num_past_rounds)
-                    makespans = metrics_past_rounds["makespans"]
-                    for idx in range(0, len(makespans) - 1):
-                        makespan_prev_idx = makespans[idx]
-                        makespan_next_idx = makespans[idx + 1]
-                        makespan_percentage_change = calculate_percentage_change(makespan_prev_idx, makespan_next_idx)
-                        if makespan_percentage_change > maximum_increase:
+            new_client_selection_reasons.append("The current round immediately follows the initial profiling.")
+        else:
+            # (ii) The set of candidate clients differs from the previous round?
+            internal_candidate_clients_history = self.get_attribute("_internal_candidate_clients_history")
+            previous_round_candidate_clients = internal_candidate_clients_history[current_round - 1]
+            different_set_of_clients = set(candidate_clients.keys()) != set(previous_round_candidate_clients[current_phase].keys())
+            if different_set_of_clients:
+                new_client_selection_criteria.append(True)
+                new_client_selection_reasons.append("The set of candidate clients differs from the previous round.")
+            # (iii) Any user-defined criterion for a new client selection is fulfilled?
+            for crit_key, crit_conf in new_client_selection_criteria_phase.items():
+                crit_name = crit_conf["name"]
+                match crit_name:
+                    case "client_diversity_score_training":
+                        # (iii-a) The accumulative client diversity score over the past X rounds falls below Y during the training phase?
+                        phase_of_interest = "train"
+                        minimum_score = crit_conf["minimum_score"]
+                        num_past_rounds = crit_conf["num_past_rounds"]
+                        internal_candidate_clients_history = self.get_attribute("_internal_candidate_clients_history")
+                        internal_selected_clients_history = self.get_attribute("_internal_selected_clients_history")
+                        candidate_clients_history_ids = {}
+                        selected_clients_history_ids = {}
+                        for round_key, round_candidate_clients in internal_candidate_clients_history.items():
+                            if phase_of_interest in round_candidate_clients:
+                                candidate_clients_history_ids.update({round_key: list(round_candidate_clients[phase_of_interest].keys())})
+                        for round_key, round_selected_clients in internal_selected_clients_history.items():
+                            if phase_of_interest in round_selected_clients:
+                                selected_clients_history_ids.update({round_key: list(round_selected_clients[phase_of_interest].keys())})
+                        accumulative_client_diversity_score \
+                            = calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_clients_history_ids,
+                                                                                             selected_clients_history_ids,
+                                                                                             num_past_rounds)
+                        if accumulative_client_diversity_score < minimum_score:
                             new_client_selection_criteria.append(True)
-                            new_client_selection_reasons.append("The makespan of the training phase has increased by more than {0}% in the past {1} rounds ({2}{3}%)."
-                                                                .format(round(maximum_increase, 2), num_past_rounds, "+" if makespan_percentage_change > 0 else "", round(makespan_percentage_change, 2)))
-                            break
-                case "energy_consumption_percentage_increase_training":
-                    # (iii-c) The energy consumption of the training phase has increased by more than X% in the past Y rounds?
-                    phase_of_interest = "train"
-                    maximum_increase = crit_conf["maximum_increase"]
-                    if 0 <= maximum_increase <= 1:
-                        maximum_increase *= 100
-                    num_past_rounds = crit_conf["num_past_rounds"]
-                    metrics_past_rounds = self._get_metrics_of_past_x_rounds(selected_clients_metrics_history,
-                                                                             current_round,
-                                                                             phase_of_interest,
-                                                                             num_past_rounds)
-                    energy_consumptions = metrics_past_rounds["energy_consumptions"]
-                    for idx in range(0, len(energy_consumptions) - 1):
-                        energy_consumption_prev_idx = energy_consumptions[idx]
-                        energy_consumption_next_idx = energy_consumptions[idx + 1]
-                        energy_consumption_percentage_change = calculate_percentage_change(energy_consumption_prev_idx,
-                                                                                           energy_consumption_next_idx)
-                        if energy_consumption_percentage_change > maximum_increase:
-                            new_client_selection_criteria.append(True)
-                            new_client_selection_reasons.append("The energy consumption of the training phase has increased by more than {0}% in the past {1} rounds ({2}{3}%)."
-                                                                .format(round(maximum_increase, 2), num_past_rounds, "+" if energy_consumption_percentage_change > 0 else "", round(energy_consumption_percentage_change, 2)))
-                            break
-                case "accuracy_percentage_decrease_testing":
-                    # (iii-d) The model accuracy of the testing phase has decreased by more than X% in the past Y rounds?
-                    phase_of_interest = "test"
-                    maximum_decrease = crit_conf["maximum_decrease"]
-                    if 0 <= maximum_decrease <= 1:
-                        maximum_decrease *= 100
-                    num_past_rounds = crit_conf["num_past_rounds"]
-                    metrics_past_rounds = self._get_metrics_of_past_x_rounds(selected_clients_metrics_history,
-                                                                             current_round,
-                                                                             phase_of_interest,
-                                                                             num_past_rounds)
-                    weighted_mean_accuracies = metrics_past_rounds["weighted_mean_accuracies"]
-                    for idx in range(0, len(weighted_mean_accuracies) - 1):
-                        weighted_mean_accuracy_prev_idx = weighted_mean_accuracies[idx]
-                        weighted_mean_accuracy_next_idx = weighted_mean_accuracies[idx + 1]
-                        weighted_mean_accuracy_percentage_change = calculate_percentage_change(weighted_mean_accuracy_prev_idx,
-                                                                                               weighted_mean_accuracy_next_idx)
-                        if weighted_mean_accuracy_percentage_change < - maximum_decrease:
-                            new_client_selection_criteria.append(True)
-                            new_client_selection_reasons.append("The model accuracy of the testing phase has decreased by more than {0}% in the past {1} rounds ({2}{3}%)."
-                                                                .format(round(maximum_decrease, 2), num_past_rounds, "+" if weighted_mean_accuracy_percentage_change > 0 else "", round(weighted_mean_accuracy_percentage_change, 2)))
-                            break
+                            new_client_selection_reasons.append("The accumulative client diversity score over the past {0} rounds has fallen below {1} during the training phase ({2})."
+                                                                .format(num_past_rounds, minimum_score, round(accumulative_client_diversity_score, 2)))
+                    case "makespan_percentage_increase_training":
+                        # (iii-b) The makespan of the training phase has increased by more than X% in the past Y rounds?
+                        phase_of_interest = "train"
+                        maximum_increase = crit_conf["maximum_increase"]
+                        if 0 <= maximum_increase <= 1:
+                            maximum_increase *= 100
+                        num_past_rounds = crit_conf["num_past_rounds"]
+                        metrics_past_rounds = self._get_metrics_of_past_x_rounds(selected_clients_metrics_history,
+                                                                                 current_round,
+                                                                                 phase_of_interest,
+                                                                                 num_past_rounds)
+                        makespans = metrics_past_rounds["makespans"]
+                        for idx in range(0, len(makespans) - 1):
+                            makespan_prev_idx = makespans[idx]
+                            makespan_next_idx = makespans[idx + 1]
+                            makespan_percentage_change = calculate_percentage_change(makespan_prev_idx, makespan_next_idx)
+                            if makespan_percentage_change > maximum_increase:
+                                new_client_selection_criteria.append(True)
+                                new_client_selection_reasons.append("The makespan of the training phase has increased by more than {0}% in the past {1} rounds ({2}{3}%)."
+                                                                    .format(round(maximum_increase, 2), num_past_rounds, "+" if makespan_percentage_change > 0 else "", round(makespan_percentage_change, 2)))
+                                break
+                    case "energy_consumption_percentage_increase_training":
+                        # (iii-c) The energy consumption of the training phase has increased by more than X% in the past Y rounds?
+                        phase_of_interest = "train"
+                        maximum_increase = crit_conf["maximum_increase"]
+                        if 0 <= maximum_increase <= 1:
+                            maximum_increase *= 100
+                        num_past_rounds = crit_conf["num_past_rounds"]
+                        metrics_past_rounds = self._get_metrics_of_past_x_rounds(selected_clients_metrics_history,
+                                                                                 current_round,
+                                                                                 phase_of_interest,
+                                                                                 num_past_rounds)
+                        energy_consumptions = metrics_past_rounds["energy_consumptions"]
+                        for idx in range(0, len(energy_consumptions) - 1):
+                            energy_consumption_prev_idx = energy_consumptions[idx]
+                            energy_consumption_next_idx = energy_consumptions[idx + 1]
+                            energy_consumption_percentage_change = calculate_percentage_change(energy_consumption_prev_idx,
+                                                                                               energy_consumption_next_idx)
+                            if energy_consumption_percentage_change > maximum_increase:
+                                new_client_selection_criteria.append(True)
+                                new_client_selection_reasons.append("The energy consumption of the training phase has increased by more than {0}% in the past {1} rounds ({2}{3}%)."
+                                                                    .format(round(maximum_increase, 2), num_past_rounds, "+" if energy_consumption_percentage_change > 0 else "", round(energy_consumption_percentage_change, 2)))
+                                break
+                    case "accuracy_percentage_decrease_testing":
+                        # (iii-d) The model accuracy of the testing phase has decreased by more than X% in the past Y rounds?
+                        phase_of_interest = "test"
+                        maximum_decrease = crit_conf["maximum_decrease"]
+                        if 0 <= maximum_decrease <= 1:
+                            maximum_decrease *= 100
+                        num_past_rounds = crit_conf["num_past_rounds"]
+                        metrics_past_rounds = self._get_metrics_of_past_x_rounds(selected_clients_metrics_history,
+                                                                                 current_round,
+                                                                                 phase_of_interest,
+                                                                                 num_past_rounds)
+                        weighted_mean_accuracies = metrics_past_rounds["weighted_mean_accuracies"]
+                        for idx in range(0, len(weighted_mean_accuracies) - 1):
+                            weighted_mean_accuracy_prev_idx = weighted_mean_accuracies[idx]
+                            weighted_mean_accuracy_next_idx = weighted_mean_accuracies[idx + 1]
+                            weighted_mean_accuracy_percentage_change = calculate_percentage_change(weighted_mean_accuracy_prev_idx,
+                                                                                                   weighted_mean_accuracy_next_idx)
+                            if weighted_mean_accuracy_percentage_change < - maximum_decrease:
+                                new_client_selection_criteria.append(True)
+                                new_client_selection_reasons.append("The model accuracy of the testing phase has decreased by more than {0}% in the past {1} rounds ({2}{3}%)."
+                                                                    .format(round(maximum_decrease, 2), num_past_rounds, "+" if weighted_mean_accuracy_percentage_change > 0 else "", round(weighted_mean_accuracy_percentage_change, 2)))
+                                break
         # Check if any criterion for a new client selection is fulfilled.
         if any(new_client_selection_criteria):
             # Log a 'new client selection is needed' message.
@@ -263,7 +262,8 @@ class MetaCSFL:
     @staticmethod
     def _generate_cost_matrices(current_phase: str,
                                 candidate_clients: dict,
-                                selected_clients_metrics_history: dict) -> dict:
+                                selected_clients_metrics_history: dict,
+                                clients_profiles: dict) -> dict:
         time_costs = []
         energy_costs = []
         for client_id, client_map in candidate_clients.items():
@@ -282,6 +282,8 @@ class MetaCSFL:
                         if client_id in client_dict:
                             latest_phase_metrics_i = client_dict[client_id]
                             break
+            if not latest_phase_metrics_i:
+                latest_phase_metrics_i = clients_profiles[client_id][current_phase]
             latest_phase_metrics_i_copy = deepcopy(latest_phase_metrics_i)
             latest_phase_metrics_i_copy["bw_down_i"] = current_download_bandwidth_in_bytes_per_second_i
             latest_phase_metrics_i_copy["bw_up_i"] = current_upload_bandwidth_in_bytes_per_second_i
@@ -309,7 +311,6 @@ class MetaCSFL:
                                             current_round: int,
                                             current_phase: str,
                                             candidate_clients: dict,
-                                            profiling_rounds: list,
                                             logger: Logger) -> bool:
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
@@ -317,33 +318,35 @@ class MetaCSFL:
         # Initialize the lists of initial solution generation criteria and reasons.
         generate_initial_solution_criteria = []
         generate_initial_solution_reasons = []
-        # (i) The set of candidate clients differs from the previous round?
-        internal_candidate_clients_history = self.get_attribute("_internal_candidate_clients_history")
-        previous_round_candidate_clients = internal_candidate_clients_history[current_round - 1]
-        different_set_of_clients = set(candidate_clients.keys()) != set(previous_round_candidate_clients[current_phase].keys())
-        if different_set_of_clients:
+        # (i) The current round immediately follows the initial profiling?
+        immediately_follows_initial_profiling = (current_round == 1)
+        if immediately_follows_initial_profiling:
             generate_initial_solution_criteria.append(True)
-            generate_initial_solution_reasons.append("The set of candidate clients differs from the previous round.")
-        # (ii) The current round immediately follows the last profiling round?
-        immediately_follows_last_profiling_round = profiling_rounds and current_round == profiling_rounds[-1] + 1
-        if immediately_follows_last_profiling_round:
-            generate_initial_solution_criteria.append(True)
-            generate_initial_solution_reasons.append("The current round immediately follows the last profiling round.")
-        for crit_key, crit_conf in new_initial_solution_criteria_phase.items():
-            crit_name = crit_conf["name"]
-            match crit_name:
-                case "max_rounds_same_initial_solution":
-                    # (ii) A pre-defined number of rounds has passed since the last generation?
-                    maximum_rounds = crit_conf["maximum_rounds"]
-                    initial_solution_generation_history = self.get_attribute("_initial_solution_generation_history")
-                    last_initial_solution_generation = next(reversed(initial_solution_generation_history.items()), None)
-                    if last_initial_solution_generation is not None:
-                        last_generation_round, _ = last_initial_solution_generation
-                        last_generation_rounds_difference = current_round - last_generation_round
-                        if last_generation_rounds_difference >= maximum_rounds:
-                            generate_initial_solution_criteria.append(True)
-                            generate_initial_solution_reasons.append("{0} rounds have passed since the last generation of the initial solution (maximum allowed is {1})."
-                                                                     .format(last_generation_rounds_difference, maximum_rounds))
+            generate_initial_solution_reasons.append("The current round immediately follows the initial profiling.")
+        else:
+            # (ii) The set of candidate clients differs from the previous round?
+            internal_candidate_clients_history = self.get_attribute("_internal_candidate_clients_history")
+            previous_round_candidate_clients = internal_candidate_clients_history[current_round - 1]
+            different_set_of_clients = set(candidate_clients.keys()) != set(previous_round_candidate_clients[current_phase].keys())
+            if different_set_of_clients:
+                generate_initial_solution_criteria.append(True)
+                generate_initial_solution_reasons.append("The set of candidate clients differs from the previous round.")
+            # (iii) Any user-defined criterion for a new initial solution generation is fulfilled?
+            for crit_key, crit_conf in new_initial_solution_criteria_phase.items():
+                crit_name = crit_conf["name"]
+                match crit_name:
+                    case "max_rounds_same_initial_solution":
+                        # (iii-a) A pre-defined number of rounds has passed since the last generation?
+                        maximum_rounds = crit_conf["maximum_rounds"]
+                        initial_solution_generation_history = self.get_attribute("_initial_solution_generation_history")
+                        last_initial_solution_generation = next(reversed(initial_solution_generation_history.items()), None)
+                        if last_initial_solution_generation is not None:
+                            last_generation_round, _ = last_initial_solution_generation
+                            last_generation_rounds_difference = current_round - last_generation_round
+                            if last_generation_rounds_difference >= maximum_rounds:
+                                generate_initial_solution_criteria.append(True)
+                                generate_initial_solution_reasons.append("{0} rounds have passed since the last generation of the initial solution (maximum allowed is {1})."
+                                                                         .format(last_generation_rounds_difference, maximum_rounds))
         # Check if any criterion for an initial solution generation is fulfilled.
         if any(generate_initial_solution_criteria):
             # Log an 'initial solution generation is needed' message.
@@ -435,7 +438,6 @@ class MetaCSFL:
                                           candidate_clients: dict,
                                           num_tasks: int,
                                           samples_per_task: int,
-                                          profiling_rounds: list,
                                           cost_matrices: dict,
                                           time_limit: float,
                                           data_privacy_approach: str,
@@ -444,7 +446,6 @@ class MetaCSFL:
         initial_solution_generation_is_needed = self._initial_solution_generation_needed(current_round,
                                                                                          current_phase,
                                                                                          candidate_clients,
-                                                                                         profiling_rounds,
                                                                                          logger)
         if initial_solution_generation_is_needed:
             # Generate an initial solution.
@@ -491,7 +492,7 @@ class MetaCSFL:
                         base_batch_size: int,
                         base_num_epochs: int,
                         selected_clients_metrics_history: dict,
-                        profiling_rounds: list,
+                        clients_profiles: dict,
                         time_limit: float,
                         data_privacy_approach: str,
                         logger: Logger) -> dict:
@@ -501,14 +502,14 @@ class MetaCSFL:
         # Generate the cost matrices.
         cost_matrices = self._generate_cost_matrices(current_phase,
                                                      candidate_clients,
-                                                     selected_clients_metrics_history)
+                                                     selected_clients_metrics_history,
+                                                     clients_profiles)
         # Get or generated the initial solution.
         X_init, X_init_dist = self._get_or_generate_initial_solution(current_round,
                                                                      current_phase,
                                                                      candidate_clients,
                                                                      num_tasks,
                                                                      samples_per_task,
-                                                                     profiling_rounds,
                                                                      cost_matrices,
                                                                      time_limit,
                                                                      data_privacy_approach,
@@ -678,7 +679,7 @@ class MetaCSFL:
         base_num_epochs = kwargs["base_num_epochs"] if "base_num_epochs" in kwargs else 0
         selected_clients_history = kwargs["selected_clients_history"]
         selected_clients_metrics_history = kwargs["selected_clients_metrics_history"]
-        profiling_rounds = kwargs["profiling_rounds"]
+        clients_profiles = kwargs["clients_profiles"]
         time_limit = kwargs["time_limit"]
         data_privacy_approach = kwargs["data_privacy_approach"]
         logger = kwargs["logger"]
@@ -705,66 +706,38 @@ class MetaCSFL:
         if num_tasks not in all_possible_task_assignment_sums:
             # Set a new valid number of tasks to schedule.
             num_tasks = take_closest(all_possible_task_assignment_sums, num_tasks)
-        # Verify if the current round is a profiling round.
-        if current_round in profiling_rounds:
-            # Log a 'selecting all available clients' message.
-            message = "[MetaCS-FL | Round {0}] Selecting all available clients ({1}) for {2}ing (profiling round)..." \
-                      .format(current_round, len(candidate_clients), current_phase)
-            log_message(logger, message, "INFO")
-            # Define the set of schedules from previous profiling rounds to be avoided during the next profiling.
-            profiling_rounds_previous_schedules = []
-            for profiling_round in profiling_rounds:
-                if profiling_round in selected_clients_history \
-                        and current_phase in selected_clients_history[profiling_round]:
-                    profiling_round_selected_clients = selected_clients_history[profiling_round][current_phase]
-                    profiling_round_schedule = [client_info["client_num_tasks_scheduled"]
-                                                for _, client_info in profiling_round_selected_clients.items()]
-                    profiling_rounds_previous_schedules.append(profiling_round_schedule)
-            # Schedule tasks to all available (candidate) clients, respecting assignment capacities.
-            selected_clients = select_all_available_clients(candidate_clients, current_phase)
-            selected_clients = schedule_tasks_to_selected_clients(num_tasks,
-                                                                  selected_clients,
-                                                                  current_phase,
-                                                                  profiling_round=True,
-                                                                  previous_schedules_to_avoid=profiling_rounds_previous_schedules,
-                                                                  schedule_to_all_clients=True)
-            for client_id, client_info in selected_clients.items():
-                num_tasks_i = client_info.get("client_num_tasks_scheduled", 0)
-                client_info["client_num_samples_scheduled"] = num_tasks_i * samples_per_task
+        # Verify if a new client selection is necessary.
+        new_client_selection_is_needed = self._new_client_selection_needed(current_round,
+                                                                           current_phase,
+                                                                           candidate_clients,
+                                                                           selected_clients_metrics_history,
+                                                                           logger)
+        if new_client_selection_is_needed:
+            # Select clients.
+            selected_clients = self._select_clients(current_round,
+                                                    current_phase,
+                                                    candidate_clients,
+                                                    num_tasks,
+                                                    samples_per_task,
+                                                    base_learning_rate,
+                                                    base_batch_size,
+                                                    base_num_epochs,
+                                                    selected_clients_metrics_history,
+                                                    clients_profiles,
+                                                    time_limit,
+                                                    data_privacy_approach,
+                                                    logger)
         else:
-            # Verify if a new client selection is necessary.
-            new_client_selection_is_needed = self._new_client_selection_needed(current_round,
-                                                                               current_phase,
-                                                                               candidate_clients,
-                                                                               selected_clients_metrics_history,
-                                                                               profiling_rounds,
-                                                                               logger)
-            if new_client_selection_is_needed:
-                # Select clients.
-                selected_clients = self._select_clients(current_round,
-                                                        current_phase,
-                                                        candidate_clients,
-                                                        num_tasks,
-                                                        samples_per_task,
-                                                        base_learning_rate,
-                                                        base_batch_size,
-                                                        base_num_epochs,
-                                                        selected_clients_metrics_history,
-                                                        profiling_rounds,
-                                                        time_limit,
-                                                        data_privacy_approach,
-                                                        logger)
-            else:
-                # Get the latest set of selected clients, if available.
-                selected_clients = self._get_latest_selection(selected_clients_history, current_round, current_phase)
-                # Filter the inactive clients from the latest selection, if any.
-                selected_clients = {client_id: client_info
-                                    for client_id, client_info in selected_clients.items()
-                                    if client_id in candidate_clients}
-                # Log a 'selected the same subset of clients from the previous round' message.
-                message = "[MetaCS-FL | Round {0}] Selected the same subset of clients from the previous round!" \
-                          .format(current_round)
-                log_message(logger, message, "INFO")
+            # Get the latest set of selected clients, if available.
+            selected_clients = self._get_latest_selection(selected_clients_history, current_round, current_phase)
+            # Filter the inactive clients from the latest selection, if any.
+            selected_clients = {client_id: client_info
+                                for client_id, client_info in selected_clients.items()
+                                if client_id in candidate_clients}
+            # Log a 'selected the same subset of clients from the previous round' message.
+            message = "[MetaCS-FL | Round {0}] Selected the same subset of clients from the previous round!" \
+                      .format(current_round)
+            log_message(logger, message, "INFO")
         # Update the candidate clients' history (internal).
         internal_candidate_clients_history = self.get_attribute("_internal_candidate_clients_history")
         if current_round not in internal_candidate_clients_history:

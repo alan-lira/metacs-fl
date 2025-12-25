@@ -42,7 +42,8 @@ class SBACPAD2024:
                                 current_phase: str,
                                 candidate_clients: dict,
                                 selected_clients_metrics_history: dict,
-                                history_checker: str) -> dict:
+                                history_checker: str,
+                                clients_profiles: dict) -> dict:
         # Get the necessary properties of the candidate clients.
         task_assignment_capacities_list = self.get_attribute("_task_assignment_capacities_list")
         # Initialize the cost matrices.
@@ -92,6 +93,18 @@ class SBACPAD2024:
                                             candidate_clients_costs_hist[client_id][x_i][cost_key].extend(cost_value)
                                 else:
                                     candidate_clients_costs_hist[client_id].update({x_i: client_costs})
+        for client_id, _ in candidate_clients.items():
+            if client_id not in candidate_clients_costs_hist:
+                latest_phase_metrics_i = clients_profiles[client_id][current_phase]
+                x_i = latest_phase_metrics_i["num_examples"]
+                time_i = 0
+                energy_i = 0
+                if "{0}ing_time_in_seconds".format(current_phase) in latest_phase_metrics_i:
+                    time_i = latest_phase_metrics_i["{0}ing_time_in_seconds".format(current_phase)]
+                if "{0}ing_energy_in_joules".format(current_phase) in latest_phase_metrics_i:
+                    energy_i = latest_phase_metrics_i["{0}ing_energy_in_joules".format(current_phase)]
+                client_costs = {"time_costs": [time_i], "energy_costs": [energy_i]}
+                candidate_clients_costs_hist[client_id] = {x_i: client_costs}
         # Calculate the averages of the historical costs per number of tasks per client.
         for client_id, _ in candidate_clients_costs_hist.items():
             client_costs_dict = candidate_clients_costs_hist[client_id]
@@ -325,64 +338,32 @@ class SBACPAD2024:
                 X_scaled = [x_i * samples_per_task for x_i in X]
                 X_dist = distribute_tasks_with_random_approach(X_scaled, class_capacity_vectors_list)
             case "MEC":
-                if fl_round == 1:
-                    # Log a 'selecting all available clients' message.
-                    message = "[SBAC-PAD_2024 | Round {0}] Selecting all available clients ({1}) for {2}ing (profiling round)..." \
-                        .format(fl_round, len(candidate_clients), current_phase)
-                    log_message(logger, message, "INFO")
-                    # Schedule tasks to all available (candidate) clients, respecting assignment capacities.
-                    selected_clients = select_all_available_clients(candidate_clients, current_phase)
-                    selected_clients = schedule_tasks_to_selected_clients(num_tasks,
-                                                                          selected_clients,
-                                                                          current_phase,
-                                                                          profiling_round=True,
-                                                                          schedule_to_all_clients=True)
-                    for client_id, client_info in selected_clients.items():
-                        num_tasks_i = client_info.get("client_num_tasks_scheduled", 0)
-                        client_info["client_num_samples_scheduled"] = num_tasks_i * samples_per_task
-                else:
-                    # Select clients using the 'MEC' algorithm.
-                    task_assignment_capacities_list = self.get_attribute("_task_assignment_capacities_list")
-                    time_costs = cost_matrices["time_costs"]
-                    energy_costs = cost_matrices["energy_costs"]
-                    X, _, _ = mec(len(candidate_clients),
-                                  num_tasks,
-                                  task_assignment_capacities_list,
-                                  time_costs,
-                                  energy_costs)
-                    # Scale the assigned tasks back to sample-level counts (since distribution is based on samples per class).
-                    X_scaled = [x_i * samples_per_task for x_i in X]
-                    X_dist = distribute_tasks_with_locally_balanced_approach(X_scaled, class_capacity_vectors_list)
+                # Select clients using the 'MEC' algorithm.
+                task_assignment_capacities_list = self.get_attribute("_task_assignment_capacities_list")
+                time_costs = cost_matrices["time_costs"]
+                energy_costs = cost_matrices["energy_costs"]
+                X, _, _ = mec(len(candidate_clients),
+                              num_tasks,
+                              task_assignment_capacities_list,
+                              time_costs,
+                              energy_costs)
+                # Scale the assigned tasks back to sample-level counts (since distribution is based on samples per class).
+                X_scaled = [x_i * samples_per_task for x_i in X]
+                X_dist = distribute_tasks_with_locally_balanced_approach(X_scaled, class_capacity_vectors_list)
             case "ECMTC":
-                if fl_round == 1:
-                    # Log a 'selecting all available clients' message.
-                    message = "[SBAC-PAD_2024 | Round {0}] Selecting all available clients ({1}) for {2}ing (profiling round)..." \
-                        .format(fl_round, len(candidate_clients), current_phase)
-                    log_message(logger, message, "INFO")
-                    # Schedule tasks to all available (candidate) clients, respecting assignment capacities.
-                    selected_clients = select_all_available_clients(candidate_clients, current_phase)
-                    selected_clients = schedule_tasks_to_selected_clients(num_tasks,
-                                                                          selected_clients,
-                                                                          current_phase,
-                                                                          profiling_round=True,
-                                                                          schedule_to_all_clients=True)
-                    for client_id, client_info in selected_clients.items():
-                        num_tasks_i = client_info.get("client_num_tasks_scheduled", 0)
-                        client_info["client_num_samples_scheduled"] = num_tasks_i * samples_per_task
-                else:
-                    # Select clients using the 'ECMTC' algorithm.
-                    task_assignment_capacities_list = self.get_attribute("_task_assignment_capacities_list")
-                    time_costs = cost_matrices["time_costs"]
-                    energy_costs = cost_matrices["energy_costs"]
-                    X, _, _ = ecmtc(len(candidate_clients),
-                                    num_tasks,
-                                    task_assignment_capacities_list,
-                                    time_costs,
-                                    energy_costs,
-                                    time_limit)
-                    # Scale the assigned tasks back to sample-level counts (since distribution is based on samples per class).
-                    X_scaled = [x_i * samples_per_task for x_i in X]
-                    X_dist = distribute_tasks_with_locally_balanced_approach(X_scaled, class_capacity_vectors_list)
+                # Select clients using the 'ECMTC' algorithm.
+                task_assignment_capacities_list = self.get_attribute("_task_assignment_capacities_list")
+                time_costs = cost_matrices["time_costs"]
+                energy_costs = cost_matrices["energy_costs"]
+                X, _, _ = ecmtc(len(candidate_clients),
+                                num_tasks,
+                                task_assignment_capacities_list,
+                                time_costs,
+                                energy_costs,
+                                time_limit)
+                # Scale the assigned tasks back to sample-level counts (since distribution is based on samples per class).
+                X_scaled = [x_i * samples_per_task for x_i in X]
+                X_dist = distribute_tasks_with_locally_balanced_approach(X_scaled, class_capacity_vectors_list)
         if not selected_clients:
             # Organize the tasks' distribution.
             X_dist = organize_tasks_distribution(X_dist, sorted_classes)
@@ -432,6 +413,7 @@ class SBACPAD2024:
                               selected_clients_metrics_history: dict,
                               time_limit: float,
                               data_privacy_approach: str,
+                              clients_profiles: dict,
                               logger: Logger) -> list:
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
@@ -440,7 +422,8 @@ class SBACPAD2024:
         cost_matrices = self._generate_cost_matrices(current_phase,
                                                      candidate_clients,
                                                      selected_clients_metrics_history,
-                                                     history_checker)
+                                                     history_checker,
+                                                     clients_profiles)
         # Initialize the list of selected clients' Future objects.
         selected_clients_futures = []
         target = self._select_clients_task
@@ -470,6 +453,7 @@ class SBACPAD2024:
         num_tasks = kwargs["num_tasks"]
         samples_per_task = kwargs["samples_per_task"]
         selected_clients_metrics_history = kwargs["selected_clients_metrics_history"]
+        clients_profiles = kwargs["clients_profiles"]
         time_limit = kwargs["time_limit"]
         data_privacy_approach = kwargs["data_privacy_approach"]
         logger = kwargs["logger"]
@@ -528,6 +512,7 @@ class SBACPAD2024:
                                                                   selected_clients_metrics_history,
                                                                   time_limit,
                                                                   data_privacy_approach,
+                                                                  clients_profiles,
                                                                   logger)
         # Return the list of selected clients' Future objects.
         return selected_clients_futures

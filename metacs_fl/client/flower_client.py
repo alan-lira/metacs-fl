@@ -322,6 +322,7 @@ class FlowerClient(Client):
                  callbacks_settings: dict,
                  device_emulation_settings: dict,
                  host_profile: dict,
+                 late_join_settings: dict,
                  logger: Logger,
                  initialization_duration_in_seconds: float,
                  simulation_resources_settings: dict = None,
@@ -343,6 +344,7 @@ class FlowerClient(Client):
         self._model_settings = model_settings
         self._device_emulation_settings = device_emulation_settings
         self._host_profile = host_profile
+        self._late_join_settings = late_join_settings
         self._simulation_resources_settings = simulation_resources_settings
         self._root_output_folder = root_output_folder
         self._all_cpu_cores_available = all_cpu_cores_available
@@ -805,8 +807,49 @@ class FlowerClient(Client):
             # Set client unavailable, if client is unreachable...
             if current_latency_in_milliseconds == inf:
                 config.update({"client_available": False})
+        # Check if client is of 'late-join' type (have to wait X rounds before joining the system).
+        late_join_settings = self.get_attribute("_late_join_settings")
+        is_late_join_client = late_join_settings["is_late_join_client"]
+        if is_late_join_client:
+            comm_round = config.get("comm_round", 0)
+            late_join_first_appearance_round = late_join_settings["late_join_first_appearance_round"]
+            if comm_round != 0 and comm_round < late_join_first_appearance_round:
+                config.update({"client_available": False})
+        # Profile the client performance, if requested.
+        if "profile_performance" in config:
+            # Get the necessary attributes.
+            fit_config = {}
+            evaluate_config = {}
+            for key, value in config.items():
+                if key.startswith("fit_config_"):
+                    config_name = key[len("fit_config_"):]
+                    fit_config[config_name] = value
+                elif key.startswith("evaluate_config_"):
+                    config_name = key[len("evaluate_config_"):]
+                    evaluate_config[config_name] = value
+            # Replace 'None' values to None (necessary workaround on Flower).
+            fit_config = {k: (None if v == "None" else v) for k, v in fit_config.items()}
+            evaluate_config = {k: (None if v == "None" else v) for k, v in evaluate_config.items()}
+            # Load the local model from the file.
+            model_file = self.get_attribute("_model_file")
+            model = load_model_from_file(model_file)
+            # Get the initial model parameters.
+            local_model_parameters = model.get_weights()
+            # Train.
+            fit_ins = FitIns(ndarrays_to_parameters(local_model_parameters), fit_config)
+            fit_res = self.fit(fit_ins)
+            # Test.
+            evaluate_ins = EvaluateIns(ndarrays_to_parameters(local_model_parameters), evaluate_config)
+            evaluate_res = self.evaluate(evaluate_ins)
+            # Get the performance metrics.
+            profile_train = fit_res.metrics
+            profile_test = evaluate_res.metrics
+            for k, v in profile_train.items():
+                config["profile_train_{0}".format(k)] = v
+            for k, v in profile_test.items():
+                config["profile_test_{0}".format(k)] = v
         # Simulate if the client is unavailable for the current round (Bernoulli trial).
-        # For now, the client will be available if the current round is for profiling purposes.
+        # The client will be available if the current round is for profiling purposes.
         is_profiling_round = config.get("is_profiling_round", False)
         if not is_profiling_round:
             device_emulation_settings = self.get_attribute("_device_emulation_settings")
@@ -876,7 +919,7 @@ class FlowerClient(Client):
 
     @staticmethod
     def _get_client_selection_time_in_seconds(config: dict) -> float:
-        client_selection_time_in_seconds = config["client_selection_time_in_seconds"]
+        client_selection_time_in_seconds = config.get("client_selection_time_in_seconds", 0)
         return client_selection_time_in_seconds
 
     @staticmethod
@@ -1016,6 +1059,8 @@ class FlowerClient(Client):
                        fit_queue: Queue) -> None:
         # Start the timer.
         time_start = datetime.now()
+        # Get the current communication round.
+        comm_round = fit_config["comm_round"]
         # Load the local model from the file.
         model_file = self.get_attribute("_model_file")
         model = load_model_from_file(model_file)
@@ -1023,7 +1068,7 @@ class FlowerClient(Client):
         model.set_weights(global_parameters)
         # Log the local model weights' sum (before training).
         message = ("[Client {0} | Round {1}] Local model weight's sum (before training): {2}"
-                   .format(self._client_id, fit_config["comm_round"], sum(model.get_weights()[0])))
+                   .format(self._client_id, comm_round, sum(model.get_weights()[0])))
         log_message(self._logger, message, "DEBUG")
         # Train the local model using the local training dataset slice.
         history = model.fit(x=x_train,
@@ -1320,6 +1365,8 @@ class FlowerClient(Client):
         work_dir_training_phase = self.get_attribute("_work_dir_training_phase")
         training_callbacks = self.get_attribute("_training_callbacks")
         training_measurements_callback = self.get_attribute("_training_measurements_callback")
+        # Check if it's a profiling round or not.
+        is_profiling_round = fit_config.get("is_profiling_round", False)
         # Set the callbacks list.
         fit_callbacks = training_callbacks + [training_measurements_callback]
         # Set the phase.
@@ -1402,7 +1449,10 @@ class FlowerClient(Client):
                           num_examples=0,
                           metrics={})
         # Log a 'training my model' message.
-        message = "[Client {0} | Round {1}] Training my model...".format(client_id, comm_round)
+        if is_profiling_round:
+            message = "[Client {0} | Profiling] Training my model...".format(client_id)
+        else:
+            message = "[Client {0} | Round {1}] Training my model...".format(client_id, comm_round)
         log_message(logger, message, "INFO")
         # Unset the logger.
         self._set_attribute("_logger", None)
@@ -1479,8 +1529,7 @@ class FlowerClient(Client):
                           num_examples=0,
                           metrics={})
         # Simulate if the client succeeded the training for the current round (Bernoulli trial).
-        # For now, the client will succeed if the current round is for profiling purposes.
-        is_profiling_round = fit_config.get("is_profiling_round", False)
+        # The client will succeed if the current round is for profiling purposes.
         if not is_profiling_round:
             device_emulation_settings = self.get_attribute("_device_emulation_settings")
             client_failure_probability = device_emulation_settings["client_failure_probability"]
@@ -1519,14 +1568,16 @@ class FlowerClient(Client):
         # Set the logger.
         self._set_attribute("_logger", logger)
         # Log a 'finished training my model' message.
-        message = ("[Client {0} | Round {1}] Finished training my model... "
-                   "Download costs -> time: {2} seconds | energy: {3} joules; "
-                   "Computation costs -> time: {4} seconds | energy: {5} joules; "
-                   "Upload costs -> time: {6} seconds | energy: {7} joules; "
-                   "Total costs -> time: {8} seconds | energy: {9} joules."
-                  .format(client_id,
-                          comm_round,
-                          round(download_time_in_seconds, 2),
+        if is_profiling_round:
+            head_message = "[Client {0} | Profiling] Finished training my model... ".format(client_id)
+        else:
+            head_message = "[Client {0} | Round {1}] Finished training my model... ".format(client_id, comm_round)
+        message = (head_message +
+                   "Download costs -> time: {0} seconds | energy: {1} joules; "
+                   "Computation costs -> time: {2} seconds | energy: {3} joules; "
+                   "Upload costs -> time: {4} seconds | energy: {5} joules; "
+                   "Total costs -> time: {6} seconds | energy: {7} joules."
+                  .format(round(download_time_in_seconds, 2),
                           round(download_energy_in_joules, 2),
                           round(computation_time_in_seconds, 2),
                           round(computation_energy_in_joules, 2),
@@ -1537,7 +1588,7 @@ class FlowerClient(Client):
         log_message(logger, message, "INFO")
         # Log the local model weights' sum (after training).
         message = ("[Client {0} | Round {1}] Local model weight's sum (after training): {2}"
-                   .format(self._client_id, fit_config["comm_round"], sum(model.get_weights()[0])))
+                   .format(self._client_id, comm_round, sum(model.get_weights()[0])))
         log_message(self._logger, message, "DEBUG")
         # Send to the server the local model parameters (weights), number of examples used, and training metrics.
         return FitRes(status=Status(code=Code.OK, message="Success"),
@@ -1821,6 +1872,8 @@ class FlowerClient(Client):
         logger = self.get_attribute("_logger")
         work_dir_testing_phase = self.get_attribute("_work_dir_testing_phase")
         testing_measurements_callback = self.get_attribute("_testing_measurements_callback")
+        # Check if it's a profiling round or not.
+        is_profiling_round = evaluate_config.get("is_profiling_round", False)
         # Set the callbacks list.
         evaluate_callbacks = [testing_measurements_callback]
         # Set the phase.
@@ -1903,7 +1956,10 @@ class FlowerClient(Client):
                                num_examples=0,
                                metrics={})
         # Log a 'testing my model' message.
-        message = "[Client {0} | Round {1}] Testing my model...".format(client_id, comm_round)
+        if is_profiling_round:
+            message = "[Client {0} | Profiling] Testing my model...".format(client_id)
+        else:
+            message = "[Client {0} | Round {1}] Testing my model...".format(client_id, comm_round)
         log_message(logger, message, "INFO")
         # Unset the logger.
         self._set_attribute("_logger", None)
@@ -1982,8 +2038,7 @@ class FlowerClient(Client):
                                num_examples=0,
                                metrics={})
         # Simulate if the client succeeded the testing for the current round (Bernoulli trial).
-        # For now, the client will succeed if the current round is for profiling purposes.
-        is_profiling_round = evaluate_config.get("is_profiling_round", False)
+        # The client will succeed if the current round is for profiling purposes.
         if not is_profiling_round:
             device_emulation_settings = self.get_attribute("_device_emulation_settings")
             client_failure_probability = device_emulation_settings["client_failure_probability"]
@@ -2022,14 +2077,16 @@ class FlowerClient(Client):
         # Set the logger.
         self._set_attribute("_logger", logger)
         # Log a 'finished testing my model' message.
-        message = ("[Client {0} | Round {1}] Finished testing my model... "
-                   "Download costs -> time: {2} seconds | energy: {3} joules; "
-                   "Computation costs -> time: {4} seconds | energy: {5} joules; "
-                   "Upload costs -> time: {6} seconds | energy: {7} joules; "
-                   "Total costs -> time: {8} seconds | energy: {9} joules."
-                  .format(client_id,
-                          comm_round,
-                          round(download_time_in_seconds, 2),
+        if is_profiling_round:
+            head_message = "[Client {0} | Profiling] Finished testing my model... ".format(client_id)
+        else:
+            head_message = "[Client {0} | Round {1}] Finished testing my model... ".format(client_id, comm_round)
+        message = (head_message +
+                   "Download costs -> time: {0} seconds | energy: {1} joules; "
+                   "Computation costs -> time: {2} seconds | energy: {3} joules; "
+                   "Upload costs -> time: {4} seconds | energy: {5} joules; "
+                   "Total costs -> time: {6} seconds | energy: {7} joules."
+                  .format(round(download_time_in_seconds, 2),
                           round(download_energy_in_joules, 2),
                           round(computation_time_in_seconds, 2),
                           round(computation_energy_in_joules, 2),

@@ -73,6 +73,7 @@ class FlowerExecutor:
     @staticmethod
     def _get_personalized_settings_for_client(client_id: int,
                                               base_client_config_file: Path,
+                                              late_join_clients: set,
                                               execution_dict: dict | None = None,
                                               current_execution_devices: list | None = None) -> dict:
         # Initialize the personalized_settings dictionary.
@@ -97,6 +98,13 @@ class FlowerExecutor:
             host_profiler = HostProfiler(Path(execution_output_folder))
             host_profile = host_profiler.profile_host_n_times(client_id, num_host_profiles)
             personalized_settings["_host_profile"] = host_profile
+            # Set the late-join settings.
+            is_late_join_client = client_id in late_join_clients
+            late_join_settings = {"is_late_join_client": is_late_join_client}
+            if is_late_join_client:
+                late_join_first_appearance_round = execution_settings["round_of_first_appearance_of_late_join_clients"]
+                late_join_settings.update({"late_join_first_appearance_round": late_join_first_appearance_round})
+            personalized_settings["_late_join_settings"] = late_join_settings
         # Set the device emulation settings.
         if current_execution_devices:
             device_emulation_settings = current_execution_devices[client_id][1]
@@ -135,6 +143,19 @@ class FlowerExecutor:
         for client_id, p in enumerate(failure_probabilities):
             client_failure_probabilities.update({client_id: p})
         return client_failure_probabilities
+
+    def _determine_late_join_clients(self,
+                                     num_clients: int,
+                                     percentage_late_join_clients: float) -> set:
+        if percentage_late_join_clients <= 0:
+            return set()
+        num_late = max(1, int(num_clients * percentage_late_join_clients))
+        rng = self.get_attribute("_rng")
+        late_join_clients = rng.choice(range(num_clients),
+                                       size=num_late,
+                                       replace=False)
+        late_join_clients = {int(c) for c in late_join_clients}
+        return late_join_clients
 
     def _launch_flower_server(self,
                               server_id: int) -> FlowerServerLauncher:
@@ -209,6 +230,7 @@ class FlowerExecutor:
         # Load the personalized_settings dictionary for this client.
         client_personalized_settings = self._get_personalized_settings_for_client(client_id,
                                                                                   base_client_config_file,
+                                                                                  self.get_attribute("_late_join_clients"),
                                                                                   current_execution,
                                                                                   current_execution_devices)
         # Append the client resources to the 'clients_resources.csv' file.
@@ -403,6 +425,11 @@ class FlowerExecutor:
             start = perf_counter()
             # Get the number of clients.
             num_clients = execution_settings["num_clients"]
+            # Determine the set of late-join clients.
+            percentage_late_join_clients = execution_settings.get("percentage_late_join_clients", 0.0)
+            late_join_clients = self._determine_late_join_clients(num_clients,
+                                                                  percentage_late_join_clients)
+            self._set_attribute("_late_join_clients", late_join_clients)
             # Create a barrier to synchronize dataset loading.
             dataset_loaded_barrier = Barrier(num_clients + 1)
             # Start the Flower server in a separate process.

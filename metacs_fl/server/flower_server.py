@@ -1,12 +1,14 @@
 from collections import defaultdict
-from concurrent.futures import as_completed
+from concurrent.futures import as_completed, ThreadPoolExecutor, Future
 from copy import deepcopy
 from logging import Logger
 from numpy import array, inf, sum as numpy_sum, mean, clip, float32
 from numpy.random import default_rng
+from os import cpu_count
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from time import process_time, sleep
+from traceback import format_exc
 from typing import Dict, List, Optional, Tuple, Union
 
 from flwr.common import EvaluateIns, EvaluateRes, FitIns, FitRes, GetPropertiesIns, Metrics, NDArrays, Parameters, \
@@ -14,6 +16,7 @@ from flwr.common import EvaluateIns, EvaluateRes, FitIns, FitRes, GetPropertiesI
 from flwr.server.client_manager import ClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.strategy.strategy import Strategy
+from flwr.server.superlink.fleet.grpc_bidi.grpc_client_proxy import GrpcClientProxy
 
 from metacs_fl.client_selector.metacsfl import MetaCSFL
 from metacs_fl.client_selector.random import Random
@@ -58,13 +61,16 @@ class FlowerServer(Strategy):
         self._clients_histograms = {}
         self._clients_reliability_score_history = {}
         self._clients_consecutive_failures_history = {}
+        self._clients_profiles = {}
+        self._clients_being_profiled = set()
+        self._profiling_executor = ThreadPoolExecutor(max_workers=cpu_count())
+        self._profiling_futures = set()
+        self._profile_lock = Lock()
         # Initialize the random number generator with a fixed seed to allow replicable results.
         seed = None
         if "seed" in self._server_strategy_settings:
             seed = self._server_strategy_settings["seed"]
         self._rng = default_rng(seed=seed)
-        # Initialize the list of profiling rounds.
-        profiling_rounds = []
         # Initialize the client selector.
         client_selector = None
         strategy = server_strategy_settings["strategy"]
@@ -78,12 +84,6 @@ class FlowerServer(Strategy):
             case "MetaCS-FL":
                 # Instantiate the MetaCS-FL's client selector.
                 client_selector = MetaCSFL(server_strategy_settings, seed)
-        # Set the list of profiling rounds (starting at the first round).
-        num_profiling_rounds = server_strategy_settings.get("num_profiling_rounds", 0)
-        if num_profiling_rounds > 0:
-            profiling_rounds = list(range(1, num_profiling_rounds + 1))
-            self._profiling_rounds = profiling_rounds
-        self._profiling_rounds = profiling_rounds
         self._client_selector = client_selector
 
     def _set_attribute(self,
@@ -177,9 +177,7 @@ class FlowerServer(Strategy):
                                   current_round: int) -> bool:
         # Get the necessary attributes.
         fl_settings = self.get_attribute("_fl_settings")
-        server_strategy_settings = self.get_attribute("_server_strategy_settings")
         stopping_crit = fl_settings["stopping_crit"]
-        profiling_rounds = self.get_attribute("_profiling_rounds")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
         # Initialize the list of FL stopping criteria results.
         fl_stopping_criteria_results = []
@@ -191,12 +189,6 @@ class FlowerServer(Strategy):
                     case "Max_Rounds":
                         max_rounds = v["max_rounds"]
                         all_rounds_executed = (current_round > max_rounds)
-                        restore_initial_parameters_after_profiling = False
-                        if "restore_initial_parameters_after_profiling" in server_strategy_settings:
-                            restore_initial_parameters_after_profiling \
-                                = server_strategy_settings["restore_initial_parameters_after_profiling"]
-                        if restore_initial_parameters_after_profiling:
-                            all_rounds_executed = (current_round > max_rounds + len(profiling_rounds))
                         fl_stopping_criteria_results.append({crit_name: all_rounds_executed})
                     case "Min_Test_Accuracy":
                         min_test_accuracy = v["min_test_accuracy"]
@@ -314,7 +306,143 @@ class FlowerServer(Strategy):
                         idle_events_data_dict[var_name] = metrics[makespan_key]
         return idle_events_data_dict
 
+    def _profile_request(self,
+                         current_round: int,
+                         client_id: int,
+                         client_proxy: GrpcClientProxy) -> None:
+        # Get the necessary attributes.
+        server_id = self.get_attribute("_server_id")
+        logger = self.get_attribute("_logger")
+        server_strategy_settings = self.get_attribute("_server_strategy_settings")
+        samples_per_task = server_strategy_settings["samples_per_task"]
+        num_tasks_profile_training = server_strategy_settings["num_tasks_profile_training"]
+        num_tasks_profile_testing = server_strategy_settings["num_tasks_profile_testing"]
+        num_samples_profile_training = num_tasks_profile_training * samples_per_task
+        num_samples_profile_testing = num_tasks_profile_testing * samples_per_task
+        # Log a 'starting profiling for client' message.
+        message = "[Server {0} | Round {1}] Starting profiling for client {2} ({3} training | {4} testing samples)..." \
+                   .format(server_id, current_round, client_id, num_samples_profile_training, num_samples_profile_testing)
+        log_message(logger, message, "INFO")
+        # Request profiling for the client.
+        gpi_dict = {"client_id": "?", "profile_performance": "?", "is_profiling_round": True, "comm_round": current_round}
+        fit_config = self._update_config(0, "train")
+        evaluate_config = self._update_config(0, "test")
+        fit_config.update({"is_profiling_round": True, "num_training_examples_to_use": num_samples_profile_training})
+        evaluate_config.update({"is_profiling_round": True, "num_testing_examples_to_use": num_samples_profile_testing})
+        for k, v in fit_config.items():
+            gpi_dict["fit_config_{0}".format(k)] = v
+        for k, v in evaluate_config.items():
+            gpi_dict["evaluate_config_{0}".format(k)] = v
+        gpi = GetPropertiesIns(gpi_dict)
+        # Get the profiling results.
+        client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+        profile_train = {}
+        profile_test = {}
+        for key, value in client_reply.properties.items():
+            if key.startswith("profile_train_"):
+                metric = key[len("profile_train_"):]
+                profile_train[metric] = value
+            elif key.startswith("profile_test_"):
+                metric = key[len("profile_test_"):]
+                profile_test[metric] = value
+        with self._profile_lock:
+            self._clients_profiles["client_{0}".format(client_id)] = {"train": profile_train, "test": profile_test}
+        # Log a 'finished profiling for client' message.
+        message = "[Server {0} | Round {1}] Finished profiling for client {2}..." \
+                   .format(server_id, current_round, client_id)
+        log_message(logger, message, "INFO")
+
+    def _done_profiling_callback(self,
+                                 profiling_future: Future) -> None:
+        logger = self.get_attribute("_logger")
+        try:
+            profiling_future.result()
+        except Exception as e:
+            message = "Async profiling failed: {0}".format(e)
+            log_message(logger, message, "INFO")
+            log_message(logger, format_exc(), "INFO")
+        finally:
+            client_id_str = getattr(profiling_future, "client_id_str", None)
+            with self._profile_lock:
+                if client_id_str:
+                    self._clients_being_profiled.discard(client_id_str)
+                self._profiling_futures.discard(profiling_future)
+
+    def _profile_new_clients(self,
+                             current_round: int,
+                             available_clients: dict) -> None:
+        # Get the necessary attributes.
+        server_id = self.get_attribute("_server_id")
+        logger = self.get_attribute("_logger")
+        clients_profiles = self.get_attribute("_clients_profiles")
+        clients_being_profiled = self.get_attribute("_clients_being_profiled")
+        # Determine unprofiled clients.
+        unprofiled_clients = []
+        for _, client_proxy in available_clients.items():
+            gpi = GetPropertiesIns({"client_id": "?",
+                                    "comm_round": current_round})
+            try:
+                client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                client_id = client_reply.properties["client_id"]
+                client_id_str = "client_{0}".format(client_id)
+                client_available = client_reply.properties["client_available"]
+                client_not_profiled = client_id_str not in clients_profiles
+                client_not_being_profiled = client_id_str not in clients_being_profiled
+                if client_available and client_not_profiled and client_not_being_profiled:
+                    unprofiled_clients.append((client_id, client_proxy))
+                    with self._profile_lock:
+                        self._clients_being_profiled.add(client_id_str)
+            except Exception as e:
+                pass
+        if not unprofiled_clients:
+            # Log a 'no new clients to profile' message.
+            message = "[Server {0} | Round {1}] No new clients to profile...".format(server_id, current_round)
+            log_message(logger, message, "INFO")
+            return
+        # Log a 'found new clients to profile' message.
+        message = "[Server {0} | Round {1}] Found {2} new clients to profile: {3}" \
+                   .format(server_id, current_round, len(unprofiled_clients), ["client_{0}".format(cid) for cid, _ in unprofiled_clients])
+        log_message(logger, message, "INFO")
+        # Initial profiling -> Blocking.
+        if len(self._clients_profiles) == 0:
+            # Log a 'blocking profile' message.
+            message = "[Server {0} | Round {1}] Initial profiling: blocking until all clients finish..." \
+                       .format(server_id, current_round)
+            log_message(logger, message, "INFO")
+            # Profile (blocking).
+            with ThreadPoolExecutor(max_workers=cpu_count()) as ex:
+                futures = [ex.submit(self._profile_request, current_round, client_id, client_proxy)
+                           for client_id, client_proxy in unprofiled_clients]
+                for f in as_completed(futures):
+                    try:
+                        f.result()
+                    except Exception as e:
+                        message = "Profiling failed: {0}".format(e)
+                        log_message(logger, message, "INFO")
+            # Log an 'initial profiling completed' message.
+            message = "[Server {0} | Round {1}] Initial profiling completed for all available clients ({2})!" \
+                       .format(server_id, current_round, len(unprofiled_clients))
+            log_message(logger, message, "INFO")
+            return
+        # Subsequent profiling -> Non-blocking.
+        # Log a 'non-blocking profile' message.
+        message = "[Server {0} | Round {1}] {2} new available clients will profile asynchronously (non-blocking)!" \
+                   .format(server_id, current_round, len(unprofiled_clients))
+        log_message(logger, message, "INFO")
+        # Profile (non-blocking).
+        for client_id, client_proxy in unprofiled_clients:
+            client_id_str = "client_{0}".format(client_id)
+            # Log a 'submitting async profiling' message.
+            message = "[Server {0} | Round {1}] Submitting async profiling request for client {2}..." \
+                      .format(server_id, current_round, client_id)
+            log_message(logger, message, "INFO")
+            profiling_future = self._profiling_executor.submit(self._profile_request, current_round, client_id, client_proxy)
+            profiling_future.client_id_str = client_id_str
+            self._profiling_futures.add(profiling_future)
+            profiling_future.add_done_callback(self._done_profiling_callback)
+
     def _get_available_clients_data_distribution(self,
+                                                 current_round: int,
                                                  available_clients: dict) -> None:
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         data_privacy_approach_settings = server_strategy_settings.get("data_privacy_approach", {})
@@ -339,14 +467,15 @@ class FlowerServer(Strategy):
                             gpi_dict = {client_id_property: "?",
                                         client_tasks_per_class_train_property: "?",
                                         client_tasks_per_class_test_property: "?",
-                                        "samples_per_task": server_strategy_settings.get("samples_per_task", 1)}
+                                        "samples_per_task": server_strategy_settings.get("samples_per_task", 1),
+                                        "comm_round": current_round}
                             gpi = GetPropertiesIns(gpi_dict)
-                            client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
-                            client_id = client_prompted.properties[client_id_property]
-                            client_tasks_per_class_train_str = client_prompted.properties[client_tasks_per_class_train_property]
+                            client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                            client_id = client_reply.properties[client_id_property]
+                            client_tasks_per_class_train_str = client_reply.properties[client_tasks_per_class_train_property]
                             client_tasks_per_class_train = {s.split("=")[0]: int(s.split("=")[1])
                                                             for s in client_tasks_per_class_train_str.split("|") if s}
-                            client_tasks_per_class_test_str = client_prompted.properties[client_tasks_per_class_test_property]
+                            client_tasks_per_class_test_str = client_reply.properties[client_tasks_per_class_test_property]
                             client_tasks_per_class_test = {s.split("=")[0]: int(s.split("=")[1])
                                                            for s in client_tasks_per_class_test_str.split("|") if s}
                             self._clients_histograms[client_proxy] = {"client_id": client_id,
@@ -362,13 +491,14 @@ class FlowerServer(Strategy):
                             gpi_dict = {client_id_property: "?",
                                         client_dp_presence_property: "?",
                                         client_local_classes_claimed_property: "?",
-                                        "true_presence_probability": true_presence_probability}
+                                        "true_presence_probability": true_presence_probability,
+                                        "comm_round": current_round}
                             gpi = GetPropertiesIns(gpi_dict)
-                            client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
-                            client_id = client_prompted.properties[client_id_property]
-                            client_dp_presence_str = client_prompted.properties[client_dp_presence_property]
+                            client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                            client_id = client_reply.properties[client_id_property]
+                            client_dp_presence_str = client_reply.properties[client_dp_presence_property]
                             client_dp_presence = list(map(int, client_dp_presence_str.split("|")))
-                            client_local_classes_claimed_str = client_prompted.properties[client_local_classes_claimed_property]
+                            client_local_classes_claimed_str = client_reply.properties[client_local_classes_claimed_property]
                             client_local_classes_claimed = client_local_classes_claimed_str.split("|")
                             self._clients_histograms[client_proxy] = {"client_id": client_id,
                                                                       "client_dp_presence": client_dp_presence,
@@ -400,10 +530,11 @@ class FlowerServer(Strategy):
                         gpi_dict = {dp_histogram_property: "?",
                                     "num_global_classes": num_global_classes,
                                     "class_index_map": class_index_map_str,
-                                    "epsilon": epsilon}
+                                    "epsilon": epsilon,
+                                    "comm_round": current_round}
                         gpi = GetPropertiesIns(gpi_dict)
-                        client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
-                        client_dp_histogram_str = client_prompted.properties[dp_histogram_property]
+                        client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                        client_dp_histogram_str = client_reply.properties[dp_histogram_property]
                         client_dp_histogram = array(list(map(float, client_dp_histogram_str.split("|"))), dtype=float32)
                         self._clients_histograms[client_proxy].update({"client_dp_histogram": client_dp_histogram})
 
@@ -411,10 +542,10 @@ class FlowerServer(Strategy):
                                         current_round: int,
                                         available_clients: dict,
                                         idle_events_data_dict: dict) -> dict:
+        clients_profiles = self.get_attribute("_clients_profiles")
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         data_privacy_approach_name = server_strategy_settings.get("data_privacy_approach", {}).get("name", "Non_Private")
         query_clients_data_distribution = server_strategy_settings.get("query_clients_data_distribution", False)
-        profiling_rounds = self.get_attribute("_profiling_rounds")
         available_clients_map = {}
         for _, client_proxy in available_clients.items():
             client_id_property = "client_id"
@@ -444,64 +575,67 @@ class FlowerServer(Strategy):
                         client_current_upload_bandwidth_in_bytes_per_second_property: "?",
                         client_current_latency_in_milliseconds_property: "?",
                         "samples_per_task": server_strategy_settings.get("samples_per_task", 1),
-                        "comm_round": current_round,
-                        "is_profiling_round": current_round in profiling_rounds}
+                        "comm_round": current_round}
             gpi_dict.update(idle_events_data_dict)
             gpi = GetPropertiesIns(gpi_dict)
-            client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
-            client_id = client_prompted.properties[client_id_property]
-            client_hostname = client_prompted.properties[client_hostname_property]
-            client_num_cpus = client_prompted.properties[client_num_cpus_property]
-            client_cpu_cores_list = client_prompted.properties[client_cpu_cores_list_property]
-            client_num_training_examples_available = \
-                client_prompted.properties[client_num_training_examples_available_property]
-            client_num_testing_examples_available = \
-                client_prompted.properties[client_num_testing_examples_available_property]
-            client_task_assignment_capacities_train = \
-                client_prompted.properties[client_task_assignment_capacities_train_property]
-            client_task_assignment_capacities_train = client_task_assignment_capacities_train.split("|")
-            client_task_assignment_capacities_train = [int(i) for i in client_task_assignment_capacities_train]
-            client_task_assignment_capacities_test = \
-                client_prompted.properties[client_task_assignment_capacities_test_property]
-            client_task_assignment_capacities_test = client_task_assignment_capacities_test.split("|")
-            client_task_assignment_capacities_test = [int(i) for i in client_task_assignment_capacities_test]
-            client_remaining_battery_energy = client_prompted.properties[client_remaining_battery_energy_property]
-            client_mean_power_consumption_idle_mode = client_prompted.properties[client_mean_power_consumption_idle_mode_property]
-            client_current_download_bandwidth_in_bytes_per_second = client_prompted.properties[client_current_download_bandwidth_in_bytes_per_second_property]
-            client_current_upload_bandwidth_in_bytes_per_second = client_prompted.properties[client_current_upload_bandwidth_in_bytes_per_second_property]
-            client_current_latency_in_milliseconds = client_prompted.properties[client_current_latency_in_milliseconds_property]
-            client_available = client_prompted.properties["client_available"]
-            if client_available:
+            try:
+                client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                client_id = client_reply.properties[client_id_property]
+                client_hostname = client_reply.properties[client_hostname_property]
+                client_num_cpus = client_reply.properties[client_num_cpus_property]
+                client_cpu_cores_list = client_reply.properties[client_cpu_cores_list_property]
+                client_num_training_examples_available = \
+                    client_reply.properties[client_num_training_examples_available_property]
+                client_num_testing_examples_available = \
+                    client_reply.properties[client_num_testing_examples_available_property]
+                client_task_assignment_capacities_train = \
+                    client_reply.properties[client_task_assignment_capacities_train_property]
+                client_task_assignment_capacities_train = client_task_assignment_capacities_train.split("|")
+                client_task_assignment_capacities_train = [int(i) for i in client_task_assignment_capacities_train]
+                client_task_assignment_capacities_test = \
+                    client_reply.properties[client_task_assignment_capacities_test_property]
+                client_task_assignment_capacities_test = client_task_assignment_capacities_test.split("|")
+                client_task_assignment_capacities_test = [int(i) for i in client_task_assignment_capacities_test]
+                client_remaining_battery_energy = client_reply.properties[client_remaining_battery_energy_property]
+                client_mean_power_consumption_idle_mode = client_reply.properties[client_mean_power_consumption_idle_mode_property]
+                client_current_download_bandwidth_in_bytes_per_second = client_reply.properties[client_current_download_bandwidth_in_bytes_per_second_property]
+                client_current_upload_bandwidth_in_bytes_per_second = client_reply.properties[client_current_upload_bandwidth_in_bytes_per_second_property]
+                client_current_latency_in_milliseconds = client_reply.properties[client_current_latency_in_milliseconds_property]
                 client_id_str = "client_{0}".format(client_id)
-                client_map = {"client_proxy": client_proxy,
-                              "client_hostname": client_hostname,
-                              "client_num_cpus": client_num_cpus,
-                              "client_cpu_cores_list": client_cpu_cores_list,
-                              "client_num_training_examples_available": client_num_training_examples_available,
-                              "client_num_testing_examples_available": client_num_testing_examples_available,
-                              "client_task_assignment_capacities_train": client_task_assignment_capacities_train,
-                              "client_task_assignment_capacities_test": client_task_assignment_capacities_test,
-                              "client_remaining_battery_energy": client_remaining_battery_energy,
-                              "client_mean_power_consumption_idle_mode": client_mean_power_consumption_idle_mode,
-                              "client_current_download_bandwidth_in_bytes_per_second": client_current_download_bandwidth_in_bytes_per_second,
-                              "client_current_upload_bandwidth_in_bytes_per_second": client_current_upload_bandwidth_in_bytes_per_second,
-                              "client_current_latency_in_milliseconds": client_current_latency_in_milliseconds}
-                # Attach the data distribution info (histogram), if allowed.
-                if query_clients_data_distribution:
-                    if client_proxy in self._clients_histograms:
-                        client_info = self._clients_histograms[client_proxy]
-                        match data_privacy_approach_name:
-                            case "Non_Private":
-                                if "client_tasks_per_class_train" in client_info:
-                                    client_map.update({"client_tasks_per_class_train": client_info["client_tasks_per_class_train"]})
-                                if "client_tasks_per_class_test" in client_info:
-                                    client_map.update({"client_tasks_per_class_test": client_info["client_tasks_per_class_test"]})
-                            case "Differentially_Private":
-                                if "client_dp_histogram" in client_info:
-                                    client_map.update({"client_dp_histogram": client_info["client_dp_histogram"]})
-                                if "class_index_map" in self._clients_histograms:
-                                    client_map.update({"class_index_map": self._clients_histograms["class_index_map"]})
-                available_clients_map.update({client_id_str: client_map})
+                client_available = client_reply.properties["client_available"]
+                client_profiled = client_id_str in clients_profiles
+                if client_available and client_profiled:
+                    client_map = {"client_proxy": client_proxy,
+                                  "client_hostname": client_hostname,
+                                  "client_num_cpus": client_num_cpus,
+                                  "client_cpu_cores_list": client_cpu_cores_list,
+                                  "client_num_training_examples_available": client_num_training_examples_available,
+                                  "client_num_testing_examples_available": client_num_testing_examples_available,
+                                  "client_task_assignment_capacities_train": client_task_assignment_capacities_train,
+                                  "client_task_assignment_capacities_test": client_task_assignment_capacities_test,
+                                  "client_remaining_battery_energy": client_remaining_battery_energy,
+                                  "client_mean_power_consumption_idle_mode": client_mean_power_consumption_idle_mode,
+                                  "client_current_download_bandwidth_in_bytes_per_second": client_current_download_bandwidth_in_bytes_per_second,
+                                  "client_current_upload_bandwidth_in_bytes_per_second": client_current_upload_bandwidth_in_bytes_per_second,
+                                  "client_current_latency_in_milliseconds": client_current_latency_in_milliseconds}
+                    # Attach the data distribution info (histogram), if allowed.
+                    if query_clients_data_distribution:
+                        if client_proxy in self._clients_histograms:
+                            client_info = self._clients_histograms[client_proxy]
+                            match data_privacy_approach_name:
+                                case "Non_Private":
+                                    if "client_tasks_per_class_train" in client_info:
+                                        client_map.update({"client_tasks_per_class_train": client_info["client_tasks_per_class_train"]})
+                                    if "client_tasks_per_class_test" in client_info:
+                                        client_map.update({"client_tasks_per_class_test": client_info["client_tasks_per_class_test"]})
+                                case "Differentially_Private":
+                                    if "client_dp_histogram" in client_info:
+                                        client_map.update({"client_dp_histogram": client_info["client_dp_histogram"]})
+                                    if "class_index_map" in self._clients_histograms:
+                                        client_map.update({"class_index_map": self._clients_histograms["class_index_map"]})
+                    available_clients_map.update({client_id_str: client_map})
+            except Exception as e:
+                pass
         sorted_keys = sorted(list(available_clients_map.keys()), key=lambda x: (len(x), x))
         available_clients_map = {k: available_clients_map[k] for k in sorted_keys}
         return available_clients_map
@@ -514,8 +648,10 @@ class FlowerServer(Strategy):
         if client_manager is not None:
             # Get the available clients.
             available_clients = client_manager.all()
+            # Profile "new" (first-appearance) clients, if any.
+            self._profile_new_clients(current_round, available_clients)
             # Get the available clients data distribution, if allowed.
-            self._get_available_clients_data_distribution(available_clients)
+            self._get_available_clients_data_distribution(current_round, available_clients)
             # Generate the available clients map.
             available_clients_map = self._generate_available_clients_map(current_round, available_clients, idle_events_data_dict)
         else:
@@ -532,12 +668,9 @@ class FlowerServer(Strategy):
         # Get the necessary attributes.
         server_id = self.get_attribute("_server_id")
         logger = self.get_attribute("_logger")
-        server_strategy_settings = self.get_attribute("_server_strategy_settings")
         candidate_clients_history = self.get_attribute("_candidate_clients_history")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         client_selection_duration_history = self.get_attribute("_client_selection_duration_history")
-        # Get the list of profiling rounds, if any.
-        profiling_rounds = self.get_attribute("_profiling_rounds")
         # Set the base configuration.
         phase_config = self._update_config(current_round, current_phase)
         # Update the candidate clients' history.
@@ -561,8 +694,6 @@ class FlowerServer(Strategy):
             selected_client_proxy = client_info["client_proxy"]
             selected_client_config = deepcopy(phase_config)
             selected_client_config.update({"client_selection_time_in_seconds": selection_duration_in_seconds})
-            if current_round in profiling_rounds:
-                selected_client_config.update({"is_profiling_round": True})
             if "client_num_samples_scheduled" in client_info:
                 selected_client_config.update({"num_{0}ing_examples_to_use".format(current_phase):
                                                    client_info["client_num_samples_scheduled"]})
@@ -581,18 +712,6 @@ class FlowerServer(Strategy):
                     selected_client_instructions = FitIns(parameters, selected_client_config)
                 case "test":
                     selected_client_instructions = EvaluateIns(parameters, selected_client_config)
-            # Restore the initial parameters after the profiling rounds, if needed.
-            restore_initial_parameters_after_profiling = False
-            if "restore_initial_parameters_after_profiling" in server_strategy_settings:
-                restore_initial_parameters_after_profiling = server_strategy_settings[
-                    "restore_initial_parameters_after_profiling"]
-            if profiling_rounds and current_round <= profiling_rounds[-1] + 1 and restore_initial_parameters_after_profiling:
-                initial_parameters = self.get_attribute("_initial_parameters")
-                match current_phase:
-                    case "train":
-                        selected_client_instructions = FitIns(initial_parameters, selected_client_config)
-                    case "test":
-                        selected_client_instructions = EvaluateIns(initial_parameters, selected_client_config)
             phase_pairs.append((selected_client_proxy, selected_client_instructions))
         # Update the repository of phase pairs.
         self._update_phase_pairs_history(current_round, current_phase, phase_pairs)
@@ -1218,6 +1337,7 @@ class FlowerServer(Strategy):
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
+        clients_profiles = self.get_attribute("_clients_profiles")
         client_selector = self.get_attribute("_client_selector")
         # Log a 'start of the configure_fit call' debug message.
         message = "[Server {0} | Round {1}] Start of the 'configure_fit' call!".format(server_id, server_round)
@@ -1245,8 +1365,6 @@ class FlowerServer(Strategy):
             # Verify if the federated training configuration should not proceed.
             if not enable_training or (enable_training and fl_execution_should_stop):
                 return []
-        # Get the list of profiling rounds, if any.
-        profiling_rounds = self.get_attribute("_profiling_rounds")
         # Set the phase value.
         phase = "train"
         # Get the set of active (candidate) clients.
@@ -1272,7 +1390,7 @@ class FlowerServer(Strategy):
                   "base_num_epochs": base_num_epochs,
                   "selected_clients_history": selected_clients_history,
                   "selected_clients_metrics_history": selected_clients_metrics_history,
-                  "profiling_rounds": profiling_rounds,
+                  "clients_profiles": clients_profiles,
                   "time_limit": round_timeout_in_seconds,
                   "logger": logger}
         if server_strategy_settings.get("monitor_clients_reliability_score", False):
@@ -1423,6 +1541,7 @@ class FlowerServer(Strategy):
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
+        clients_profiles = self.get_attribute("_clients_profiles")
         client_selector = self.get_attribute("_client_selector")
         # Log a 'start of the configure_evaluate call' debug message.
         message = "[Server {0} | Round {1}] Start of the 'configure_evaluate' call!".format(server_id, server_round)
@@ -1433,8 +1552,6 @@ class FlowerServer(Strategy):
             # Verify if the federated testing configuration should not proceed.
             if not enable_testing or (enable_testing and fl_execution_should_stop):
                 return []
-        # Get the list of profiling rounds, if any.
-        profiling_rounds = self.get_attribute("_profiling_rounds")
         # Set the phase value.
         phase = "test"
         # Get the set of active (candidate) clients.
@@ -1456,7 +1573,7 @@ class FlowerServer(Strategy):
                   "base_batch_size": base_batch_size,
                   "selected_clients_history": selected_clients_history,
                   "selected_clients_metrics_history": selected_clients_metrics_history,
-                  "profiling_rounds": profiling_rounds,
+                  "clients_profiles": clients_profiles,
                   "time_limit": round_timeout_in_seconds,
                   "logger": logger}
         if server_strategy_settings.get("monitor_clients_reliability_score", False):
