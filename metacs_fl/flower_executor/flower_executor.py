@@ -1,6 +1,6 @@
 from copy import deepcopy
 from multiprocessing import Barrier, Process
-from numpy import exp, zeros
+from numpy import array, exp, median, percentile, zeros
 from numpy.random import default_rng, Generator
 from pathlib import Path
 from time import perf_counter, sleep
@@ -130,8 +130,86 @@ class FlowerExecutor:
         with open(file=output_file, mode="a", encoding="utf-8") as o_f:
             o_f.write(data_line)
 
-    def _generate_client_failure_probabilities(self,
-                                               rng: Generator,
+    @staticmethod
+    def _compute_baseline_device_performances(current_execution_devices: dict) -> dict:
+        devices = [d for _, d in current_execution_devices]
+        # Compute metrics.
+        fpocc_means = [(d["fpocc_training_min"] + d["fpocc_training_max"]) / 2 for d in devices]
+        cpu_perfs = [d["cpu_num_cores"] * (d["cpu_frequency_in_hertz"] / 1e9) for d in devices]
+        memories = [d["memory_size_in_gigabytes"] for d in devices]
+        # Network metrics.
+        uploads = [d["upload_bandwidth_mean"] for d in devices]
+        downloads = [d["download_bandwidth_mean"] for d in devices]
+        latencies = [d["base_latency"] for d in devices]
+        jitters = [d["latency_jitter"] for d in devices]
+        packet_losses = [d["packet_loss_rate"] for d in devices]
+        # Energy metrics.
+        reception_powers = [d["mean_power_consumption_data_reception_in_watts"] for d in devices]
+        heavy_powers = [d["mean_power_consumption_heavy_computational_load_in_watts"] for d in devices]
+        transmission_powers = [d["mean_power_consumption_data_transmission_in_watts"] for d in devices]
+        idle_powers = [d["mean_power_consumption_idle_in_watts"] for d in devices]
+        # Percentile-based baselines.
+        baseline_device_performances = {"fpocc_training_mean": percentile(fpocc_means, 90),
+                                        "cpu_performance": percentile(cpu_perfs, 90),
+                                        "memory_size_in_gigabytes": percentile(memories, 90),
+                                        "upload_mbps": percentile(uploads, 90),
+                                        "download_mbps": percentile(downloads, 90),
+                                        "latency_ms": percentile(latencies, 10),
+                                        "jitter_ms": percentile(jitters, 10),
+                                        "packet_loss": percentile(packet_losses, 10),
+                                        "mean_power_reception_watts": percentile(reception_powers, 10),
+                                        "mean_power_heavy_watts": percentile(heavy_powers, 10),
+                                        "mean_power_transmission_watts": percentile(transmission_powers, 10),
+                                        "mean_power_idle_watts": percentile(idle_powers, 10)}
+        return baseline_device_performances
+
+    @staticmethod
+    def _get_device_compute_score(baselines: dict,
+                                  device: dict) -> float:
+        fpocc_mean = (device["fpocc_training_min"] + device["fpocc_training_max"]) / 2
+        fpocc_norm = min(fpocc_mean / baselines["fpocc_training_mean"], 1.0)
+        cpu_perf = device["cpu_num_cores"] * (device["cpu_frequency_in_hertz"] / 1e9)
+        cpu_norm = min(cpu_perf / baselines["cpu_performance"], 1.0)
+        mem_norm = min(device["memory_size_in_gigabytes"] / baselines["memory_size_in_gigabytes"], 1.0)
+        device_compute_score = round((fpocc_norm * 0.45 + cpu_norm * 0.35 + mem_norm * 0.20) * 100.0, 2)
+        return device_compute_score
+
+    @staticmethod
+    def _get_device_network_score(baselines: dict,
+                                  device: dict) -> float:
+        upload_norm = min(device["upload_bandwidth_mean"] / baselines["upload_mbps"], 1.0)
+        download_norm = min(device["download_bandwidth_mean"] / baselines["download_mbps"], 1.0)
+        latency_norm = min(baselines["latency_ms"] / device["base_latency"], 1.0)
+        jitter_norm = min(baselines["jitter_ms"] / device["latency_jitter"], 1.0)
+        packet_loss_norm = min(baselines["packet_loss"] / device["packet_loss_rate"], 1.0)
+        device_network_score = round((upload_norm * 0.30 +
+                                      download_norm * 0.25 +
+                                      latency_norm * 0.25 +
+                                      jitter_norm * 0.10 +
+                                      packet_loss_norm * 0.10) * 100.0, 2)
+        return device_network_score
+
+    @staticmethod
+    def _get_device_energy_score(baselines: dict,
+                                 device: dict) -> float:
+        reception_norm = min(baselines["mean_power_reception_watts"] / max(device["mean_power_consumption_data_reception_in_watts"], 0.1), 1.0)
+        heavy_norm = min(baselines["mean_power_heavy_watts"] / max(device["mean_power_consumption_heavy_computational_load_in_watts"], 0.1), 1.0)
+        transmission_norm = min(baselines["mean_power_transmission_watts"] / max(device["mean_power_consumption_data_transmission_in_watts"], 0.1), 1.0)
+        idle_norm = min(baselines["mean_power_idle_watts"] / max(device["mean_power_consumption_idle_in_watts"], 0.1), 1.0)
+        device_energy_score = round((reception_norm + heavy_norm + transmission_norm + idle_norm) / 4 * 100.0, 2)
+        return device_energy_score
+
+    def _get_device_overall_score(self, device: dict) -> float:
+        baselines = self.get_attribute("_baseline_device_performances")
+        compute_score = self._get_device_compute_score(baselines, device)
+        network_score = self._get_device_network_score(baselines, device)
+        energy_score = self._get_device_energy_score(baselines, device)
+        # Weighted overall device score.
+        device_overall_score = round(compute_score * 0.5 + network_score * 0.25 + energy_score * 0.25, 2)
+        return device_overall_score
+
+    @staticmethod
+    def _generate_client_failure_probabilities(rng: Generator,
                                                num_clients: int,
                                                poisson_failure_lambda_range: list) -> dict:
         if not poisson_failure_lambda_range:
@@ -146,16 +224,53 @@ class FlowerExecutor:
 
     def _determine_late_join_clients(self,
                                      num_clients: int,
-                                     percentage_late_join_clients: float) -> set:
+                                     percentage_late_join_clients: float,
+                                     performance_profile: str) -> set:
         if percentage_late_join_clients <= 0:
             return set()
-        num_late = max(1, int(num_clients * percentage_late_join_clients))
-        rng = self.get_attribute("_rng")
-        late_join_clients = rng.choice(range(num_clients),
-                                       size=num_late,
-                                       replace=False)
-        late_join_clients = {int(c) for c in late_join_clients}
-        return late_join_clients
+        num_late_join_clients = max(1, int(num_clients * percentage_late_join_clients))
+        # Initialize the list of late-join clients.
+        late_join_clients = []
+        # Get the list of device overall scores.
+        current_execution_devices = self.get_attribute("_current_execution_devices")
+        device_overall_scores = []
+        for idx, device in enumerate(current_execution_devices):
+            device_dict = device[1]
+            device_overall_score = self._get_device_overall_score(device_dict)
+            device_dict["device_overall_score"] = device_overall_score
+            device_overall_scores.append((idx, device_overall_score))
+        # Sort by ascending score.
+        device_overall_scores.sort(key=lambda x: x[1])
+        # Match the user-defined performance profile for late-join clients.
+        match performance_profile:
+            case "random":
+                rng = self.get_attribute("_rng")
+                late_join_clients = rng.choice(range(num_clients), size=num_late_join_clients, replace=False)
+            case "worst":
+                late_join_clients = [i for i, _ in device_overall_scores[:num_late_join_clients]]
+            case "best":
+                late_join_clients = [i for i, _ in device_overall_scores[-num_late_join_clients:]]
+            case "medium":
+                scores = array([s for _, s in device_overall_scores])
+                p33 = percentile(a=scores, q=33)
+                p66 = percentile(a=scores, q=66)
+                # Clients whose scores fall inside the middle percentile band.
+                medium_band = [(i, s) for (i, s) in device_overall_scores if p33 <= s <= p66]
+                # If we have enough, randomly choose from inside this band.
+                if len(medium_band) >= num_late_join_clients:
+                    rng = self.get_attribute("_rng")
+                    chosen = rng.choice(list(medium_band), size=num_late_join_clients, replace=False)
+                    late_join_clients = [int(i) for (i, _) in chosen]
+                else:
+                    # Otherwise: include entire medium band, then expand outward closest to median score.
+                    late_join_clients = [i for (i, _) in medium_band]
+                    remaining = num_late_join_clients - len(late_join_clients)
+                    # Sort by closeness to the median.
+                    median_score = median(scores)
+                    remaining_pool = [(i, abs(s - median_score)) for (i, s) in device_overall_scores if i not in late_join_clients]
+                    remaining_pool.sort(key=lambda x: x[1])
+                    late_join_clients.extend([i for (i, _) in remaining_pool[:remaining]])
+        return {int(i) for i in late_join_clients}
 
     def _launch_flower_server(self,
                               server_id: int) -> FlowerServerLauncher:
@@ -393,6 +508,10 @@ class FlowerExecutor:
                         current_execution_devices[idx][1]["client_location"] = client_location_sampled
                     # Update the current execution devices.
                     self._set_attribute("_current_execution_devices", current_execution_devices)
+                    # Compute the baseline device performances.
+                    baseline_device_performances = self._compute_baseline_device_performances(current_execution_devices)
+                    # Update the baseline device performances.
+                    self._set_attribute("_baseline_device_performances", baseline_device_performances)
                 # Check if there is a list of initial remaining battery level percentages to sample to the devices.
                 initial_remaining_battery_level_percentage_list = execution_settings["initial_remaining_battery_level_percentage_list"]
                 if initial_remaining_battery_level_percentage_list:
@@ -427,8 +546,10 @@ class FlowerExecutor:
             num_clients = execution_settings["num_clients"]
             # Determine the set of late-join clients.
             percentage_late_join_clients = execution_settings.get("percentage_late_join_clients", 0.0)
+            performance_profile_late_join_clients = execution_settings.get("performance_profile_late_join_clients", "random")
             late_join_clients = self._determine_late_join_clients(num_clients,
-                                                                  percentage_late_join_clients)
+                                                                  percentage_late_join_clients,
+                                                                  performance_profile_late_join_clients)
             self._set_attribute("_late_join_clients", late_join_clients)
             # Create a barrier to synchronize dataset loading.
             dataset_loaded_barrier = Barrier(num_clients + 1)
