@@ -228,7 +228,7 @@ class FlowerExecutor:
                                      performance_profile: str) -> set:
         if percentage_late_join_clients <= 0:
             return set()
-        num_late_join_clients = max(1, int(num_clients * percentage_late_join_clients))
+        num_late_join_clients = min(max(1, int(num_clients * percentage_late_join_clients)), num_clients)
         # Initialize the list of late-join clients.
         late_join_clients = []
         # Get the list of device overall scores.
@@ -249,7 +249,7 @@ class FlowerExecutor:
             case "worst":
                 late_join_clients = [i for i, _ in device_overall_scores[:num_late_join_clients]]
             case "best":
-                late_join_clients = [i for i, _ in device_overall_scores[-num_late_join_clients:]]
+                late_join_clients = [i for i, _ in reversed(device_overall_scores[-num_late_join_clients:])]
             case "medium":
                 scores = array([s for _, s in device_overall_scores])
                 p33 = percentile(a=scores, q=33)
