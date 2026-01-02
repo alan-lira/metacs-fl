@@ -131,6 +131,20 @@ class FlowerExecutor:
             o_f.write(data_line)
 
     @staticmethod
+    def _generate_client_failure_probabilities(rng: Generator,
+                                               num_clients: int,
+                                               poisson_failure_lambda_range: list) -> dict:
+        if not poisson_failure_lambda_range:
+            lambdas = zeros(num_clients)
+        else:
+            lambdas = rng.uniform(poisson_failure_lambda_range[0], poisson_failure_lambda_range[1], num_clients)
+        failure_probabilities = 1 - exp(-lambdas)  # Probability of ≥1 failure for Poisson(λ).
+        client_failure_probabilities = {}
+        for client_id, p in enumerate(failure_probabilities):
+            client_failure_probabilities.update({client_id: p})
+        return client_failure_probabilities
+
+    @staticmethod
     def _compute_baseline_device_performances(current_execution_devices: dict) -> dict:
         devices = [d for _, d in current_execution_devices]
         # Compute metrics.
@@ -208,54 +222,61 @@ class FlowerExecutor:
         device_overall_score = round(compute_score * 0.5 + network_score * 0.25 + energy_score * 0.25, 2)
         return device_overall_score
 
-    @staticmethod
-    def _generate_client_failure_probabilities(rng: Generator,
-                                               num_clients: int,
-                                               poisson_failure_lambda_range: list) -> dict:
-        if not poisson_failure_lambda_range:
-            lambdas = zeros(num_clients)
-        else:
-            lambdas = rng.uniform(poisson_failure_lambda_range[0], poisson_failure_lambda_range[1], num_clients)
-        failure_probabilities = 1 - exp(-lambdas)  # Probability of ≥1 failure for Poisson(λ).
-        client_failure_probabilities = {}
-        for client_id, p in enumerate(failure_probabilities):
-            client_failure_probabilities.update({client_id: p})
-        return client_failure_probabilities
-
-    def _determine_late_join_clients(self,
-                                     num_clients: int,
-                                     percentage_late_join_clients: float,
-                                     performance_profile: str) -> set:
-        if percentage_late_join_clients <= 0:
-            return set()
-        num_late_join_clients = min(max(1, int(num_clients * percentage_late_join_clients)), num_clients)
-        # Initialize the list of late-join clients.
-        late_join_clients = []
-        # Get the list of device overall scores.
+    def _load_devices_scores(self) -> None:
         current_execution_devices = self.get_attribute("_current_execution_devices")
-        device_overall_scores = []
+        devices_scores = []
         for idx, device in enumerate(current_execution_devices):
             device_dict = device[1]
             device_overall_score = self._get_device_overall_score(device_dict)
             device_dict["device_overall_score"] = device_overall_score
-            device_overall_scores.append((idx, device_overall_score))
+            devices_scores.append((idx, device_overall_score))
+        # Store the list of devices scores.
+        self._set_attribute("_devices_scores", devices_scores)
+
+    def _write_devices_scores_to_file(self,
+                                      root_output_folder: Path,
+                                      output_file: Path = Path("clients_scores.csv")) -> None:
+        # Get the list of devices scores.
+        devices_scores = self.get_attribute("_devices_scores")
         # Sort by ascending score.
-        device_overall_scores.sort(key=lambda x: x[1])
+        devices_scores.sort(key=lambda x: x[1])
+        output_file = root_output_folder.joinpath(output_file)
+        output_file.parent.mkdir(exist_ok=True, parents=True)
+        with open(file=output_file, mode="w", encoding="utf-8") as o_f:
+            header_line = "client_id,client_score\n"
+            o_f.write(header_line)
+            for client_id, client_score in devices_scores:
+                data_line = "{0},{1}\n".format(client_id, client_score)
+                o_f.write(data_line)
+
+    def _determine_late_join_clients(self,
+                                     num_clients: int,
+                                     late_join_clients_percentage: float,
+                                     late_join_clients_performance_profile: str) -> set:
+        if late_join_clients_percentage <= 0:
+            return set()
+        num_late_join_clients = min(max(1, int(num_clients * late_join_clients_percentage)), num_clients)
+        # Initialize the list of late-join clients.
+        late_join_clients = []
+        # Get the list of devices scores.
+        devices_scores = self.get_attribute("_devices_scores")
+        # Sort by ascending score.
+        devices_scores.sort(key=lambda x: x[1])
         # Match the user-defined performance profile for late-join clients.
-        match performance_profile:
+        match late_join_clients_performance_profile:
             case "random":
                 rng = self.get_attribute("_rng")
                 late_join_clients = rng.choice(range(num_clients), size=num_late_join_clients, replace=False)
             case "worst":
-                late_join_clients = [i for i, _ in device_overall_scores[:num_late_join_clients]]
+                late_join_clients = [i for i, _ in devices_scores[:num_late_join_clients]]
             case "best":
-                late_join_clients = [i for i, _ in reversed(device_overall_scores[-num_late_join_clients:])]
+                late_join_clients = [i for i, _ in reversed(devices_scores[-num_late_join_clients:])]
             case "medium":
-                scores = array([s for _, s in device_overall_scores])
+                scores = array([s for _, s in devices_scores])
                 p33 = percentile(a=scores, q=33)
                 p66 = percentile(a=scores, q=66)
                 # Clients whose scores fall inside the middle percentile band.
-                medium_band = [(i, s) for (i, s) in device_overall_scores if p33 <= s <= p66]
+                medium_band = [(i, s) for (i, s) in devices_scores if p33 <= s <= p66]
                 # If we have enough, randomly choose from inside this band.
                 if len(medium_band) >= num_late_join_clients:
                     rng = self.get_attribute("_rng")
@@ -267,10 +288,36 @@ class FlowerExecutor:
                     remaining = num_late_join_clients - len(late_join_clients)
                     # Sort by closeness to the median.
                     median_score = median(scores)
-                    remaining_pool = [(i, abs(s - median_score)) for (i, s) in device_overall_scores if i not in late_join_clients]
+                    remaining_pool = [(i, abs(s - median_score)) for (i, s) in devices_scores if i not in late_join_clients]
                     remaining_pool.sort(key=lambda x: x[1])
                     late_join_clients.extend([i for (i, _) in remaining_pool[:remaining]])
         return {int(i) for i in late_join_clients}
+
+    def _write_late_join_clients_to_file(self,
+                                         late_join_clients: set[int],
+                                         late_join_clients_performance_profile: str,
+                                         late_join_clients_round_of_first_appearance: int,
+                                         root_output_folder: Path,
+                                         output_file: Path = Path("late_join_clients_ids.csv")) -> None:
+        output_file = root_output_folder.joinpath(output_file)
+        output_file.parent.mkdir(exist_ok=True, parents=True)
+        # Get the list of devices scores.
+        devices_scores = self.get_attribute("_devices_scores")
+        # Sort devices scores by ascending ID.
+        devices_scores.sort(key=lambda x: x[0])
+        # Sort late-join clients by ascending score.
+        late_join_clients_sorted = sorted(late_join_clients, key=lambda client_id: devices_scores[client_id][1])
+        with open(file=output_file, mode="w", encoding="utf-8") as o_f:
+            header_line = "client_id,client_score,performance_profile,round_of_first_appearance\n"
+            o_f.write(header_line)
+            for client_id in late_join_clients_sorted:
+                client_score = devices_scores[client_id][1]
+                data_line = "{0},{1},{2},{3}\n" \
+                            .format(client_id,
+                                    client_score,
+                                    late_join_clients_performance_profile,
+                                    late_join_clients_round_of_first_appearance)
+                o_f.write(data_line)
 
     def _launch_flower_server(self,
                               server_id: int) -> FlowerServerLauncher:
@@ -536,6 +583,11 @@ class FlowerExecutor:
                 current_execution_devices = self.get_attribute("_current_execution_devices")
                 for idx, _ in enumerate(current_execution_devices):
                     current_execution_devices[idx][1]["client_failure_probability"] = client_failure_probabilities[idx]
+                # Load the devices scores.
+                self._load_devices_scores()
+                # Write the devices scores to file.
+                execution_output_folder = Path(execution_settings["execution_output_folder"])
+                self._write_devices_scores_to_file(execution_output_folder)
             # Print the start of the execution.
             print("\nStarting the execution '{0}'...".format(execution_name))
             # Get the process wait time (after launching).
@@ -545,12 +597,19 @@ class FlowerExecutor:
             # Get the number of clients.
             num_clients = execution_settings["num_clients"]
             # Determine the set of late-join clients.
-            percentage_late_join_clients = execution_settings.get("percentage_late_join_clients", 0.0)
-            performance_profile_late_join_clients = execution_settings.get("performance_profile_late_join_clients", "random")
+            late_join_clients_percentage = execution_settings.get("percentage_late_join_clients", 0.0)
+            late_join_clients_performance_profile = execution_settings.get("performance_profile_late_join_clients", "random")
+            late_join_clients_round_of_first_appearance = execution_settings["round_of_first_appearance_of_late_join_clients"]
             late_join_clients = self._determine_late_join_clients(num_clients,
-                                                                  percentage_late_join_clients,
-                                                                  performance_profile_late_join_clients)
+                                                                  late_join_clients_percentage,
+                                                                  late_join_clients_performance_profile)
             self._set_attribute("_late_join_clients", late_join_clients)
+            # Write the set of late-join clients to output file.
+            execution_output_folder = Path(execution_settings["execution_output_folder"])
+            self._write_late_join_clients_to_file(late_join_clients,
+                                                  late_join_clients_performance_profile,
+                                                  late_join_clients_round_of_first_appearance,
+                                                  execution_output_folder)
             # Create a barrier to synchronize dataset loading.
             dataset_loaded_barrier = Barrier(num_clients + 1)
             # Start the Flower server in a separate process.
