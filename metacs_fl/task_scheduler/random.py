@@ -12,11 +12,12 @@ def random_selection(current_phase: str,
     selected_clients = schedule_tasks_to_selected_clients(num_tasks,
                                                           selected_clients,
                                                           current_phase,
-                                                          profiling_round=False,
                                                           schedule_to_all_clients=True)
+    # Build a client index map.
+    candidate_idx = {client_id: idx for idx, client_id in enumerate(candidate_clients)}
     # Get the schedule provided by the 'Random' selection algorithm.
-    random_schedule = []
+    random_schedule = [0] * len(candidate_clients)
     for client_id, client_info in selected_clients.items():
-        client_num_tasks_scheduled = client_info["client_num_tasks_scheduled"]
-        random_schedule.append(client_num_tasks_scheduled)
+        idx = candidate_idx[client_id]
+        random_schedule[idx] = client_info["client_num_tasks_scheduled"]
     return random_schedule

@@ -9,8 +9,7 @@ from metacs_fl.task_scheduler.ecmtc import ecmtc
 from metacs_fl.task_scheduler.mec import mec
 from metacs_fl.task_scheduler.random import random_selection
 from metacs_fl.utils.client_selector_util import calculate_linear_interpolation_or_extrapolation, \
-    calculate_quadratic_interpolation_or_extrapolation, get_all_possible_sums, schedule_tasks_to_selected_clients, \
-    select_all_available_clients, take_closest
+    calculate_quadratic_interpolation_or_extrapolation, get_all_possible_sums, take_closest
 from metacs_fl.utils.logger_util import log_message
 from metacs_fl.utils.task_scheduler_util import distribute_tasks_with_random_approach, \
     build_class_capacity_vectors_list, distribute_tasks_with_locally_balanced_approach, organize_tasks_distribution

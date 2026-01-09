@@ -1,7 +1,7 @@
 from bisect import bisect_left
 from numpy import array, ceil
 from numpy.linalg import linalg
-from random import sample
+from random import sample, shuffle
 from time import time
 
 
@@ -24,37 +24,31 @@ def select_random_fraction_available_clients(available_clients_map: dict,
                                              phase: str,
                                              clients_fraction: float,
                                              num_tasks_to_schedule: int) -> dict:
-    selected_clients = {}
     phase_key = "client_task_assignment_capacities_{0}".format(phase)
-    # Extract max capacity per client.
+    # Build (cid, capacity) list.
     items = []
     for cid, cmap in available_clients_map.items():
         cap = max(cmap[phase_key])
         items.append((cid, cap))
-    # Sort by highest capacity first.
-    items.sort(key=lambda x: x[1], reverse=True)
-    # Pick minimal needed clients.
-    required = []
+    num_available_clients = len(available_clients_map)
+    num_selected_clients = max(1, int(ceil(clients_fraction * num_available_clients)))
+    shuffle(items)
+    selected = []
     cumulative = 0
-    for cid, cap in items:
-        required.append((cid, cap))
+    # Pick target fraction.
+    for cid, cap in items[:num_selected_clients]:
+        selected.append((cid, cap))
         cumulative += cap
-        if cumulative >= num_tasks_to_schedule:
-            break
-    required_ids = {cid for cid, _ in required}
-    # Compute how many total we must return.
-    num_available = len(items)
-    target_total = max(1, int(ceil(clients_fraction * num_available)))
-    # Add random clients to reach target_total.
-    remaining_candidates = [cid for cid, _ in items if cid not in required_ids]
-    num_extra = max(0, target_total - len(required_ids))
-    if num_extra > 0:
-        extras = sample(remaining_candidates, num_extra)
-    else:
-        extras = []
-    final_ids = list(required_ids) + extras
+    # Repair if capacity is insufficient.
+    if cumulative < num_tasks_to_schedule:
+        for cid, cap in items[num_selected_clients:]:
+            selected.append((cid, cap))
+            cumulative += cap
+            if cumulative >= num_tasks_to_schedule:
+                break
     # Build return structure.
-    for cid in final_ids:
+    selected_clients = {}
+    for cid, _ in selected:
         cmap = available_clients_map[cid]
         caps = cmap[phase_key]
         selected_clients[cid] = {"client_proxy": cmap["client_proxy"],
@@ -548,8 +542,6 @@ def balanced_initial_schedule(selected_clients: dict,
 def schedule_tasks_to_selected_clients(num_tasks_to_schedule: int,
                                        selected_clients: dict,
                                        phase: str,
-                                       profiling_round: bool,
-                                       previous_schedules_to_avoid: list | None = None,
                                        schedule_to_all_clients: bool = False,
                                        max_duration_seconds: float = 120.0) -> dict:
     start_time = time()
@@ -574,17 +566,6 @@ def schedule_tasks_to_selected_clients(num_tasks_to_schedule: int,
         # Apply combination to selected_clients (aligned with client_ids).
         for cid, chosen in zip(client_ids, combination):
             selected_clients[cid]["client_num_tasks_scheduled"] = chosen
-        # If profiling, and we must avoid previous schedules, try a small swap to differ.
-        if profiling_round and previous_schedules_to_avoid:
-            current_schedule_tuple = tuple(selected_clients[cid]["client_num_tasks_scheduled"] for cid in sorted(selected_clients))
-            # If the schedule is in the avoid list, try to find a balanced alternative via swap.
-            if current_schedule_tuple in previous_schedules_to_avoid:
-                changed = find_balanced_alternative(selected_clients,
-                                                    {cid: sorted(selected_clients[cid][client_task_assignment_capacities_key]) for cid in selected_clients},
-                                                    previous_schedules_to_avoid)
-                if not changed:
-                    # No alternative found: return the DP result (best-effort).
-                    return selected_clients
         # Return the DP-produced schedule (best-effort, explicit per-client assignment).
         return selected_clients
     # Otherwise (not scheduling to all clients)...
@@ -608,20 +589,12 @@ def schedule_tasks_to_selected_clients(num_tasks_to_schedule: int,
         num_tasks_to_schedule = min_possible_sum
     elif num_tasks_to_schedule > max_possible_sum:
         num_tasks_to_schedule = max_possible_sum
-    # Balanced initialization for profiling rounds.
-    if profiling_round or schedule_to_all_clients:
-        balanced_initial_schedule(selected_clients,
-                                  client_capacities_map,
-                                  num_tasks_to_schedule,
-                                  schedule_to_all_clients)
     # Use balanced adjustment strategy.
     return balanced_adjustment_strategy(selected_clients,
                                         client_capacities_map,
                                         num_tasks_to_schedule,
                                         phase,
-                                        profiling_round,
                                         schedule_to_all_clients,
-                                        previous_schedules_to_avoid,
                                         start_time,
                                         max_duration_seconds)
 
@@ -669,9 +642,7 @@ def balanced_adjustment_strategy(selected_clients: dict,
                                  client_capacities_map: dict,
                                  num_tasks_to_schedule: int,
                                  phase: str,
-                                 profiling_round: bool,
                                  schedule_to_all_clients: bool,
-                                 previous_schedules_to_avoid: list | None,
                                  start_time: float,
                                  max_duration_seconds: float) -> dict:
     max_iterations = len(selected_clients) * 20
@@ -682,15 +653,6 @@ def balanced_adjustment_strategy(selected_clients: dict,
                             for client_info in selected_clients.values())
         difference = num_tasks_to_schedule - current_total
         if difference == 0:
-            # Check if we need to avoid previous schedules during profiling.
-            if profiling_round and previous_schedules_to_avoid:
-                current_schedule_tuple = get_schedule_tuple(selected_clients)
-                if current_schedule_tuple in previous_schedules_to_avoid:
-                    # Find a slightly different balanced schedule.
-                    if not find_balanced_alternative(selected_clients, client_capacities_map,
-                                                     previous_schedules_to_avoid):
-                        break  # Keep current if no alternative found.
-                    continue
             break
         # Calculate current balance metric (standard deviation of utilization).
         utilizations = []

@@ -346,7 +346,8 @@ class FlowerServer(Strategy):
                 metric = key[len("profile_test_"):]
                 profile_test[metric] = value
         with self._profile_lock:
-            self._clients_profiles["client_{0}".format(client_id)] = {"train": profile_train, "test": profile_test}
+            client_profile_dict = {"profiled_at_round": current_round, "train": profile_train, "test": profile_test}
+            self._clients_profiles["client_{0}".format(client_id)] = client_profile_dict
         # Log a 'finished profiling for client' message.
         message = "[Server {0} | Round {1}] Finished profiling for client {2}..." \
                    .format(server_id, current_round, client_id)
@@ -374,7 +375,6 @@ class FlowerServer(Strategy):
         # Get the necessary attributes.
         server_id = self.get_attribute("_server_id")
         logger = self.get_attribute("_logger")
-        clients_profiles = self.get_attribute("_clients_profiles")
         clients_being_profiled = self.get_attribute("_clients_being_profiled")
         # Determine unprofiled clients.
         unprofiled_clients = []
@@ -386,13 +386,14 @@ class FlowerServer(Strategy):
                 client_id = client_reply.properties["client_id"]
                 client_id_str = "client_{0}".format(client_id)
                 client_available = client_reply.properties["client_available"]
-                client_not_profiled = client_id_str not in clients_profiles
-                client_not_being_profiled = client_id_str not in clients_being_profiled
-                if client_available and client_not_profiled and client_not_being_profiled:
-                    unprofiled_clients.append((client_id, client_proxy))
-                    with self._profile_lock:
+                with self._profile_lock:
+                    clients_profiles = self.get_attribute("_clients_profiles")
+                    client_not_profiled = client_id_str not in clients_profiles
+                    client_not_being_profiled = client_id_str not in clients_being_profiled
+                    if client_available and client_not_profiled and client_not_being_profiled:
+                        unprofiled_clients.append((client_id, client_proxy))
                         self._clients_being_profiled.add(client_id_str)
-            except Exception as e:
+            except Exception as _:
                 pass
         if not unprofiled_clients:
             # Log a 'no new clients to profile' message.
@@ -542,7 +543,6 @@ class FlowerServer(Strategy):
                                         current_round: int,
                                         available_clients: dict,
                                         idle_events_data_dict: dict) -> dict:
-        clients_profiles = self.get_attribute("_clients_profiles")
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         data_privacy_approach_name = server_strategy_settings.get("data_privacy_approach", {}).get("name", "Non_Private")
         query_clients_data_distribution = server_strategy_settings.get("query_clients_data_distribution", False)
@@ -603,8 +603,14 @@ class FlowerServer(Strategy):
                 client_current_latency_in_milliseconds = client_reply.properties[client_current_latency_in_milliseconds_property]
                 client_id_str = "client_{0}".format(client_id)
                 client_available = client_reply.properties["client_available"]
-                client_profiled = client_id_str in clients_profiles
-                if client_available and client_profiled:
+                clients_profiles = {}
+                with self._profile_lock:
+                    clients_profiles = self.get_attribute("_clients_profiles")
+                profiled_this_round = False
+                if client_id_str in clients_profiles:
+                    profiled_this_round = clients_profiles[client_id_str]["profiled_at_round"] == current_round
+                block_due_to_profiling = current_round > 1 and profiled_this_round
+                if client_available and not block_due_to_profiling:
                     client_map = {"client_proxy": client_proxy,
                                   "client_hostname": client_hostname,
                                   "client_num_cpus": client_num_cpus,
@@ -634,7 +640,7 @@ class FlowerServer(Strategy):
                                     if "class_index_map" in self._clients_histograms:
                                         client_map.update({"class_index_map": self._clients_histograms["class_index_map"]})
                     available_clients_map.update({client_id_str: client_map})
-            except Exception as e:
+            except Exception as _:
                 pass
         sorted_keys = sorted(list(available_clients_map.keys()), key=lambda x: (len(x), x))
         available_clients_map = {k: available_clients_map[k] for k in sorted_keys}
@@ -1337,7 +1343,6 @@ class FlowerServer(Strategy):
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
-        clients_profiles = self.get_attribute("_clients_profiles")
         client_selector = self.get_attribute("_client_selector")
         # Log a 'start of the configure_fit call' debug message.
         message = "[Server {0} | Round {1}] Start of the 'configure_fit' call!".format(server_id, server_round)
@@ -1378,6 +1383,10 @@ class FlowerServer(Strategy):
         round_timeout_in_seconds = fl_settings["round_timeout_in_seconds"]
         if round_timeout_in_seconds == "infinity":
             round_timeout_in_seconds = inf
+        # Get the clients profiles.
+        clients_profiles = {}
+        with self._profile_lock:
+            clients_profiles = self.get_attribute("_clients_profiles")
         # Start the clients' selection duration timer.
         selection_duration_start = process_time()
         # Set the client selection procedure kwargs.
@@ -1541,7 +1550,6 @@ class FlowerServer(Strategy):
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
-        clients_profiles = self.get_attribute("_clients_profiles")
         client_selector = self.get_attribute("_client_selector")
         # Log a 'start of the configure_evaluate call' debug message.
         message = "[Server {0} | Round {1}] Start of the 'configure_evaluate' call!".format(server_id, server_round)
@@ -1563,6 +1571,10 @@ class FlowerServer(Strategy):
         round_timeout_in_seconds = fl_settings["round_timeout_in_seconds"]
         if round_timeout_in_seconds == "infinity":
             round_timeout_in_seconds = inf
+        # Get the clients profiles.
+        clients_profiles = {}
+        with self._profile_lock:
+            clients_profiles = self.get_attribute("_clients_profiles")
         # Start the clients' selection duration timer.
         selection_duration_start = process_time()
         # Set the client selection procedure kwargs.
