@@ -71,64 +71,35 @@ def take_closest(values: list,
     return closest
 
 
-def find_multichoice_combination_closest(lists: list,
-                                         target: int,
-                                         prefer_lower: bool = False) -> tuple:
-    if not lists:
+def find_multichoice_combination_balanced(task_assignment_capacities_list: list,
+                                          num_tasks_to_schedule: int) -> tuple:
+    n = len(task_assignment_capacities_list)
+    if n == 0:
         return [], 0
-    # Parents[stage]: dict mapping sum_after_stage -> (prev_sum_before_stage, chosen_value).
+    ideal = num_tasks_to_schedule / n
+    # dp[sum] = (imbalance_cost, parent_sum, chosen_value)
+    dp = {0: (0.0, None, None)}
     parents = []
-    reachable = {0}
-    # Iterate over stages (clients).
-    for choices in lists:
-        # Deterministic sorted unique choices.
-        choices_list = sorted(set(int(c) for c in choices))
-        new_reachable = set()
-        parent = {}
-        # Extend previous reachable sums with each choice.
-        for s in reachable:
-            for v in choices_list:
-                ns = s + v
-                # Record first parent seen for determinism.
-                if ns not in new_reachable:
-                    new_reachable.add(ns)
-                    parent[ns] = (s, v)
-        # If no sums reachable after including this client's choices,
-        # it means no valid combination exists that picks one per client up to this point.
-        if not new_reachable:
-            # Fallback: pick best among keys of parent.
-            if not parent:
-                return [], 0
-            best_sum = min(parent.keys(), key=lambda x: (abs(x - target), x if prefer_lower else -x))
-            # Backtrack across available parents (parents list may be shorter than lists).
-            stages = len(parents) + 1
-            combination = [0] * stages
-            cur_sum = best_sum
-            # Reconstruct last stage from parent dict.
-            prev_sum, val = parent[cur_sum]
-            combination[stages - 1] = val
-            cur_sum = prev_sum
-            # Reconstruct earlier stages.
-            for stage in range(len(parents) - 1, -1, -1):
-                p = parents[stage]
-                prev_sum, val = p[cur_sum]
-                combination[stage] = val
-                cur_sum = prev_sum
-            # Pad with zeros if somehow lists longer.
-            if len(combination) < len(lists):
-                combination += [0] * (len(lists) - len(combination))
-            return combination, best_sum
-        parents.append(parent)
-        reachable = new_reachable
-    # Choose reachable sum closest to target (tie-breaker prefers larger unless prefer_lower True).
-    best_sum = min(reachable, key=lambda x: (abs(x - target), x if prefer_lower else -x))
-    # Backtrack to build combination.
-    n = len(lists)
+    for stage, choices in enumerate(task_assignment_capacities_list):
+        new_dp = {}
+        for prev_sum, (prev_cost, _, _) in dp.items():
+            for v in choices:
+                s = prev_sum + v
+                cost = prev_cost + (v - ideal) ** 2
+                # Keep minimal imbalance for this sum.
+                if s not in new_dp or cost < new_dp[s][0]:
+                    new_dp[s] = (cost, prev_sum, v)
+        if not new_dp:
+            break
+        dp = new_dp
+        parents.append(dp)
+    # Choose sum closest to num_tasks_to_schedule, then minimal imbalance.
+    best_sum = min(dp.keys(), key=lambda s: (abs(s - num_tasks_to_schedule), dp[s][0]))
+    # Backtrack.
     combination = [0] * n
     cur_sum = best_sum
     for stage in range(n - 1, -1, -1):
-        parent = parents[stage]
-        prev_sum, val = parent[cur_sum]
+        cost, prev_sum, val = parents[stage][cur_sum]
         combination[stage] = val
         cur_sum = prev_sum
     return combination, best_sum
@@ -562,7 +533,7 @@ def schedule_tasks_to_selected_clients(num_tasks_to_schedule: int,
         cleaned_capacities = []
         for caps in task_assignment_capacities_list:
             cleaned_capacities.append([c for c in caps if c > 0])
-        combination, achieved_sum = find_multichoice_combination_closest(cleaned_capacities, num_tasks_to_schedule)
+        combination, achieved_sum = find_multichoice_combination_balanced(cleaned_capacities, num_tasks_to_schedule)
         # Apply combination to selected_clients (aligned with client_ids).
         for cid, chosen in zip(client_ids, combination):
             selected_clients[cid]["client_num_tasks_scheduled"] = chosen

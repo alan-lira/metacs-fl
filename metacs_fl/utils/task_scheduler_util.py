@@ -165,7 +165,7 @@ def distribute_tasks_with_random_approach(X: list,
         # Update x_dist_i with these counts.
         for k, count in class_counts.items():
             x_dist_i[k] = count
-        # 🔒 Enforce exact count.
+        # Enforce exact count.
         current_total = sum(x_dist_i)
         if current_total < x_i:
             available_classes = [k for k, c in enumerate(Y[i]) if c > 0] or [0]
@@ -213,7 +213,7 @@ def distribute_tasks_with_locally_balanced_approach(X: list,
             x_dist_i[k] += 1
             remaining_tasks -= 1
             class_idx += 1
-        # 🔒 Enforce exact count.
+        # Enforce exact count.
         current_total = sum(x_dist_i)
         if current_total < x_i:
             for _ in range(x_i - current_total):
@@ -285,7 +285,7 @@ def distribute_tasks_with_globally_balanced_approach(X: list,
                     break
         if not progress:
             break
-    # 🔒 Enforce exact count per client.
+    # Enforce exact count per client.
     for i, x_i in enumerate(X):
         current_total = sum(X_dist[i])
         if current_total < x_i:
