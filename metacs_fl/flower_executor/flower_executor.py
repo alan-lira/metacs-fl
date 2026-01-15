@@ -11,7 +11,7 @@ from metacs_fl.client_launcher.flower_client_launcher import FlowerClientLaunche
 from metacs_fl.devices.edge_devices import generate_edge_devices
 from metacs_fl.networks.networks import generate_networks
 from metacs_fl.server_launcher.flower_server_launcher import FlowerServerLauncher
-from metacs_fl.utils.config_parser_util import parse_config_section, get_all_section_names
+from metacs_fl.utils.config_parser_util import parse_config_section
 from metacs_fl.utils.host_profiler_util import HostProfiler
 from metacs_fl.utils.system_modeler_util import get_cpu_cores_available
 
@@ -19,9 +19,11 @@ from metacs_fl.utils.system_modeler_util import get_cpu_cores_available
 class FlowerExecutor:
 
     def __init__(self,
-                 config_file: Path) -> None:
+                 config_file: Path,
+                 repetitions: int) -> None:
         # Initialize the attributes.
         self._config_file = config_file
+        self._repetitions = repetitions
         self._current_execution = {}
         self._current_execution_devices = []
         self._rng = default_rng()
@@ -442,12 +444,16 @@ class FlowerExecutor:
 
     def execute_fl_with_flower(self) -> None:
         executions_to_execute = []
+        # Print the number of the repetitions (independent executions).
+        print("Number of repetitions (independent executions): {0}".format(self._repetitions))
         config_file = self.get_attribute("_config_file")
-        section_names = get_all_section_names(config_file)
-        for section_name in section_names:
-            execution_settings = parse_config_section(config_file, section_name)
-            execution_name = section_name.split(" Settings")[0]
-            executions_to_execute.append({execution_name: execution_settings})
+        execution_section = "Execution_N Settings"
+        execution_settings = parse_config_section(config_file, execution_section)
+        for repetition_idx in range(1, self._repetitions + 1):
+            execution_name = execution_section.replace("N", str(repetition_idx)).split(" Settings")[0]
+            execution_settings_copy = deepcopy(execution_settings)
+            execution_settings_copy["execution_output_folder"] = execution_settings_copy["execution_output_folder"].replace("N", str(repetition_idx))
+            executions_to_execute.append({execution_name: execution_settings_copy})
         # Iterate through the list of executions to execute.
         for current_execution in executions_to_execute:
             # Update the current execution.

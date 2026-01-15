@@ -142,6 +142,11 @@ def main() -> None:
                         help=SUPPRESS)
     elif "execute_fl_with_flower" in argv:
         default_config_file = __FLOWER_EXECUTOR_CONFIG_FILE
+        ap.add_argument("--repetitions",
+                        type=int,
+                        required=False,
+                        default=1,
+                        help=SUPPRESS)
     elif "execute_fl_with_flower_simulation_engine" in argv:
         default_config_file = __FLOWER_SIMULATOR_CONFIG_FILE
     elif "analyze_results" in argv:
@@ -174,9 +179,10 @@ def main() -> None:
         fc.launch_client()
     elif action == "execute_fl_with_flower":
         config_file = Path(parsed_args.config_file)
+        repetitions = int(parsed_args.repetitions)
         # Verify if the user-provided config file is valid.
         _verify_if_config_file_is_valid(config_file)
-        fe = FlowerExecutor(config_file)
+        fe = FlowerExecutor(config_file, repetitions)
         fe.execute_fl_with_flower()
     elif action == "execute_fl_with_flower_simulation_engine":
         config_file = Path(parsed_args.config_file)
