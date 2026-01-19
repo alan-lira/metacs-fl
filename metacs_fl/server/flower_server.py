@@ -66,6 +66,7 @@ class FlowerServer(Strategy):
         self._profiling_executor = ThreadPoolExecutor(max_workers=cpu_count())
         self._profiling_futures = set()
         self._profile_lock = Lock()
+        self._available_clients = None
         # Initialize the random number generator with a fixed seed to allow replicable results.
         seed = None
         if "seed" in self._server_strategy_settings:
@@ -108,7 +109,9 @@ class FlowerServer(Strategy):
             current_round = last_round_on_history + 1
         # Search backward for up to x valid past rounds.
         valid_past_rounds = []
-        r = current_round - 1
+        r = min(current_round - 1, last_round_on_history)
+        if r <= 0:
+            r = last_round_on_history
         while r > 0 and len(valid_past_rounds) < x:
             if r in selected_clients_metrics_history:
                 round_data = selected_clients_metrics_history[r]
@@ -654,6 +657,7 @@ class FlowerServer(Strategy):
         if client_manager is not None:
             # Get the available clients.
             available_clients = client_manager.all()
+            self._set_attribute("_available_clients", available_clients)
             # Profile "new" (first-appearance) clients, if any.
             self._profile_new_clients(current_round, available_clients)
             # Get the available clients data distribution, if allowed.
@@ -1470,7 +1474,9 @@ class FlowerServer(Strategy):
         # Get the necessary attributes.
         server_id = self.get_attribute("_server_id")
         fl_settings = self.get_attribute("_fl_settings")
+        enable_testing = fl_settings["enable_testing"]
         accept_clients_failures = fl_settings["accept_clients_failures"]
+        remove_clients_models_on_finish = fl_settings["remove_clients_models_on_finish"]
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         model_aggregator = server_strategy_settings["model_aggregator"]
         model_aggregator_name = model_aggregator["name"]
@@ -1528,6 +1534,17 @@ class FlowerServer(Strategy):
         if server_strategy_settings.get("monitor_clients_reliability_score", False):
             completed_clients = {"client_{0}".format(result.metrics["client_id"]): True for _, result in results}
             self._update_clients_reliability_score_history(server_round, phase, completed_clients)
+        # If the FL execution should stop on the next round, remove local model on clients (if requested).
+        try:
+            fl_execution_should_stop = self._fl_execution_should_stop(server_round + 1)
+        except Exception:
+            fl_execution_should_stop = False
+        if fl_execution_should_stop and remove_clients_models_on_finish and not enable_testing:
+            available_clients = self.get_attribute("_available_clients")
+            for _, client_proxy in available_clients.items():
+                gpi_dict = {"client_remove_local_model": "?"}
+                gpi = GetPropertiesIns(gpi_dict)
+                _ = client_proxy.get_properties(gpi, timeout=None, group_id=None)
         # Log an 'end of the aggregate_fit call' debug message.
         message = "[Server {0} | Round {1}] End of the 'aggregate_fit' call!".format(server_id, server_round)
         log_message(logger, message, "DEBUG")
@@ -1657,6 +1674,7 @@ class FlowerServer(Strategy):
         server_id = self.get_attribute("_server_id")
         fl_settings = self.get_attribute("_fl_settings")
         accept_clients_failures = fl_settings["accept_clients_failures"]
+        remove_clients_models_on_finish = fl_settings["remove_clients_models_on_finish"]
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         logger = self.get_attribute("_logger")
         # Log a 'start of the aggregate_evaluate call' debug message.
@@ -1688,6 +1706,17 @@ class FlowerServer(Strategy):
         if server_strategy_settings.get("monitor_clients_reliability_score", False):
             completed_clients = {"client_{0}".format(result.metrics["client_id"]): True for _, result in results}
             self._update_clients_reliability_score_history(server_round, phase, completed_clients)
+        # If the FL execution should stop on the next round, remove local model on clients (if requested).
+        try:
+            fl_execution_should_stop = self._fl_execution_should_stop(server_round + 1)
+        except Exception:
+            fl_execution_should_stop = False
+        if fl_execution_should_stop and remove_clients_models_on_finish:
+            available_clients = self.get_attribute("_available_clients")
+            for _, client_proxy in available_clients.items():
+                gpi_dict = {"client_remove_local_model": "?"}
+                gpi = GetPropertiesIns(gpi_dict)
+                _ = client_proxy.get_properties(gpi, timeout=None, group_id=None)
         # Log an 'end of the aggregate_evaluate call' debug message.
         message = "[Server {0} | Round {1}] End of the 'aggregate_evaluate' call!".format(server_id, server_round)
         log_message(logger, message, "DEBUG")

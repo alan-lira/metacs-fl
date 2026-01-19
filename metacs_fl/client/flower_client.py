@@ -678,6 +678,11 @@ class FlowerClient(Client):
         noisy_clipped = noisy_clipped.round().astype(int32)
         return noisy_clipped
 
+    def _remove_local_model(self) -> None:
+        model_file = self.get_attribute("_model_file")
+        if model_file.exists():
+            model_file.unlink()
+
     def get_properties(self,
                        ins: GetPropertiesIns) -> GetPropertiesRes:
         """ Implementation of the abstract method from the Client class."""
@@ -687,6 +692,8 @@ class FlowerClient(Client):
         self._record_past_idle_events(config)
         # Initialize the client availability status.
         config.update({"client_available": True})
+        if "client_remove_local_model" in config:
+            self._remove_local_model()
         if "client_dp_presence" in config:
             y_train = self.get_attribute("_y_train")
             local_classes = asarray(unique(y_train))
