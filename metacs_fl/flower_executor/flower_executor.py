@@ -610,12 +610,13 @@ class FlowerExecutor:
                                                                   late_join_clients_percentage,
                                                                   late_join_clients_performance_profile)
             self._set_attribute("_late_join_clients", late_join_clients)
-            # Write the set of late-join clients to output file.
-            execution_output_folder = Path(execution_settings["execution_output_folder"])
-            self._write_late_join_clients_to_file(late_join_clients,
-                                                  late_join_clients_performance_profile,
-                                                  late_join_clients_round_of_first_appearance,
-                                                  execution_output_folder)
+            # Write the set of late-join clients, if any, to output file.
+            if len(late_join_clients) > 0:
+                execution_output_folder = Path(execution_settings["execution_output_folder"])
+                self._write_late_join_clients_to_file(late_join_clients,
+                                                      late_join_clients_performance_profile,
+                                                      late_join_clients_round_of_first_appearance,
+                                                      execution_output_folder)
             # Create a barrier to synchronize dataset loading.
             dataset_loaded_barrier = Barrier(num_clients + 1)
             # Start the Flower server in a separate process.

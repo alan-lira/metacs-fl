@@ -19,6 +19,7 @@ from flwr.server.strategy.strategy import Strategy
 from flwr.server.superlink.fleet.grpc_bidi.grpc_client_proxy import GrpcClientProxy
 
 from metacs_fl.client_selector.metacsfl import MetaCSFL
+from metacs_fl.client_selector.oort import Oort
 from metacs_fl.client_selector.random import Random
 from metacs_fl.client_selector.sbacpad_2024 import SBACPAD2024
 from metacs_fl.metrics_aggregator.flower_weighted_average import aggregate_loss_by_weighted_average, \
@@ -82,6 +83,9 @@ class FlowerServer(Strategy):
             case "SBAC-PAD_2024":
                 # Instantiate the SBAC-PAD_2024's client selector.
                 client_selector = SBACPAD2024(server_strategy_settings, seed)
+            case "Oort":
+                # Instantiate the Oort's client selector.
+                client_selector = Oort(server_strategy_settings, seed)
             case "MetaCS-FL":
                 # Instantiate the MetaCS-FL's client selector.
                 client_selector = MetaCSFL(server_strategy_settings, seed)

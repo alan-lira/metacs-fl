@@ -141,6 +141,35 @@ class FlowerServerLauncher:
                 server_strategy_implementation_settings["data_privacy_approach"] = data_privacy_approach_settings
                 server_strategy_settings.update(server_strategy_implementation_settings)
                 self._set_attribute("_server_strategy_settings", server_strategy_settings)
+            case "Oort":
+                server_strategy_implementation_section = "{0} Settings".format(server_strategy)
+                server_strategy_implementation_settings = parse_config_section(config_file,
+                                                                               server_strategy_implementation_section)
+                client_selector_training = server_strategy_implementation_settings["client_selector_training"]
+                client_selector_training_section = "{0} Settings".format(client_selector_training)
+                client_selector_training_settings = parse_config_section(config_file, client_selector_training_section)
+                client_selector_training_settings.update({"name": client_selector_training})
+                server_strategy_implementation_settings["client_selector_training"] = client_selector_training_settings
+                client_selector_testing = server_strategy_implementation_settings["client_selector_testing"]
+                client_selector_testing_section = "{0} Settings".format(client_selector_testing)
+                client_selector_testing_settings = parse_config_section(config_file, client_selector_testing_section)
+                client_selector_testing_settings.update({"name": client_selector_testing})
+                server_strategy_implementation_settings["client_selector_testing"] = client_selector_testing_settings
+                model_aggregator = server_strategy_implementation_settings["model_aggregator"]
+                model_aggregator_section = "{0} Settings".format(model_aggregator)
+                model_aggregator_settings = parse_config_section(config_file, model_aggregator_section)
+                model_aggregator_settings["name"] = model_aggregator
+                server_strategy_implementation_settings["model_aggregator"] = model_aggregator_settings
+                data_privacy_approach = server_strategy_implementation_settings["data_privacy_approach"]
+                data_privacy_approach_settings = {}
+                match data_privacy_approach:
+                    case "Differentially_Private":
+                        data_privacy_approach_section = "{0} Settings".format(data_privacy_approach)
+                        data_privacy_approach_settings = parse_config_section(config_file, data_privacy_approach_section)
+                data_privacy_approach_settings["name"] = data_privacy_approach
+                server_strategy_implementation_settings["data_privacy_approach"] = data_privacy_approach_settings
+                server_strategy_settings.update(server_strategy_implementation_settings)
+                self._set_attribute("_server_strategy_settings", server_strategy_settings)
             case "MetaCS-FL":
                 server_strategy_implementation_section = "{0} Settings".format(server_strategy)
                 server_strategy_implementation_settings = parse_config_section(config_file,
@@ -321,7 +350,7 @@ class FlowerServerLauncher:
         # Initialize the server strategy.
         server_strategy = None
         match strategy:
-            case x if x in ["Random", "SBAC-PAD_2024", "MetaCS-FL"]:
+            case x if x in ["Random", "SBAC-PAD_2024", "Oort", "MetaCS-FL"]:
                 server_strategy = FlowerServer(id_=server_id,
                                                fl_settings=fl_settings,
                                                server_strategy_settings=server_strategy_settings,
