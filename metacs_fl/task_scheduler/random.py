@@ -1,5 +1,5 @@
-from metacs_fl.utils.client_selector_util import select_random_fraction_available_clients, \
-    schedule_tasks_to_selected_clients
+from metacs_fl.utils.client_selector_util import can_schedule_to_all_clients, \
+    select_random_fraction_available_clients, schedule_tasks_to_selected_clients
 
 
 def random_selection(current_phase: str,
@@ -8,11 +8,13 @@ def random_selection(current_phase: str,
                      fraction_clients: float) -> list:
     # Select a random fraction of the candidate clients.
     selected_clients = select_random_fraction_available_clients(candidate_clients, current_phase, fraction_clients, num_tasks)
+    # Verify if it's possible to schedule to all clients.
+    schedule_to_all_clients = can_schedule_to_all_clients(num_tasks, selected_clients, current_phase)
     # Schedule tasks to all selected clients, respecting assignment capacities.
     selected_clients = schedule_tasks_to_selected_clients(num_tasks,
                                                           selected_clients,
                                                           current_phase,
-                                                          schedule_to_all_clients=True)
+                                                          schedule_to_all_clients=schedule_to_all_clients)
     # Build a client index map.
     candidate_idx = {client_id: idx for idx, client_id in enumerate(candidate_clients)}
     # Get the schedule provided by the 'Random' selection algorithm.

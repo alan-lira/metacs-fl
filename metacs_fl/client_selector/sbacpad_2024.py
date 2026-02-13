@@ -442,6 +442,42 @@ class SBACPAD2024:
         # Return the list of selected clients' Future objects.
         return selected_clients_futures
 
+    def _select_clients_sync(self,
+                             rounds_to_select_clients: list,
+                             current_phase: str,
+                             candidate_clients: dict,
+                             num_tasks: int,
+                             samples_per_task: int,
+                             selected_clients_metrics_history: dict,
+                             time_limit: float,
+                             data_privacy_approach: str,
+                             clients_profiles: dict,
+                             logger: Logger) -> list:
+        # Get the necessary attributes.
+        client_selection_settings = self.get_attribute("_client_selection_settings")
+        # Generate the cost matrices.
+        history_checker = client_selection_settings["history_checker"]
+        cost_matrices = self._generate_cost_matrices(current_phase,
+                                                     candidate_clients,
+                                                     selected_clients_metrics_history,
+                                                     history_checker,
+                                                     clients_profiles)
+        # Initialize the list of results (selected clients per round).
+        results = []
+        for round_to_select_clients in rounds_to_select_clients:
+            result = self._select_clients_task(round_to_select_clients,
+                                               current_phase,
+                                               candidate_clients,
+                                               num_tasks,
+                                               samples_per_task,
+                                               cost_matrices,
+                                               time_limit,
+                                               data_privacy_approach,
+                                               logger)
+            results.append(result)
+        # Return the list of results (selected clients per round).
+        return results
+
     def run_client_selection_procedure(self,
                                        **kwargs) -> list:
         # Get the necessary parameters.
@@ -456,6 +492,7 @@ class SBACPAD2024:
         time_limit = kwargs["time_limit"]
         data_privacy_approach = kwargs["data_privacy_approach"]
         logger = kwargs["logger"]
+        use_async = kwargs["use_async"]
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
         select_clients_for_immediate_next_round_while_executing_current_phase \
@@ -499,19 +536,32 @@ class SBACPAD2024:
                 if immediate_next_round <= num_rounds:
                     rounds_to_select_clients.append(immediate_next_round)
         # Initialize the list of selected clients' Future objects.
-        selected_clients_futures = []
+        selected_clients_results = []
         # If the list of rounds to select clients is not empty...
         if rounds_to_select_clients:
-            # Select clients asynchronously, considering the list of rounds to select clients.
-            selected_clients_futures = self._select_clients_async(rounds_to_select_clients,
-                                                                  current_phase,
-                                                                  candidate_clients,
-                                                                  num_tasks,
-                                                                  samples_per_task,
-                                                                  selected_clients_metrics_history,
-                                                                  time_limit,
-                                                                  data_privacy_approach,
-                                                                  clients_profiles,
-                                                                  logger)
+            if use_async:
+                # Select clients asynchronously, considering the list of rounds to select clients.
+                selected_clients_results = self._select_clients_async(rounds_to_select_clients,
+                                                                      current_phase,
+                                                                      candidate_clients,
+                                                                      num_tasks,
+                                                                      samples_per_task,
+                                                                      selected_clients_metrics_history,
+                                                                      time_limit,
+                                                                      data_privacy_approach,
+                                                                      clients_profiles,
+                                                                      logger)
+            else:
+                # Select clients synchronously, considering the list of rounds to select clients.
+                selected_clients_results = self._select_clients_sync(rounds_to_select_clients,
+                                                                     current_phase,
+                                                                     candidate_clients,
+                                                                     num_tasks,
+                                                                     samples_per_task,
+                                                                     selected_clients_metrics_history,
+                                                                     time_limit,
+                                                                     data_privacy_approach,
+                                                                     clients_profiles,
+                                                                     logger)
         # Return the list of selected clients' Future objects.
-        return selected_clients_futures
+        return selected_clients_results

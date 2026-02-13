@@ -510,6 +510,21 @@ def balanced_initial_schedule(selected_clients: dict,
         distribute_tasks_capacity_weighted(selected_clients, client_capacities_map, num_tasks_to_schedule)
 
 
+def can_schedule_to_all_clients(num_tasks: int,
+                                selected_clients: dict,
+                                phase: str) -> bool:
+    if not selected_clients or num_tasks == 0:
+        return False
+    min_positive_capacity = 0
+    for client_info in selected_clients.values():
+        capacities = client_info["client_task_assignment_capacities_{0}".format(phase)]
+        positive_caps = [c for c in capacities if c > 0]
+        if not positive_caps:
+            return False
+        min_positive_capacity += min(positive_caps)
+    return num_tasks >= min_positive_capacity
+
+
 def schedule_tasks_to_selected_clients(num_tasks_to_schedule: int,
                                        selected_clients: dict,
                                        phase: str,

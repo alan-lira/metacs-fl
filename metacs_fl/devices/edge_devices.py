@@ -700,7 +700,7 @@ def emulate_arm_cortex_m_series_performance(device_name: str,
             effective_utilization_range_for_training = (0.1, 0.2)
             effective_utilization_range_for_inference = (0.2, 0.3)
             memory_size_in_gigabytes = 0.000032  # 32 KB
-            memory_speed_in_megahertz = 48,
+            memory_speed_in_megahertz = 48
             memory_type = "SRAM"
             peak_memory_bandwidth_in_bytes_per_second = 0.1 * 1e9  # Estimated
             mean_power_consumption_data_reception_in_watts = 0.015  # 15 milli-watts (BLE RX)

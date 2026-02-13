@@ -161,9 +161,12 @@ class MetaCSFL:
                 crit_name = crit_conf["name"]
                 match crit_name:
                     case "client_diversity_score_training":
-                        # (iii-a) The accumulative client diversity score over the past X rounds falls below Y during the training phase?
+                        # (iii-a) Client diversity checks during the training phase:
+                        # 1. Does the accumulative client diversity score over the past X rounds fall below the minimum threshold Y?
+                        # 2. Has the client diversity score decreased by more than the maximum relative drop over the past X rounds?
                         phase_of_interest = "train"
-                        minimum_score = crit_conf["minimum_score"]
+                        minimum_score = crit_conf.get("minimum_score", None)
+                        maximum_relative_drop = crit_conf.get("maximum_relative_drop", None)
                         num_past_rounds = crit_conf["num_past_rounds"]
                         internal_candidate_clients_history = self.get_attribute("_internal_candidate_clients_history")
                         internal_selected_clients_history = self.get_attribute("_internal_selected_clients_history")
@@ -175,14 +178,33 @@ class MetaCSFL:
                         for round_key, round_selected_clients in internal_selected_clients_history.items():
                             if phase_of_interest in round_selected_clients:
                                 selected_clients_history_ids.update({round_key: list(round_selected_clients[phase_of_interest].keys())})
-                        accumulative_client_diversity_score \
-                            = calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_clients_history_ids,
-                                                                                             selected_clients_history_ids,
-                                                                                             num_past_rounds)
-                        if accumulative_client_diversity_score < minimum_score:
-                            new_client_selection_criteria.append(True)
-                            new_client_selection_reasons.append("The accumulative client diversity score over the past {0} rounds has fallen below {1} during the training phase ({2})."
-                                                                .format(num_past_rounds, minimum_score, round(accumulative_client_diversity_score, 2)))
+                        if minimum_score:
+                            accumulative_client_diversity_score \
+                               = calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_clients_history_ids,
+                                                                                                selected_clients_history_ids,
+                                                                                                num_past_rounds)
+                            if accumulative_client_diversity_score < minimum_score:
+                               new_client_selection_criteria.append(True)
+                               new_client_selection_reasons.append("The accumulative client diversity score over the past {0} rounds has fallen below {1} during the training phase ({2})."
+                                                                   .format(num_past_rounds, minimum_score, round(accumulative_client_diversity_score, 2)))
+                        elif maximum_relative_drop:
+                            current_client_diversity_score = \
+                                calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_clients_history_ids,
+                                                                                               selected_clients_history_ids,
+                                                                                               num_past_rounds)
+                            previous_client_diversity_score = \
+                                calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_clients_history_ids,
+                                                                                               selected_clients_history_ids,
+                                                                                               num_past_rounds + 1)
+                            if previous_client_diversity_score > 0:
+                                relative_change = ((current_client_diversity_score - previous_client_diversity_score) / previous_client_diversity_score) * 100
+                                if relative_change < -maximum_relative_drop * 100:
+                                    new_client_selection_criteria.append(True)
+                                    new_client_selection_reasons.append("The client diversity score decreased by more than {0}% over the past {1} rounds ({2}{3}%)."
+                                                                        .format(round(maximum_relative_drop * 100, 2),
+                                                                                num_past_rounds,
+                                                                                "+" if relative_change > 0 else "",
+                                                                                round(relative_change, 2)))
                     case "makespan_percentage_increase_training":
                         # (iii-b) The makespan of the training phase has increased by more than X% in the past Y rounds?
                         phase_of_interest = "train"
@@ -199,6 +221,8 @@ class MetaCSFL:
                             makespan_prev_idx = makespans[idx]
                             makespan_next_idx = makespans[idx + 1]
                             makespan_percentage_change = calculate_percentage_change(makespan_prev_idx, makespan_next_idx)
+                            print(makespan_percentage_change, maximum_increase)
+                            print("makespan_percentage_change > maximum_increase = {0}".format(makespan_percentage_change > maximum_increase))
                             if makespan_percentage_change > maximum_increase:
                                 new_client_selection_criteria.append(True)
                                 new_client_selection_reasons.append("The makespan of the training phase has increased by more than {0}% in the past {1} rounds ({2}{3}%)."
@@ -221,6 +245,8 @@ class MetaCSFL:
                             energy_consumption_next_idx = energy_consumptions[idx + 1]
                             energy_consumption_percentage_change = calculate_percentage_change(energy_consumption_prev_idx,
                                                                                                energy_consumption_next_idx)
+                            print(energy_consumption_percentage_change, maximum_increase)
+                            print("energy_consumption_percentage_change > maximum_increase = {0}".format(energy_consumption_percentage_change > maximum_increase))
                             if energy_consumption_percentage_change > maximum_increase:
                                 new_client_selection_criteria.append(True)
                                 new_client_selection_reasons.append("The energy consumption of the training phase has increased by more than {0}% in the past {1} rounds ({2}{3}%)."
@@ -243,6 +269,8 @@ class MetaCSFL:
                             weighted_mean_accuracy_next_idx = weighted_mean_accuracies[idx + 1]
                             weighted_mean_accuracy_percentage_change = calculate_percentage_change(weighted_mean_accuracy_prev_idx,
                                                                                                    weighted_mean_accuracy_next_idx)
+                            print(weighted_mean_accuracy_percentage_change, - maximum_decrease)
+                            print("weighted_mean_accuracy_percentage_change < - maximum_decrease = {0}".format(weighted_mean_accuracy_percentage_change < - maximum_decrease))
                             if weighted_mean_accuracy_percentage_change < - maximum_decrease:
                                 new_client_selection_criteria.append(True)
                                 new_client_selection_reasons.append("The model accuracy of the testing phase has decreased by more than {0}% in the past {1} rounds ({2}{3}%)."
