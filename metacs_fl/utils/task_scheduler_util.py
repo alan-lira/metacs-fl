@@ -134,7 +134,7 @@ def build_class_capacity_vectors_list(candidate_clients: dict,
             idx_to_cls = {idx: cls for cls, idx in class_index_map.items()}
             sorted_classes = [idx_to_cls[idx] for idx in sorted(idx_to_cls.keys())]
             for _, client_map in candidate_clients.items():
-                client_dp_histogram = client_map["client_dp_histogram"]
+                client_dp_histogram = client_map["client_dp_histogram_{0}".format(current_phase)]
                 gamma = []
                 for cls in sorted_classes:
                     idx = class_index_map[cls]

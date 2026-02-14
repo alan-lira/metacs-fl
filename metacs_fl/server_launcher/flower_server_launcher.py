@@ -343,6 +343,7 @@ class FlowerServerLauncher:
         fl_settings = self.get_attribute("_fl_settings")
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         output_settings = self.get_attribute("_output_settings")
+        root_output_folder = self.get_attribute("_root_output_folder")
         fit_config = self.get_attribute("_fit_config")
         evaluate_config = self.get_attribute("_evaluate_config")
         initial_parameters = self.get_attribute("_initial_parameters")
@@ -357,6 +358,7 @@ class FlowerServerLauncher:
                                                fit_config=fit_config,
                                                evaluate_config=evaluate_config,
                                                output_settings=output_settings,
+                                               root_output_folder=root_output_folder,
                                                initial_parameters=initial_parameters,
                                                logger=logger)
         # Return the server strategy.

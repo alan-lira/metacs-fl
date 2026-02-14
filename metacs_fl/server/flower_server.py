@@ -2,7 +2,7 @@ from collections import defaultdict
 from concurrent.futures import as_completed, ThreadPoolExecutor, Future
 from copy import deepcopy
 from logging import Logger
-from numpy import array, inf, sum as numpy_sum, mean, clip, float32
+from numpy import array, inf, sum as numpy_sum, mean, clip, int32, ndarray
 from numpy.random import default_rng
 from os import cpu_count
 from pathlib import Path
@@ -40,6 +40,7 @@ class FlowerServer(Strategy):
                  fit_config: dict,
                  evaluate_config: dict,
                  output_settings: dict,
+                 root_output_folder: Path = None,
                  initial_parameters: Optional[NDArrays],
                  logger: Logger) -> None:
         # Initialize the attributes.
@@ -50,6 +51,7 @@ class FlowerServer(Strategy):
         self._fit_config = fit_config
         self._evaluate_config = evaluate_config
         self._output_settings = output_settings
+        self._root_output_folder = root_output_folder
         self._initial_parameters = initial_parameters
         self._global_parameters = initial_parameters
         self._logger = logger
@@ -449,6 +451,43 @@ class FlowerServer(Strategy):
             self._profiling_futures.add(profiling_future)
             profiling_future.add_done_callback(self._done_profiling_callback)
 
+    def _write_non_private_client_data_distribution_file(self,
+                                                         current_round: int,
+                                                         client_id: str,
+                                                         client_tasks_per_class_train: dict,
+                                                         client_tasks_per_class_test: dict) -> None:
+        root_output_folder = self._root_output_folder
+        client_data_distribution_file = (Path(root_output_folder)
+                                         .joinpath("data_distribution/client_{0}.csv".format(client_id)).absolute())
+        client_data_distribution_file.parent.mkdir(parents=True, exist_ok=True)
+        with client_data_distribution_file.open(mode="w", encoding="utf-8") as of:
+            header_line = "comm_round,data_privacy_approach,split,class,count\n"
+            of.write(header_line)
+            for split, dist in [("train", client_tasks_per_class_train), ("test", client_tasks_per_class_test)]:
+                for cls, count in dist.items():
+                    data_line = "{0},Non_Private,{1},{2},{3}\n".format(current_round, split, cls, count)
+                    of.write(data_line)
+
+    def _write_dp_client_data_distribution_file(self,
+                                                current_round: int,
+                                                client_id: str,
+                                                client_dp_histogram_train: ndarray,
+                                                client_dp_histogram_test: ndarray,
+                                                class_index_map: dict) -> None:
+        root_output_folder = self._root_output_folder
+        client_data_distribution_file = (Path(root_output_folder)
+                                         .joinpath("data_distribution/client_{0}.csv".format(client_id)).absolute())
+        client_data_distribution_file.parent.mkdir(parents=True, exist_ok=True)
+        inverse_map = {v: k for k, v in class_index_map.items()}
+        with client_data_distribution_file.open("w", encoding="utf-8") as of:
+            header_line = "comm_round,data_privacy_approach,split,class_index,class,noisy_count\n"
+            of.write(header_line)
+            for split, histogram in [("train", client_dp_histogram_train), ("test", client_dp_histogram_test)]:
+                for idx, val in enumerate(histogram):
+                    cls = inverse_map.get(idx, "UNKNOWN")
+                    data_line = "{0},Differentially_Private,{1},{2},{3},{4}\n".format(current_round, split, idx, cls, val)
+                    of.write(data_line)
+
     def _get_available_clients_data_distribution(self,
                                                  current_round: int,
                                                  available_clients: dict) -> None:
@@ -489,6 +528,10 @@ class FlowerServer(Strategy):
                             self._clients_histograms[client_proxy] = {"client_id": client_id,
                                                                       "client_tasks_per_class_train": client_tasks_per_class_train,
                                                                       "client_tasks_per_class_test": client_tasks_per_class_test}
+                            self._write_non_private_client_data_distribution_file(current_round,
+                                                                                  client_id,
+                                                                                  client_tasks_per_class_train,
+                                                                                  client_tasks_per_class_test)
                     case "Differentially_Private":
                         # Query presence and local classes claims, if not cached.
                         true_presence_probability = data_privacy_approach_settings["true_presence_probability"]
@@ -533,18 +576,29 @@ class FlowerServer(Strategy):
                 class_index_map_str = "|".join("{0}={1}".format(k, v) for k, v in class_index_map.items())
                 for _, client_proxy in available_clients.items():
                     client_info_cached = self._clients_histograms[client_proxy]
-                    if "client_dp_histogram" not in client_info_cached:
-                        dp_histogram_property = "client_dp_histogram"
-                        gpi_dict = {dp_histogram_property: "?",
+                    if "client_dp_histogram_train" not in client_info_cached and "client_dp_histogram_test" not in client_info_cached:
+                        dp_histogram_train_property = "client_dp_histogram_train"
+                        dp_histogram_test_property = "client_dp_histogram_test"
+                        gpi_dict = {dp_histogram_train_property: "?",
+                                    dp_histogram_test_property: "?",
                                     "num_global_classes": num_global_classes,
                                     "class_index_map": class_index_map_str,
                                     "epsilon": epsilon,
                                     "comm_round": current_round}
                         gpi = GetPropertiesIns(gpi_dict)
                         client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
-                        client_dp_histogram_str = client_reply.properties[dp_histogram_property]
-                        client_dp_histogram = array(list(map(float, client_dp_histogram_str.split("|"))), dtype=float32)
-                        self._clients_histograms[client_proxy].update({"client_dp_histogram": client_dp_histogram})
+                        client_dp_histogram_train = array(list(map(int, client_reply.properties[dp_histogram_train_property].split("|"))),
+                                                          dtype=int32)
+                        client_dp_histogram_test = array(list(map(int, client_reply.properties[dp_histogram_test_property].split("|"))),
+                                                         dtype=int32)
+                        self._clients_histograms[client_proxy].update({"client_dp_histogram_train": client_dp_histogram_train,
+                                                                       "client_dp_histogram_test": client_dp_histogram_test})
+                        client_id = self._clients_histograms[client_proxy]["client_id"]
+                        self._write_dp_client_data_distribution_file(current_round,
+                                                                     client_id,
+                                                                     client_dp_histogram_train,
+                                                                     client_dp_histogram_test,
+                                                                     class_index_map)
 
     def _generate_available_clients_map(self,
                                         current_round: int,
@@ -642,8 +696,10 @@ class FlowerServer(Strategy):
                                     if "client_tasks_per_class_test" in client_info:
                                         client_map.update({"client_tasks_per_class_test": client_info["client_tasks_per_class_test"]})
                                 case "Differentially_Private":
-                                    if "client_dp_histogram" in client_info:
-                                        client_map.update({"client_dp_histogram": client_info["client_dp_histogram"]})
+                                    if "client_dp_histogram_train" in client_info:
+                                        client_map.update({"client_dp_histogram_train": client_info["client_dp_histogram_train"]})
+                                    if "client_dp_histogram_test" in client_info:
+                                        client_map.update({"client_dp_histogram_test": client_info["client_dp_histogram_test"]})
                                     if "class_index_map" in self._clients_histograms:
                                         client_map.update({"class_index_map": self._clients_histograms["class_index_map"]})
                     available_clients_map.update({client_id_str: client_map})

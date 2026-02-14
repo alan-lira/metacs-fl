@@ -702,7 +702,7 @@ class FlowerClient(Client):
             dp_presence = self._dp_presence_randomized_response(local_classes, true_presence_probability)
             config.update({"client_dp_presence": "|".join(map(str, dp_presence.tolist())),
                            "client_local_classes_claimed": "|".join(map(str, local_classes.tolist()))})
-        if "client_dp_histogram" in config:
+        if "client_dp_histogram_train" in config:
             epsilon = config["epsilon"]
             y_train = self.get_attribute("_y_train")
             num_global_classes = int(config["num_global_classes"])
@@ -711,7 +711,17 @@ class FlowerClient(Client):
                                for k, v in (pair.split("=") for pair in class_index_map_str.split("|") if pair)}
             y_local_mapped = array([class_index_map[y] for y in y_train if y in class_index_map])
             dp_hist = self._dp_noisy_histogram_from_counts(y_local_mapped, num_global_classes, epsilon)
-            config.update({"client_dp_histogram": "|".join(["{0}".format(float(x)) for x in dp_hist])})
+            config.update({"client_dp_histogram_train": "|".join(["{0}".format(int(x)) for x in dp_hist])})
+        if "client_dp_histogram_test" in config:
+            epsilon = config["epsilon"]
+            y_test = self.get_attribute("_y_test")
+            num_global_classes = int(config["num_global_classes"])
+            class_index_map_str = config["class_index_map"]
+            class_index_map = {int(k): int(v)
+                               for k, v in (pair.split("=") for pair in class_index_map_str.split("|") if pair)}
+            y_local_mapped = array([class_index_map[y] for y in y_test if y in class_index_map])
+            dp_hist = self._dp_noisy_histogram_from_counts(y_local_mapped, num_global_classes, epsilon)
+            config.update({"client_dp_histogram_test": "|".join(["{0}".format(int(x)) for x in dp_hist])})
         if "client_id" in config:
             client_id = self.get_attribute("_client_id")
             config.update({"client_id": client_id})
