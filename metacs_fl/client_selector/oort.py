@@ -101,7 +101,7 @@ class Oort:
                                 clients_profiles: dict) -> dict:
         time_costs = []
         for client_id, client_map in candidate_clients.items():
-            task_assignment_capacities_i = client_map[f"client_task_assignment_capacities_{current_phase}"]
+            task_assignment_capacities_i = client_map["client_task_assignment_capacities_{0}".format(current_phase)]
             bw_down = client_map["client_current_download_bandwidth_in_bytes_per_second"]
             bw_up = client_map["client_current_upload_bandwidth_in_bytes_per_second"]
             latency = client_map["client_current_latency_in_milliseconds"]
@@ -113,7 +113,12 @@ class Oort:
                             latest_metrics = d[client_id]
                             break
             if not latest_metrics:
-                latest_metrics = clients_profiles[client_id][current_phase]
+                profile_phase_dict = clients_profiles[client_id][current_phase]
+                # profile_phase_dict: {num_samples: metrics}
+                # Pick the closest profiled sample size to the max capacity.
+                max_ac = max(task_assignment_capacities_i)
+                closest_x = min(profile_phase_dict.keys(), key=lambda x: abs(int(x) - max_ac))
+                latest_metrics = profile_phase_dict[closest_x]
             m = deepcopy(latest_metrics)
             m["bw_down_i"] = bw_down
             m["bw_up_i"] = bw_up
@@ -123,7 +128,7 @@ class Oort:
             u_time, _ = calculate_upload_time(m, current_phase)
             time_costs_i = []
             for ac in task_assignment_capacities_i:
-                m[f"ds_{current_phase}_i"] = ac
+                m["ds_{0}_i".format(current_phase)] = ac
                 comp_time = calculate_computation_time(m, current_phase)
                 time_costs_i.append(d_time + comp_time + u_time)
             time_costs.append(time_costs_i)

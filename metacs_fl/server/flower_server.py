@@ -326,18 +326,20 @@ class FlowerServer(Strategy):
         samples_per_task = server_strategy_settings["samples_per_task"]
         num_tasks_profile_training = server_strategy_settings["num_tasks_profile_training"]
         num_tasks_profile_testing = server_strategy_settings["num_tasks_profile_testing"]
-        num_samples_profile_training = num_tasks_profile_training * samples_per_task
-        num_samples_profile_testing = num_tasks_profile_testing * samples_per_task
+        num_samples_profile_training_list = [x * samples_per_task for x in num_tasks_profile_training]
+        num_samples_profile_testing_list = [x * samples_per_task for x in num_tasks_profile_testing]
+        num_samples_profile_training_list_str = "|".join(str(x) for x in num_samples_profile_training_list)
+        num_samples_profile_testing_list_str = "|".join(str(x) for x in num_samples_profile_testing_list)
         # Log a 'starting profiling for client' message.
         message = "[Server {0} | Round {1}] Starting profiling for client {2} ({3} training | {4} testing samples)..." \
-                   .format(server_id, current_round, client_id, num_samples_profile_training, num_samples_profile_testing)
+                   .format(server_id, current_round, client_id, num_samples_profile_training_list, num_samples_profile_testing_list)
         log_message(logger, message, "INFO")
         # Request profiling for the client.
         gpi_dict = {"client_id": "?", "profile_performance": "?", "is_profiling_round": True, "comm_round": current_round}
         fit_config = self._update_config(0, "train")
         evaluate_config = self._update_config(0, "test")
-        fit_config.update({"is_profiling_round": True, "num_training_examples_to_use": num_samples_profile_training})
-        evaluate_config.update({"is_profiling_round": True, "num_testing_examples_to_use": num_samples_profile_testing})
+        fit_config.update({"is_profiling_round": True, "num_training_examples_to_use_list": num_samples_profile_training_list_str})
+        evaluate_config.update({"is_profiling_round": True, "num_testing_examples_to_use_list": num_samples_profile_testing_list_str})
         for k, v in fit_config.items():
             gpi_dict["fit_config_{0}".format(k)] = v
         for k, v in evaluate_config.items():
@@ -349,11 +351,15 @@ class FlowerServer(Strategy):
         profile_test = {}
         for key, value in client_reply.properties.items():
             if key.startswith("profile_train_"):
-                metric = key[len("profile_train_"):]
-                profile_train[metric] = value
+                # profile_train_<n_samples>_<metric>
+                _, _, n_samples, metric = key.split("_", 3)
+                profile_train.setdefault(n_samples, {})[metric] = value
             elif key.startswith("profile_test_"):
-                metric = key[len("profile_test_"):]
-                profile_test[metric] = value
+                # profile_test_<n_samples>_<metric>
+                _, _, n_samples, metric = key.split("_", 3)
+                profile_test.setdefault(n_samples, {})[metric] = value
+        profile_train = {int(k): profile_train[k] for k in sorted(profile_train.keys(), key=int)}
+        profile_test = {int(k): profile_test[k] for k in sorted(profile_test.keys(), key=int)}
         with self._profile_lock:
             client_profile_dict = {"profiled_at_round": current_round, "train": profile_train, "test": profile_test}
             self._clients_profiles["client_{0}".format(client_id)] = client_profile_dict

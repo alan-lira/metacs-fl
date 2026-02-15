@@ -311,7 +311,12 @@ class MetaCSFL:
                             latest_phase_metrics_i = client_dict[client_id]
                             break
             if not latest_phase_metrics_i:
-                latest_phase_metrics_i = clients_profiles[client_id][current_phase]
+                profile_phase_dict = clients_profiles[client_id][current_phase]
+                # profile_phase_dict: {num_samples: metrics}
+                # Pick the closest profiled sample size to the max capacity.
+                max_ac = max(task_assignment_capacities_i)
+                closest_x = min(profile_phase_dict.keys(), key=lambda x: abs(int(x) - max_ac))
+                latest_phase_metrics_i = profile_phase_dict[closest_x]
             latest_phase_metrics_i_copy = deepcopy(latest_phase_metrics_i)
             latest_phase_metrics_i_copy["bw_down_i"] = current_download_bandwidth_in_bytes_per_second_i
             latest_phase_metrics_i_copy["bw_up_i"] = current_upload_bandwidth_in_bytes_per_second_i

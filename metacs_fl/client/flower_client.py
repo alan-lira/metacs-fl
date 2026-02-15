@@ -847,24 +847,36 @@ class FlowerClient(Client):
             # Replace 'None' values to None (necessary workaround on Flower).
             fit_config = {k: (None if v == "None" else v) for k, v in fit_config.items()}
             evaluate_config = {k: (None if v == "None" else v) for k, v in evaluate_config.items()}
-            # Load the local model from the file.
-            model_file = self.get_attribute("_model_file")
-            model = load_model_from_file(model_file)
-            # Get the initial model parameters.
-            local_model_parameters = model.get_weights()
-            # Train.
-            fit_ins = FitIns(ndarrays_to_parameters(local_model_parameters), fit_config)
-            fit_res = self.fit(fit_ins)
-            # Test.
-            evaluate_ins = EvaluateIns(ndarrays_to_parameters(local_model_parameters), evaluate_config)
-            evaluate_res = self.evaluate(evaluate_ins)
-            # Get the performance metrics.
-            profile_train = fit_res.metrics
-            profile_test = evaluate_res.metrics
-            for k, v in profile_train.items():
-                config["profile_train_{0}".format(k)] = v
-            for k, v in profile_test.items():
-                config["profile_test_{0}".format(k)] = v
+            # Get the lists of training and testing samples to be used during the profile.
+            train_samples_list = [int(x) for x in fit_config["num_training_examples_to_use_list"].split("|")]
+            test_samples_list = [int(x) for x in evaluate_config["num_testing_examples_to_use_list"].split("|")]
+            profile_train = {}
+            profile_test = {}
+            for n_train, n_test in zip(train_samples_list, test_samples_list):
+                fit_config_run = dict(fit_config)
+                evaluate_config_run = dict(evaluate_config)
+                fit_config_run["num_training_examples_to_use"] = n_train
+                evaluate_config_run["num_testing_examples_to_use"] = n_test
+                # Load the local model from the file.
+                model_file = self.get_attribute("_model_file")
+                model = load_model_from_file(model_file)
+                # Get the initial model parameters.
+                local_model_parameters = model.get_weights()
+                # Train.
+                fit_ins = FitIns(ndarrays_to_parameters(local_model_parameters), fit_config_run)
+                fit_res = self.fit(fit_ins)
+                # Test.
+                evaluate_ins = EvaluateIns(ndarrays_to_parameters(local_model_parameters), evaluate_config_run)
+                evaluate_res = self.evaluate(evaluate_ins)
+                # Store metrics keyed by sample size.
+                profile_train[str(n_train)] = fit_res.metrics
+                profile_test[str(n_test)] = evaluate_res.metrics
+            for n_samples, metrics in profile_train.items():
+                for k, v in metrics.items():
+                    config["profile_train_{0}_{1}".format(n_samples, k)] = v
+            for n_samples, metrics in profile_test.items():
+                for k, v in metrics.items():
+                    config["profile_test_{0}_{1}".format(n_samples, k)] = v
         # Simulate if the client is unavailable for the current round (Bernoulli trial).
         # The client will be available if the current round is for profiling purposes.
         is_profiling_round = config.get("is_profiling_round", False)

@@ -94,16 +94,18 @@ class SBACPAD2024:
                                     candidate_clients_costs_hist[client_id].update({x_i: client_costs})
         for client_id, _ in candidate_clients.items():
             if client_id not in candidate_clients_costs_hist:
-                latest_phase_metrics_i = clients_profiles[client_id][current_phase]
-                x_i = latest_phase_metrics_i["num_examples"]
-                time_i = 0
-                energy_i = 0
-                if "{0}ing_time_in_seconds".format(current_phase) in latest_phase_metrics_i:
-                    time_i = latest_phase_metrics_i["{0}ing_time_in_seconds".format(current_phase)]
-                if "{0}ing_energy_in_joules".format(current_phase) in latest_phase_metrics_i:
-                    energy_i = latest_phase_metrics_i["{0}ing_energy_in_joules".format(current_phase)]
-                client_costs = {"time_costs": [time_i], "energy_costs": [energy_i]}
-                candidate_clients_costs_hist[client_id] = {x_i: client_costs}
+                candidate_clients_costs_hist[client_id] = {}
+                profile_phase_dict = clients_profiles[client_id][current_phase]
+                # profile_phase_dict: {num_samples: {metric: value}}
+                for x_i, metrics in profile_phase_dict.items():
+                    if x_i not in candidate_clients_costs_hist[client_id]:
+                        time_i = 0
+                        energy_i = 0
+                        if "{0}ing_time_in_seconds".format(current_phase) in metrics:
+                            time_i = metrics["{0}ing_time_in_seconds".format(current_phase)]
+                        if "{0}ing_energy_in_joules".format(current_phase) in metrics:
+                            energy_i = metrics["{0}ing_energy_in_joules".format(current_phase)]
+                        candidate_clients_costs_hist[client_id][x_i] = {"time_costs": [time_i], "energy_costs": [energy_i]}
         # Calculate the averages of the historical costs per number of tasks per client.
         for client_id, _ in candidate_clients_costs_hist.items():
             client_costs_dict = candidate_clients_costs_hist[client_id]
