@@ -649,19 +649,19 @@ class MetaCSFL:
             # Dynamically adjust the learning rate per client to improve training stability and fairness:
             # - Clients with fewer samples receive a higher learning rate to accelerate learning from limited data;
             # - Clients with more samples receive a lower learning rate to ensure more stable updates over more iterations.
-            dynamically_adjust_learning_rate_training = client_selection_settings["dynamically_adjust_learning_rate_training"]
+            dynamically_adjust_learning_rate_training = client_selection_settings.get("dynamically_adjust_learning_rate_training", False)
             if dynamically_adjust_learning_rate_training:
                 learning_rate_list = adjust_learning_rates(X_best, base_learning_rate)
             # Dynamically adjust the batch size per client to optimize training efficiency and convergence:
             # - Clients with fewer samples use smaller batch sizes to increase gradient update frequency and improve generalization;
             # - Clients with more samples use larger batch sizes to better utilize data and improve computational efficiency.
-            dynamically_adjust_batch_size_training = client_selection_settings["dynamically_adjust_batch_size_training"]
+            dynamically_adjust_batch_size_training = client_selection_settings.get("dynamically_adjust_batch_size_training", False)
             if dynamically_adjust_batch_size_training:
                 batch_size_list = adjust_batch_sizes(X_best, base_batch_size)
             # Dynamically adjust the number of local epochs per client to balance contribution:
             # - Clients with fewer samples train longer to increase their influence;
             # - Clients with more samples train for fewer epochs to prevent over-dominating the global model.
-            dynamically_adjust_num_epochs_training = client_selection_settings["dynamically_adjust_num_epochs_training"]
+            dynamically_adjust_num_epochs_training = client_selection_settings.get("dynamically_adjust_num_epochs_training", False)
             if dynamically_adjust_num_epochs_training:
                 num_epochs_list = adjust_num_epochs(X_best, base_num_epochs)
         # Initialize the set of selected clients.
