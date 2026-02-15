@@ -1490,6 +1490,10 @@ class FlowerServer(Strategy):
             # Get the privacy approach.
             data_privacy_approach = server_strategy_settings["data_privacy_approach"]["name"]
             kwargs.update({"data_privacy_approach": data_privacy_approach})
+        if "use_async" in server_strategy_settings:
+            # Whether asynchronous selection is enabled or not.
+            use_async = server_strategy_settings["use_async"]
+            kwargs.update({"use_async": use_async})
         # Run the client selection procedure.
         selected_clients = client_selector.run_client_selection_procedure(**kwargs)
         if isinstance(selected_clients, list):
@@ -1689,6 +1693,10 @@ class FlowerServer(Strategy):
             # Get the privacy approach.
             data_privacy_approach = server_strategy_settings["data_privacy_approach"]["name"]
             kwargs.update({"data_privacy_approach": data_privacy_approach})
+        if "use_async" in server_strategy_settings:
+            # Whether asynchronous selection is enabled or not.
+            use_async = server_strategy_settings["use_async"]
+            kwargs.update({"use_async": use_async})
         # Run the client selection procedure.
         selected_clients = client_selector.run_client_selection_procedure(**kwargs)
         if isinstance(selected_clients, list):

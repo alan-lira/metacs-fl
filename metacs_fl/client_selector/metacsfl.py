@@ -221,8 +221,6 @@ class MetaCSFL:
                             makespan_prev_idx = makespans[idx]
                             makespan_next_idx = makespans[idx + 1]
                             makespan_percentage_change = calculate_percentage_change(makespan_prev_idx, makespan_next_idx)
-                            print(makespan_percentage_change, maximum_increase)
-                            print("makespan_percentage_change > maximum_increase = {0}".format(makespan_percentage_change > maximum_increase))
                             if makespan_percentage_change > maximum_increase:
                                 new_client_selection_criteria.append(True)
                                 new_client_selection_reasons.append("The makespan of the training phase has increased by more than {0}% in the past {1} rounds ({2}{3}%)."
@@ -245,8 +243,6 @@ class MetaCSFL:
                             energy_consumption_next_idx = energy_consumptions[idx + 1]
                             energy_consumption_percentage_change = calculate_percentage_change(energy_consumption_prev_idx,
                                                                                                energy_consumption_next_idx)
-                            print(energy_consumption_percentage_change, maximum_increase)
-                            print("energy_consumption_percentage_change > maximum_increase = {0}".format(energy_consumption_percentage_change > maximum_increase))
                             if energy_consumption_percentage_change > maximum_increase:
                                 new_client_selection_criteria.append(True)
                                 new_client_selection_reasons.append("The energy consumption of the training phase has increased by more than {0}% in the past {1} rounds ({2}{3}%)."
@@ -269,8 +265,6 @@ class MetaCSFL:
                             weighted_mean_accuracy_next_idx = weighted_mean_accuracies[idx + 1]
                             weighted_mean_accuracy_percentage_change = calculate_percentage_change(weighted_mean_accuracy_prev_idx,
                                                                                                    weighted_mean_accuracy_next_idx)
-                            print(weighted_mean_accuracy_percentage_change, - maximum_decrease)
-                            print("weighted_mean_accuracy_percentage_change < - maximum_decrease = {0}".format(weighted_mean_accuracy_percentage_change < - maximum_decrease))
                             if weighted_mean_accuracy_percentage_change < - maximum_decrease:
                                 new_client_selection_criteria.append(True)
                                 new_client_selection_reasons.append("The model accuracy of the testing phase has decreased by more than {0}% in the past {1} rounds ({2}{3}%)."
@@ -707,9 +701,9 @@ class MetaCSFL:
         apply_clients_reliability_filter = kwargs.get("apply_clients_reliability_filter", False)
         num_tasks = kwargs["num_tasks"]
         samples_per_task = kwargs["samples_per_task"]
-        base_learning_rate = kwargs["base_learning_rate"] if "base_learning_rate" in kwargs else 0
-        base_batch_size = kwargs["base_batch_size"]
-        base_num_epochs = kwargs["base_num_epochs"] if "base_num_epochs" in kwargs else 0
+        base_learning_rate = kwargs.get("base_learning_rate", 0.001)
+        base_batch_size = kwargs.get("base_batch_size", 32)
+        base_num_epochs = kwargs.get("base_num_epochs", 1)
         selected_clients_history = kwargs["selected_clients_history"]
         selected_clients_metrics_history = kwargs["selected_clients_metrics_history"]
         clients_profiles = kwargs["clients_profiles"]

@@ -452,6 +452,22 @@ def parse_config_section(config_file: Path,
     return config_section_parsed
 
 
+def parse_config_file(config_file: Path) -> dict:
+    """
+    Parses all sections of a config file.
+
+    Returns:
+        dict: {section_name: {key: parsed_value}}
+    """
+    cp = ConfigParser()
+    cp.optionxform = str
+    cp.read(config_file, encoding="utf-8")
+    config_file_parsed = {}
+    for section in cp.sections():
+        config_file_parsed[section] = parse_config_section(config_file, section)
+    return config_file_parsed
+
+
 def get_option_value(config_file: Path,
                      section_name: str,
                      option_name: str) -> str:
