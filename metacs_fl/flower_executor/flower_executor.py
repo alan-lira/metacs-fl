@@ -605,7 +605,7 @@ class FlowerExecutor:
             # Determine the set of late-join clients.
             late_join_clients_percentage = execution_settings.get("percentage_late_join_clients", 0.0)
             late_join_clients_performance_profile = execution_settings.get("performance_profile_late_join_clients", "random")
-            late_join_clients_round_of_first_appearance = execution_settings["round_of_first_appearance_of_late_join_clients"]
+            late_join_clients_round_of_first_appearance = execution_settings.get("round_of_first_appearance_of_late_join_clients", 1)
             late_join_clients = self._determine_late_join_clients(num_clients,
                                                                   late_join_clients_percentage,
                                                                   late_join_clients_performance_profile)
