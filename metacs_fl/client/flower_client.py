@@ -709,7 +709,7 @@ class FlowerClient(Client):
             class_index_map_str = config["class_index_map"]
             class_index_map = {int(k): int(v)
                                for k, v in (pair.split("=") for pair in class_index_map_str.split("|") if pair)}
-            y_local_mapped = array([class_index_map[y] for y in y_train if y in class_index_map])
+            y_local_mapped = array([class_index_map[int(y)] for y in y_train if int(y) in class_index_map])
             dp_hist = self._dp_noisy_histogram_from_counts(y_local_mapped, num_global_classes, epsilon)
             config.update({"client_dp_histogram_train": "|".join(["{0}".format(int(x)) for x in dp_hist])})
         if "client_dp_histogram_test" in config:
@@ -719,7 +719,7 @@ class FlowerClient(Client):
             class_index_map_str = config["class_index_map"]
             class_index_map = {int(k): int(v)
                                for k, v in (pair.split("=") for pair in class_index_map_str.split("|") if pair)}
-            y_local_mapped = array([class_index_map[y] for y in y_test if y in class_index_map])
+            y_local_mapped = array([class_index_map[int(y)] for y in y_test if int(y) in class_index_map])
             dp_hist = self._dp_noisy_histogram_from_counts(y_local_mapped, num_global_classes, epsilon)
             config.update({"client_dp_histogram_test": "|".join(["{0}".format(int(x)) for x in dp_hist])})
         if "client_id" in config:

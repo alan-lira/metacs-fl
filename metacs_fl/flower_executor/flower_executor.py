@@ -3,6 +3,8 @@ from multiprocessing import Barrier, Process
 from numpy import array, exp, median, percentile, zeros
 from numpy.random import default_rng, Generator
 from pathlib import Path
+from socket import create_connection
+from sys import stdout as sys_stdout, stderr as sys_stderr
 from time import perf_counter, sleep
 from threading import BrokenBarrierError
 from traceback import format_exc
@@ -323,25 +325,46 @@ class FlowerExecutor:
 
     def _launch_flower_server(self,
                               server_id: int) -> FlowerServerLauncher:
-        # Get the necessary attributes.
-        current_execution = self.get_attribute("_current_execution")
-        # Get the execution name and settings.
-        execution_name = next(iter(current_execution))
-        execution_settings = current_execution[execution_name]
-        # Get the base server config file.
-        base_server_config_file = Path(execution_settings["base_server_config_file"])
-        # Load the personalized_settings dictionary for the server.
-        server_personalized_settings = self._get_personalized_settings_for_server(base_server_config_file,
-                                                                                  current_execution)
-        # Instantiate the flower server launcher.
-        cpu_cores_available = get_cpu_cores_available()
-        fsl = FlowerServerLauncher(server_id,
-                                   base_server_config_file,
-                                   server_personalized_settings,
-                                   server_acquired_cpu_cores=cpu_cores_available,
-                                   instantiate_server=True)
-        # Return the flower server launcher.
-        return fsl
+        try:
+            # Get the necessary attributes.
+            current_execution = self.get_attribute("_current_execution")
+            # Get the execution name and settings.
+            execution_name = next(iter(current_execution))
+            execution_settings = current_execution[execution_name]
+            # Get the base server config file.
+            base_server_config_file = Path(execution_settings["base_server_config_file"])
+            # Load the personalized_settings dictionary for the server.
+            server_personalized_settings = self._get_personalized_settings_for_server(base_server_config_file,
+                                                                                      current_execution)
+            # Instantiate the flower server launcher.
+            cpu_cores_available = get_cpu_cores_available()
+            fsl = FlowerServerLauncher(server_id,
+                                       base_server_config_file,
+                                       server_personalized_settings,
+                                       server_acquired_cpu_cores=cpu_cores_available,
+                                       instantiate_server=True)
+            # Return the flower server launcher.
+            return fsl
+        except Exception as _:
+            print(format_exc())
+            sys_stdout.flush()
+            sys_stderr.flush()
+            raise
+
+    @staticmethod
+    def _wait_for_server(server_id: int,
+                         server_ip: str,
+                         server_port: int,
+                         server_timeout: int = 60) -> None:
+        start = perf_counter()
+        while perf_counter() - start < server_timeout:
+            try:
+                with create_connection((server_ip, server_port), timeout=1):
+                    print("Server '{0}' is reachable on {1}:{2}!".format(server_id, server_ip, server_port))
+                    return
+            except OSError as _:
+                sleep(1)
+        raise RuntimeError("Server '{0}' did not become ready in time!".format(server_id))
 
     @staticmethod
     def _verify_dataset_loaded(fcl: FlowerClientLauncher,
@@ -596,8 +619,6 @@ class FlowerExecutor:
                 self._write_devices_scores_to_file(execution_output_folder)
             # Print the start of the execution.
             print("\nStarting the execution '{0}'...".format(execution_name))
-            # Get the process wait time (after launching).
-            process_wait_time = execution_settings.get("process_wait_time", 5)
             # Start the execution timer.
             start = perf_counter()
             # Get the number of clients.
@@ -621,13 +642,25 @@ class FlowerExecutor:
             dataset_loaded_barrier = Barrier(num_clients + 1)
             # Start the Flower server in a separate process.
             server_id = execution_settings["server_id"]
+            print("Launching Server '{0}'...".format(server_id))
             server_process = Process(target=lambda: self._launch_flower_server(server_id).launch_server())
             server_process.start()
             # Wait for the server to start.
-            sleep(process_wait_time)
-            print("Launched the Server '{0}'...".format(server_id))
+            server_ip = execution_settings.get("server_ip", "127.0.0.1")
+            server_port = execution_settings.get("server_port", 8080)
+            server_timeout = execution_settings.get("server_timeout", 60)
+            try:
+                self._wait_for_server(server_id, server_ip, server_port, server_timeout)
+            except RuntimeError as _:
+                print("Server '{0}' failed to start!".format(server_id))
+                server_process.terminate()
+                server_process.join()
+                return
+            print("Server '{0}' successfully started!".format(server_id))
             # Start multiple Flower clients in separate processes.
             client_processes = []
+            # Get the process wait time (after launching).
+            process_wait_time = execution_settings.get("process_wait_time", 5)
             for idx in range(num_clients):
                 p = Process(target=self._launch_flower_client_safely, args=(idx, dataset_loaded_barrier))
                 p.start()

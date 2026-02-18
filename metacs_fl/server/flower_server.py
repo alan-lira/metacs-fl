@@ -556,7 +556,7 @@ class FlowerServer(Strategy):
                             client_dp_presence_str = client_reply.properties[client_dp_presence_property]
                             client_dp_presence = list(map(int, client_dp_presence_str.split("|")))
                             client_local_classes_claimed_str = client_reply.properties[client_local_classes_claimed_property]
-                            client_local_classes_claimed = client_local_classes_claimed_str.split("|")
+                            client_local_classes_claimed = list(map(int, client_local_classes_claimed_str.split("|")))
                             self._clients_histograms[client_proxy] = {"client_id": client_id,
                                                                       "client_dp_presence": client_dp_presence,
                                                                       "client_local_classes_claimed": client_local_classes_claimed}
@@ -575,7 +575,7 @@ class FlowerServer(Strategy):
                              for cls, bits in global_presence.items()}
                 global_classes = [cls for cls, est in estimates.items() if est > presence_cutoff]
                 num_global_classes = len(global_classes)
-                class_index_map = {lbl: idx for idx, lbl in enumerate(global_classes)}
+                class_index_map = {int(lbl): idx for idx, lbl in enumerate(global_classes)}
                 # Set the class-index mapping.
                 self._clients_histograms["class_index_map"] = class_index_map
                 # Query DP histograms, if not cached.

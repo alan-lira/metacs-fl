@@ -244,7 +244,7 @@ class FlowerServerLauncher:
                 data_privacy_approach_settings["name"] = data_privacy_approach
                 server_strategy_implementation_settings["data_privacy_approach"] = data_privacy_approach_settings
                 server_strategy_settings.update(server_strategy_implementation_settings)
-                monitor_clients_reliability_score = server_strategy_settings["monitor_clients_reliability_score"]
+                monitor_clients_reliability_score = server_strategy_settings.get("monitor_clients_reliability_score", False)
                 if monitor_clients_reliability_score:
                     clients_reliability_score_section = "Clients Reliability Score Settings"
                     clients_reliability_score_settings = parse_config_section(config_file, clients_reliability_score_section)
