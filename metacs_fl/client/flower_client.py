@@ -18,7 +18,7 @@ from logging import Logger
 from multiprocessing import Process, Queue, set_start_method
 from numpy import argmax, array, asarray, clip, float32, inf, int8, int32, linspace, mean, minimum, ndarray, ones, \
     sum, unique, where, zeros
-from numpy.random import default_rng, laplace, rand
+from numpy.random import Generator, default_rng
 from os import getpid
 from pandas import read_csv
 from pathlib import Path
@@ -643,7 +643,8 @@ class FlowerClient(Client):
 
     @staticmethod
     def _dp_presence_randomized_response(local_classes: ndarray,
-                                         true_presence_probability: float) -> ndarray:
+                                         true_presence_probability: float,
+                                         rng: Generator) -> ndarray:
         n = len(local_classes)
         if n == 0:
             return zeros(0, dtype=int8)
@@ -652,15 +653,16 @@ class FlowerClient(Client):
         # Randomized response:
         # - With probability p, report true bit (1);
         # - With probability (1-p), report random bit (0/1 with prob 0.5).
-        rnd = rand(n)
-        random_bits = (rand(n) < 0.5).astype(int8)
-        reported = where(rnd < true_presence_probability, true_presence, random_bits)
+        rand_vals = rng.random(n)
+        random_bits = (rng.random(n) < 0.5).astype(int8)
+        reported = where(rand_vals < true_presence_probability, true_presence, random_bits)
         return reported.astype(int8)
 
     @staticmethod
     def _dp_noisy_histogram_from_counts(y_local_mapped: ndarray,
                                         num_global_classes: int,
                                         epsilon: float,
+                                        rng: Generator,
                                         clip_max: float = None) -> ndarray:
         hist = zeros(num_global_classes, dtype=float32)
         if len(y_local_mapped) > 0:
@@ -672,7 +674,7 @@ class FlowerClient(Client):
         # Clipping ensures no single client can push a bin above clip_max (if defined).
         sensitivity = 1.0
         scale = sensitivity / float(epsilon)
-        noise = laplace(loc=0.0, scale=scale, size=hist.shape)
+        noise = rng.laplace(loc=0.0, scale=scale, size=hist.shape)
         noisy = hist + noise
         noisy_clipped = clip(noisy, 0.0, None)
         noisy_clipped = noisy_clipped.round().astype(int32)
@@ -695,14 +697,24 @@ class FlowerClient(Client):
         if "client_remove_local_model" in config:
             self._remove_local_model()
         if "client_dp_presence" in config:
+            client_id = self.get_attribute("_client_id")
+            comm_round = config.get("comm_round", 0)
+            phase = "train"
+            seed = self._deterministic_seed(client_id, comm_round, phase)
+            rng = default_rng(seed)
             y_train = self.get_attribute("_y_train")
             local_classes = asarray(unique(y_train))
             true_presence_probability = config["true_presence_probability"]
             # Get the privatized presence vector aligned with local_classes.
-            dp_presence = self._dp_presence_randomized_response(local_classes, true_presence_probability)
+            dp_presence = self._dp_presence_randomized_response(local_classes, true_presence_probability, rng)
             config.update({"client_dp_presence": "|".join(map(str, dp_presence.tolist())),
                            "client_local_classes_claimed": "|".join(map(str, local_classes.tolist()))})
         if "client_dp_histogram_train" in config:
+            client_id = self.get_attribute("_client_id")
+            comm_round = config.get("comm_round", 0)
+            phase = "train"
+            seed = self._deterministic_seed(client_id, comm_round, phase)
+            rng = default_rng(seed)
             epsilon = config["epsilon"]
             y_train = self.get_attribute("_y_train")
             num_global_classes = int(config["num_global_classes"])
@@ -710,9 +722,14 @@ class FlowerClient(Client):
             class_index_map = {int(k): int(v)
                                for k, v in (pair.split("=") for pair in class_index_map_str.split("|") if pair)}
             y_local_mapped = array([class_index_map[int(y)] for y in y_train if int(y) in class_index_map])
-            dp_hist = self._dp_noisy_histogram_from_counts(y_local_mapped, num_global_classes, epsilon)
+            dp_hist = self._dp_noisy_histogram_from_counts(y_local_mapped, num_global_classes, epsilon, rng)
             config.update({"client_dp_histogram_train": "|".join(["{0}".format(int(x)) for x in dp_hist])})
         if "client_dp_histogram_test" in config:
+            client_id = self.get_attribute("_client_id")
+            comm_round = config.get("comm_round", 0)
+            phase = "test"
+            seed = self._deterministic_seed(client_id, comm_round, phase)
+            rng = default_rng(seed)
             epsilon = config["epsilon"]
             y_test = self.get_attribute("_y_test")
             num_global_classes = int(config["num_global_classes"])
@@ -720,7 +737,7 @@ class FlowerClient(Client):
             class_index_map = {int(k): int(v)
                                for k, v in (pair.split("=") for pair in class_index_map_str.split("|") if pair)}
             y_local_mapped = array([class_index_map[int(y)] for y in y_test if int(y) in class_index_map])
-            dp_hist = self._dp_noisy_histogram_from_counts(y_local_mapped, num_global_classes, epsilon)
+            dp_hist = self._dp_noisy_histogram_from_counts(y_local_mapped, num_global_classes, epsilon, rng)
             config.update({"client_dp_histogram_test": "|".join(["{0}".format(int(x)) for x in dp_hist])})
         if "client_id" in config:
             client_id = self.get_attribute("_client_id")
