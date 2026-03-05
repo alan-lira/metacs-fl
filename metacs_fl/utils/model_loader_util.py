@@ -330,7 +330,7 @@ def load_custom_lstm_sentiment140(model_provider_specific_settings: dict) -> Mod
     model.add(layers.Input(shape=(max_length,)))
     # Embedding layer to map tokens to low-dimensional dense vectors.
     if embedding_matrix is not None:
-        # Use pre-trained GloVe embeddings.
+        # Use pre-trained embeddings (GloVe).
         print("Using pre-trained GloVe embeddings...")
         model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
                                    output_dim=embedding_matrix.shape[1],
@@ -346,6 +346,47 @@ def load_custom_lstm_sentiment140(model_provider_specific_settings: dict) -> Mod
     model.add(layers.Dense(64, activation="relu"))
     # Output layer for binary sentiment classification (two classes with softmax activation).
     model.add(layers.Dense(2, activation="softmax"))
+    # Return the model architecture.
+    return model
+
+
+def load_custom_bi_lstm_attention_emotion(model_provider_specific_settings: dict) -> Model:
+    """Bidirectional LSTM + Attention model for Emotion dataset classification (6 classes)."""
+    # Get the model specific settings.
+    vocab_size = model_provider_specific_settings["vocab_size"]
+    max_length = model_provider_specific_settings["max_length"]
+    embedding_dim = model_provider_specific_settings["embedding_dim"]
+    embedding_matrix = model_provider_specific_settings["embedding_matrix"]
+    # Initialize the model architecture.
+    model = Sequential()
+    # Input layer (sequence of token indices).
+    model.add(layers.Input(shape=(max_length,)))
+    # Embedding layer to map tokens to low-dimensional dense vectors.
+    if embedding_matrix is not None:
+        # Use pre-trained embeddings.
+        print("Using pre-trained embeddings...")
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
+                                   output_dim=embedding_matrix.shape[1],
+                                   weights=[embedding_matrix],
+                                   input_length=max_length,
+                                   trainable=False))
+    else:
+        print("Using randomly initialized embeddings...")
+        model.add(layers.Embedding(input_dim=vocab_size,
+                                   output_dim=embedding_dim,
+                                   input_length=max_length))
+    # Bidirectional LSTM layer.
+    model.add(layers.Bidirectional(layers.LSTM(64, return_sequences=True)))
+    # SelfAttention layer.
+    model.add(SelfAttention(num_heads=4, key_dim=embedding_dim, dropout=0.3))
+    # Pool sequence layer.
+    model.add(layers.GlobalAveragePooling1D())
+    # Dense projection layer.
+    model.add(layers.Dense(64, activation="relu"))
+    # Dropout layer to reduce overfitting.
+    model.add(layers.Dropout(0.5))
+    # Output layer for multi-class (6) sentiment classification (Emotion dataset) with softmax activation.
+    model.add(layers.Dense(6, activation="softmax"))
     # Return the model architecture.
     return model
 
@@ -661,6 +702,10 @@ def load_model(model_settings: dict,
                 embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
                 model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
                 model = load_custom_transformer_sentiment140(model_provider_specific_settings)
+            case "Custom_BiLSTM_Attention_Emotion":
+                embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
+                model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
+                model = load_custom_bi_lstm_attention_emotion(model_provider_specific_settings)
             case "EfficientNetB0":
                 model = load_efficientnet_b0(model_provider_specific_settings)
             case "EfficientNetV2L":
@@ -674,7 +719,7 @@ def load_model(model_settings: dict,
             case "DenseNet121":
                 model = load_densenet_121(model_provider_specific_settings)
         # Compile the Kera's model.
-        if "Sentiment140" in model_name:
+        if any(k in model_name for k in ["Sentiment140", "Emotion"]):
             # Simpler compile for text-based models.
             model.compile(optimizer=optimizer,  # "adam",
                           loss=loss_function,  # "binary_crossentropy",

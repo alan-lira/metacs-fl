@@ -21,7 +21,7 @@ from nltk import download
 from nltk.corpus import stopwords
 from nltk.data import find, path
 from numpy import array, asarray, empty, int64, ndarray, int32
-from numpy.random import normal
+from numpy.random import normal, permutation
 from pathlib import Path
 from pickle import dump as pickle_dump, load as pickle_load
 from PIL import Image
@@ -138,6 +138,9 @@ def instantiate_fds(federated_dataset_settings: dict) -> FederatedDataset:
         case "adilbekovich/Sentiment140Twitter":
             train_partitioner_key = "train"
             test_partitioner_key = "test"
+        case "dair-ai/emotion":
+            train_partitioner_key = "train"
+            test_partitioner_key = None
     partitioners = {}
     training_dataset_partitioner = None
     test_dataset_partitioner = None
@@ -155,13 +158,20 @@ def instantiate_fds(federated_dataset_settings: dict) -> FederatedDataset:
             training_dataset_self_balancing = federated_dataset_settings["training_dataset_self_balancing"]
             training_dataset_shuffle = federated_dataset_settings["training_dataset_shuffle"]
             training_dataset_seed = federated_dataset_settings["training_dataset_seed"]
-            # Get the test dataset settings.
-            test_dataset_min_partition_size = federated_dataset_settings["test_dataset_min_partition_size"]
-            test_dataset_alpha = federated_dataset_settings["test_dataset_alpha"]
-            test_dataset_partition_by = federated_dataset_settings["test_dataset_partition_by"]
-            test_dataset_self_balancing = federated_dataset_settings["test_dataset_self_balancing"]
-            test_dataset_shuffle = federated_dataset_settings["test_dataset_shuffle"]
-            test_dataset_seed = federated_dataset_settings["test_dataset_seed"]
+            # Get the test dataset settings only if dataset has a test split.
+            test_dataset_min_partition_size = None
+            test_dataset_alpha = None
+            test_dataset_partition_by = None
+            test_dataset_self_balancing = None
+            test_dataset_shuffle = None
+            test_dataset_seed = None
+            if test_partitioner_key is not None:
+                test_dataset_min_partition_size = federated_dataset_settings["test_dataset_min_partition_size"]
+                test_dataset_alpha = federated_dataset_settings["test_dataset_alpha"]
+                test_dataset_partition_by = federated_dataset_settings["test_dataset_partition_by"]
+                test_dataset_self_balancing = federated_dataset_settings["test_dataset_self_balancing"]
+                test_dataset_shuffle = federated_dataset_settings["test_dataset_shuffle"]
+                test_dataset_seed = federated_dataset_settings["test_dataset_seed"]
             # Set the training dataset partitioner.
             training_dataset_partitioner = DirichletPartitioner(num_partitions=num_partitions,
                                                                 partition_by=training_dataset_partition_by,
@@ -170,14 +180,15 @@ def instantiate_fds(federated_dataset_settings: dict) -> FederatedDataset:
                                                                 self_balancing=training_dataset_self_balancing,
                                                                 shuffle=training_dataset_shuffle,
                                                                 seed=training_dataset_seed)
-            # Set the test dataset partitioner.
-            test_dataset_partitioner = DirichletPartitioner(num_partitions=num_partitions,
-                                                            partition_by=test_dataset_partition_by,
-                                                            alpha=test_dataset_alpha,
-                                                            min_partition_size=test_dataset_min_partition_size,
-                                                            self_balancing=test_dataset_self_balancing,
-                                                            shuffle=test_dataset_shuffle,
-                                                            seed=test_dataset_seed)
+            # Set the test dataset partitioner, if dataset has a test split.
+            if test_partitioner_key is not None:
+                test_dataset_partitioner = DirichletPartitioner(num_partitions=num_partitions,
+                                                                partition_by=test_dataset_partition_by,
+                                                                alpha=test_dataset_alpha,
+                                                                min_partition_size=test_dataset_min_partition_size,
+                                                                self_balancing=test_dataset_self_balancing,
+                                                                shuffle=test_dataset_shuffle,
+                                                                seed=test_dataset_seed)
         case "PathologicalPartitioner":
             # Get the training dataset settings.
             training_dataset_partition_by = federated_dataset_settings["training_dataset_partition_by"]
@@ -185,12 +196,18 @@ def instantiate_fds(federated_dataset_settings: dict) -> FederatedDataset:
             training_class_assignment_mode = federated_dataset_settings["training_class_assignment_mode"]
             training_dataset_shuffle = federated_dataset_settings["training_dataset_shuffle"]
             training_dataset_seed = federated_dataset_settings["training_dataset_seed"]
-            # Get the test dataset settings.
-            test_dataset_partition_by = federated_dataset_settings["test_dataset_partition_by"]
-            test_num_classes_per_partition = federated_dataset_settings["test_num_classes_per_partition"]
-            test_class_assignment_mode = federated_dataset_settings["test_class_assignment_mode"]
-            test_dataset_shuffle = federated_dataset_settings["test_dataset_shuffle"]
-            test_dataset_seed = federated_dataset_settings["test_dataset_seed"]
+            # Get the test dataset settings only if dataset has a test split.
+            test_dataset_partition_by = None
+            test_num_classes_per_partition = None
+            test_class_assignment_mode = None
+            test_dataset_shuffle = None
+            test_dataset_seed = None
+            if test_partitioner_key is not None:
+                test_dataset_partition_by = federated_dataset_settings["test_dataset_partition_by"]
+                test_num_classes_per_partition = federated_dataset_settings["test_num_classes_per_partition"]
+                test_class_assignment_mode = federated_dataset_settings["test_class_assignment_mode"]
+                test_dataset_shuffle = federated_dataset_settings["test_dataset_shuffle"]
+                test_dataset_seed = federated_dataset_settings["test_dataset_seed"]
             # Set the training dataset partitioner.
             training_dataset_partitioner = PathologicalPartitioner(num_partitions=num_partitions,
                                                                    partition_by=training_dataset_partition_by,
@@ -198,16 +215,18 @@ def instantiate_fds(federated_dataset_settings: dict) -> FederatedDataset:
                                                                    class_assignment_mode=training_class_assignment_mode,
                                                                    shuffle=training_dataset_shuffle,
                                                                    seed=training_dataset_seed)
-            # Set the test dataset partitioner.
-            test_dataset_partitioner = PathologicalPartitioner(num_partitions=num_partitions,
-                                                               partition_by=test_dataset_partition_by,
-                                                               num_classes_per_partition=test_num_classes_per_partition,
-                                                               class_assignment_mode=test_class_assignment_mode,
-                                                               shuffle=test_dataset_shuffle,
-                                                               seed=test_dataset_seed)
+            # Set the test dataset partitioner, if dataset has a test split.
+            if test_partitioner_key is not None:
+                test_dataset_partitioner = PathologicalPartitioner(num_partitions=num_partitions,
+                                                                   partition_by=test_dataset_partition_by,
+                                                                   num_classes_per_partition=test_num_classes_per_partition,
+                                                                   class_assignment_mode=test_class_assignment_mode,
+                                                                   shuffle=test_dataset_shuffle,
+                                                                   seed=test_dataset_seed)
     # Update the dictionary of partitioners.
-    partitioners.update({train_partitioner_key: training_dataset_partitioner,
-                         test_partitioner_key: test_dataset_partitioner})
+    partitioners.update({train_partitioner_key: training_dataset_partitioner})
+    if test_partitioner_key is not None:
+        partitioners.update({test_partitioner_key: test_dataset_partitioner})
     # Instantiate the FederatedDataset object.
     fds = FederatedDataset(dataset=dataset,
                            subset=subset,
@@ -272,15 +291,33 @@ def _load_federated_dataset(client_id: int,
             y_field_key = "label"
             train_split_key = "train"
             test_split_key = "test"
+        case "dair-ai/emotion":
+            x_field_key = "text"
+            y_field_key = "label"
+            train_split_key = "train"
+            test_split_key = None
     # Get the client's partitions (based on its id).
     partition_train = fds.load_partition(client_id, train_split_key)
     partition_train.set_format("numpy")
-    partition_test = fds.load_partition(client_id, test_split_key)
-    partition_test.set_format("numpy")
-    # Load x_train and y_train.
-    x_train, y_train = partition_train[x_field_key], partition_train[y_field_key]
-    # Load x_test and y_test.
-    x_test, y_test = partition_test[x_field_key], partition_test[y_field_key]
+    x_all = partition_train[x_field_key]
+    y_all = partition_train[y_field_key]
+    # If dataset has no predefined test split (e.g., Emotion unsplit).
+    if test_split_key is None:
+        # Shuffle the local partition before splitting.
+        indices = permutation(len(x_all))
+        x_all = x_all[indices]
+        y_all = y_all[indices]
+        # 80/20 local split.
+        split_idx = int(0.8 * len(x_all))
+        x_train = x_all[:split_idx]
+        y_train = y_all[:split_idx]
+        x_test = x_all[split_idx:]
+        y_test = y_all[split_idx:]
+    else:
+        partition_test = fds.load_partition(client_id, test_split_key)
+        partition_test.set_format("numpy")
+        x_train, y_train = partition_train[x_field_key], partition_train[y_field_key]
+        x_test, y_test = partition_test[x_field_key], partition_test[y_field_key]
     # Return the loaded dataset (x_train, y_train, x_test, and y_test).
     return x_train, y_train, x_test, y_test
 
@@ -645,7 +682,7 @@ def load_dataset(client_id: int,
             x_train, y_train, x_test, y_test = _load_federated_dataset(client_id, federated_dataset_settings, fds)
             dataset = federated_dataset_settings["dataset"]
     # Handle dataset preprocessing separately.
-    if dataset == "adilbekovich/Sentiment140Twitter":
+    if dataset in ["adilbekovich/Sentiment140Twitter", "dair-ai/emotion"]:
         # Pre-process the text dataset (sentiment140).
         vocab_size = model_provider_specific_settings["vocab_size"]
         max_length = model_provider_specific_settings["max_length"]
