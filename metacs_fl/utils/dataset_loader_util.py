@@ -337,6 +337,7 @@ def _build_or_load_shared_tokenizer(client_id: int,
                                     fds: FederatedDataset,
                                     federated_dataset_settings: dict,
                                     vocab_size: int,
+                                    dataset_key: str,
                                     root_output_folder: Path,
                                     timeout: int = 1800,
                                     poll_interval: float = 0.5) -> Tokenizer:
@@ -374,7 +375,11 @@ def _build_or_load_shared_tokenizer(client_id: int,
             for cid in range(num_partitions):
                 partition = fds.load_partition(cid, "train")
                 partition.set_format("numpy")
-                all_texts.extend(partition["text"])
+                for t in partition["text"]:
+                    if dataset_key == "Sentiment140":
+                        all_texts.append(_normalize_sentiment140_text(t))
+                    elif dataset_key == "Emotion":
+                        all_texts.append(_normalize_emotion_text(t))
             tokenizer = Tokenizer(num_words=vocab_size, oov_token="<OOV>")
             tokenizer.fit_on_texts(all_texts)
             # Write to temporary file first, then atomically replace.
@@ -463,11 +468,24 @@ def _normalize_sentiment140_text(text: str) -> str:
     return " ".join(words)
 
 
-def _pre_process_sentiment140_text_dataset(texts: NDArray,
-                                           labels: NDArray,
-                                           vocab_size: int,
-                                           max_length: int,
-                                           tokenizer: Tokenizer | None = None) -> tuple:
+def _normalize_emotion_text(text: str) -> str:
+    """Normalize text for the Emotion dataset (minimal normalization)."""
+    # Expand contractions (e.g., "I'm" → "I am").
+    text = fix(text)
+    # Lowercase all characters.
+    text = text.lower()
+    # Collapse multiple spaces.
+    text = sub(r"\s+", " ", text).strip()
+    # Return normalized text.
+    return text
+
+
+def _pre_process_text_dataset(dataset_key: str,
+                              texts: NDArray,
+                              labels: NDArray,
+                              vocab_size: int,
+                              max_length: int,
+                              tokenizer: Tokenizer | None = None) -> tuple:
     # Ensure list input.
     texts = list(texts) if not isinstance(texts, list) else texts
     # Filter out None or empty strings.
@@ -481,8 +499,13 @@ def _pre_process_sentiment140_text_dataset(texts: NDArray,
         empty = array([])
         return (empty, empty if labels is not None else None, tokenizer)
     # Normalization step.
-    _ensure_stopwords()
-    normalized_texts = [_normalize_sentiment140_text(t) for t in valid_texts]
+    normalized_texts = []
+    match dataset_key:
+        case "Sentiment140":
+            _ensure_stopwords()
+            normalized_texts = [_normalize_sentiment140_text(t) for t in valid_texts]
+        case "Emotion":
+            normalized_texts = [_normalize_emotion_text(t) for t in valid_texts]
     # Tokenization step.
     if tokenizer is None:
         tokenizer = Tokenizer(num_words=vocab_size, oov_token="<OOV>")
@@ -578,21 +601,23 @@ def _load_glove_embeddings(tokenizer: Tokenizer,
     if not glove_embedding_file.exists():
         raise FileNotFoundError("GloVe file not found at {0}".format(glove_embedding_file))
     # Fix the matrix size to the global vocabulary.
-    embedding_matrix = normal(scale=0.6, size=(global_vocab_size, embedding_dim))
+    embedding_matrix = normal(scale=0.6, size=(global_vocab_size + 1, embedding_dim)).astype("float32")
     print("Loading GloVe embeddings from: {0}".format(glove_embedding_file))
-    glove_embeddings = {}
+    # Get tokenizer word index.
+    word_index = tokenizer.word_index
+    # Read GloVe file and map vectors directly into the embedding matrix.
     with open(glove_embedding_file, encoding="utf8") as f:
         for line in f:
             values = line.split()
             word = values[0]
+            # Get tokenizer index of word.
+            idx = word_index.get(word)
+            # Skip words that are not in the tokenizer vocabulary or exceed vocabulary size.
+            if idx is None or idx > global_vocab_size:
+                continue
             vector = asarray(values[1:], dtype="float32")
-            glove_embeddings[word] = vector
-    # Map words in tokenizer to embedding indices.
-    for word, idx in tokenizer.word_index.items():
-        if idx < global_vocab_size:
-            vector = glove_embeddings.get(word)
-            if vector is not None:
-                embedding_matrix[idx] = vector
+            # Map vector into embedding matrix.
+            embedding_matrix[idx] = vector
     print("GloVe embedding matrix shape: {0}".format(embedding_matrix.shape))
     return embedding_matrix
 
@@ -683,23 +708,37 @@ def load_dataset(client_id: int,
             dataset = federated_dataset_settings["dataset"]
     # Handle dataset preprocessing separately.
     if dataset in ["adilbekovich/Sentiment140Twitter", "dair-ai/emotion"]:
-        # Pre-process the text dataset (sentiment140).
+        # Determine the dataset key.
+        dataset_key = None
+        match dataset:
+            case "adilbekovich/Sentiment140Twitter":
+                dataset_key = "Sentiment140"
+            case "dair-ai/emotion":
+                dataset_key = "Emotion"
+        # Pre-process the text dataset.
         vocab_size = model_provider_specific_settings["vocab_size"]
         max_length = model_provider_specific_settings["max_length"]
         # Build or load the "shared" tokenizer.
-        tokenizer = _build_or_load_shared_tokenizer(client_id, fds, federated_dataset_settings, vocab_size, root_output_folder)
+        tokenizer = _build_or_load_shared_tokenizer(client_id,
+                                                    fds,
+                                                    federated_dataset_settings,
+                                                    vocab_size,
+                                                    dataset_key,
+                                                    root_output_folder)
         # Pre-process the training data (fits the tokenizer).
-        x_train, y_train, _ = _pre_process_sentiment140_text_dataset(x_train,
-                                                                     y_train,
-                                                                     vocab_size,
-                                                                     max_length,
-                                                                     tokenizer=tokenizer)
+        x_train, y_train, _ = _pre_process_text_dataset(dataset_key,
+                                                        x_train,
+                                                        y_train,
+                                                        vocab_size,
+                                                        max_length,
+                                                        tokenizer=tokenizer)
         # Pre-process the test data (reuse the same tokenizer).
-        x_test, y_test, _ = _pre_process_sentiment140_text_dataset(x_test,
-                                                                   y_test,
-                                                                   vocab_size,
-                                                                   max_length,
-                                                                   tokenizer=tokenizer)
+        x_test, y_test, _ = _pre_process_text_dataset(dataset_key,
+                                                      x_test,
+                                                      y_test,
+                                                      vocab_size,
+                                                      max_length,
+                                                      tokenizer=tokenizer)
         # Load GloVe embeddings (aligned with the tokenizer) if configured.
         embedding_matrix = None
         use_glove_embedding = model_provider_specific_settings["use_glove_embedding"]

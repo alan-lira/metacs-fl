@@ -350,6 +350,63 @@ def load_custom_lstm_sentiment140(model_provider_specific_settings: dict) -> Mod
     return model
 
 
+def load_custom_cnn_emotion(model_provider_specific_settings: dict) -> Model:
+    """Word-embedding CNN baseline (CNNw2v) used for emotion classification (6 classes).
+       Referenced in Saravia et al., 2018 and originally proposed by Deriu et al., 2017.
+       https://aclanthology.org/D18-1404.pdf"""
+    # Get the model specific settings.
+    vocab_size = model_provider_specific_settings["vocab_size"]
+    max_length = model_provider_specific_settings["max_length"]
+    embedding_dim = model_provider_specific_settings["embedding_dim"]
+    embedding_matrix = model_provider_specific_settings["embedding_matrix"]
+    dropout_rate = model_provider_specific_settings.get("dropout_rate", 0.5)
+    num_classes = model_provider_specific_settings.get("num_classes", 6)
+    # Initialize the model architecture.
+    model = Sequential()
+    # Input layer (sequence of token indices).
+    model.add(layers.Input(shape=(max_length,)))
+    # Embedding layer to map tokens to low-dimensional dense vectors.
+    if embedding_matrix is not None:
+        # Use pre-trained embeddings.
+        print("Using pre-trained embeddings...")
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
+                                   output_dim=embedding_matrix.shape[1],
+                                   weights=[embedding_matrix],
+                                   input_length=max_length,
+                                   trainable=False))
+    else:
+        print("Using randomly initialized embeddings...")
+        model.add(layers.Embedding(input_dim=vocab_size,
+                                   output_dim=embedding_dim,
+                                   input_length=max_length))
+    # First convolutional layer to capture local contextual emotion patterns.
+    model.add(layers.Conv1D(filters=128,
+                            kernel_size=3,
+                            activation="relu",
+                            padding="same"))
+    # Second convolutional layer with larger receptive field.
+    model.add(layers.Conv1D(filters=128,
+                            kernel_size=16,
+                            activation="relu",
+                            padding="same"))
+    # 1-max pooling layer to aggregate the strongest pattern activations.
+    model.add(layers.MaxPooling1D(pool_size=3))
+    # Flatten layer to convert feature maps into a vector.
+    model.add(layers.Flatten())
+    # First dense projection layer for high-level feature learning.
+    model.add(layers.Dense(512, activation="relu"))
+    # Dropout layer to reduce overfitting.
+    model.add(layers.Dropout(dropout_rate))
+    # Second dense projection layer for further feature abstraction.
+    model.add(layers.Dense(128, activation="relu"))
+    # Dropout layer to reduce overfitting.
+    model.add(layers.Dropout(dropout_rate))
+    # Output layer for multi-class emotion classification with softmax activation.
+    model.add(layers.Dense(num_classes, activation="softmax"))
+    # Return the model architecture.
+    return model
+
+
 def load_custom_bi_lstm_attention_emotion(model_provider_specific_settings: dict) -> Model:
     """Bidirectional LSTM + Attention model for Emotion dataset classification (6 classes)."""
     # Get the model specific settings.
@@ -702,6 +759,10 @@ def load_model(model_settings: dict,
                 embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
                 model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
                 model = load_custom_transformer_sentiment140(model_provider_specific_settings)
+            case "Custom_CNN_Emotion":
+                embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
+                model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
+                model = load_custom_cnn_emotion(model_provider_specific_settings)
             case "Custom_BiLSTM_Attention_Emotion":
                 embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
                 model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
