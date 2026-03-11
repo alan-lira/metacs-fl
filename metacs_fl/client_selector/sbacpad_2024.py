@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from logging import Logger
 from numpy import array
 from numpy.random import default_rng, SeedSequence
@@ -464,8 +464,8 @@ class SBACPAD2024:
                                                      selected_clients_metrics_history,
                                                      history_checker,
                                                      clients_profiles)
-        # Initialize the list of results (selected clients per round).
-        results = []
+        # Initialize the list of selected clients' Future objects (already completed).
+        selected_clients_futures = []
         for round_to_select_clients in rounds_to_select_clients:
             result = self._select_clients_task(round_to_select_clients,
                                                current_phase,
@@ -476,9 +476,11 @@ class SBACPAD2024:
                                                time_limit,
                                                data_privacy_approach,
                                                logger)
-            results.append(result)
-        # Return the list of results (selected clients per round).
-        return results
+            selected_clients_future = Future()
+            selected_clients_future.set_result(result)
+            selected_clients_futures.append(selected_clients_future)
+        # Return the list of selected clients' Future objects.
+        return selected_clients_futures
 
     def run_client_selection_procedure(self,
                                        **kwargs) -> list:
