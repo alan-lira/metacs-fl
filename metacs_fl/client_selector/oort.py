@@ -347,9 +347,13 @@ class Oort:
         # Calculate the maximum number of tasks that can be scheduled.
         max_num_tasks = sum(max(capacities) for capacities in scaled_task_assignment_capacities_list)
         # Convert num_tasks → task count (fraction adjustment).
+        # Note: after scaling, num_tasks represents the number of samples to schedule.
         if isinstance(num_tasks, float):
             # Always treat as fraction of total capacity.
             num_tasks = int(num_tasks * max_num_tasks)
+        else:
+            # Convert tasks → samples.
+            num_tasks = int(num_tasks * samples_per_task)
         # Clamp to valid range.
         num_tasks = max(1, min(num_tasks, max_num_tasks))
         # Compute all the possible sums of task assignments, considering one assignment per client.
