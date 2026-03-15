@@ -17,6 +17,22 @@ from keras.saving import load_model as keras_load_model, save_model as keras_sav
 from keras.src.saving import register_keras_serializable
 from numpy import load, save, savez
 from pathlib import Path
+from tensorflow import nn, reduce_sum
+
+
+# Additive (Bahdanau-style) attention layer.
+@register_keras_serializable(package="Custom")
+class AdditiveAttention(layers.Layer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.score_dense = layers.Dense(1, activation="tanh")
+
+    def call(self, inputs):
+        # inputs: (batch, time, hidden)
+        scores = self.score_dense(inputs)
+        weights = nn.softmax(scores, axis=1)
+        context = reduce_sum(weights * inputs, axis=1)
+        return context
 
 
 def load_custom_cnn_cifar_10() -> Model:
@@ -408,7 +424,11 @@ def load_custom_cnn_emotion(model_provider_specific_settings: dict) -> Model:
 
 
 def load_custom_bi_lstm_attention_emotion(model_provider_specific_settings: dict) -> Model:
-    """Bidirectional LSTM + Attention model for Emotion dataset classification (6 classes)."""
+    """Bidirectional LSTM with additive attention used for emotion classification (6 classes).
+       Referenced in Saravia et al., 2018 as the BiLSTM + Attention baseline for the Emotion dataset.
+       The attention mechanism follows a single-head additive formulation to compute a
+       sentence-level context vector from BiLSTM hidden states.
+       https://aclanthology.org/D18-1404.pdf"""
     # Get the model specific settings.
     vocab_size = model_provider_specific_settings["vocab_size"]
     max_length = model_provider_specific_settings["max_length"]
@@ -435,9 +455,7 @@ def load_custom_bi_lstm_attention_emotion(model_provider_specific_settings: dict
     # Bidirectional LSTM layer.
     model.add(layers.Bidirectional(layers.LSTM(64, return_sequences=True)))
     # SelfAttention layer.
-    model.add(SelfAttention(num_heads=4, key_dim=embedding_dim, dropout=0.3))
-    # Pool sequence layer.
-    model.add(layers.GlobalAveragePooling1D())
+    model.add(AdditiveAttention())
     # Dense projection layer.
     model.add(layers.Dense(64, activation="relu"))
     # Dropout layer to reduce overfitting.
