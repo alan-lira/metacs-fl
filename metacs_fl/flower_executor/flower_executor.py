@@ -1,3 +1,4 @@
+from configparser import ConfigParser
 from copy import deepcopy
 from multiprocessing import Barrier, Process
 from numpy import array, exp, median, percentile, zeros
@@ -470,13 +471,17 @@ class FlowerExecutor:
         # Print the number of the repetitions (independent executions).
         print("Number of repetitions (independent executions): {0}".format(self._repetitions))
         config_file = self.get_attribute("_config_file")
-        execution_section = "Execution_N Settings"
-        execution_settings = parse_config_section(config_file, execution_section)
-        for repetition_idx in range(1, self._repetitions + 1):
-            execution_name = execution_section.replace("N", str(repetition_idx)).split(" Settings")[0]
-            execution_settings_copy = deepcopy(execution_settings)
-            execution_settings_copy["execution_output_folder"] = execution_settings_copy["execution_output_folder"].replace("N", str(repetition_idx))
-            executions_to_execute.append({execution_name: execution_settings_copy})
+        parser = ConfigParser()
+        parser.read(config_file)
+        execution_sections = [s for s in parser.sections() if s.startswith("Execution_") and s.endswith("_N Settings")]
+        for execution_section in execution_sections:
+            execution_settings = parse_config_section(config_file, execution_section)
+            for repetition_idx in range(1, self._repetitions + 1):
+                execution_name = execution_section.replace("_N Settings", f"_{repetition_idx}")
+                execution_settings_copy = deepcopy(execution_settings)
+                execution_settings_copy["execution_output_folder"] = \
+                    execution_settings_copy["execution_output_folder"].replace("N", str(repetition_idx))
+                executions_to_execute.append({execution_name: execution_settings_copy})
         # Iterate through the list of executions to execute.
         for current_execution in executions_to_execute:
             # Update the current execution.
