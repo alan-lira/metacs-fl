@@ -1471,6 +1471,7 @@ class FlowerServer(Strategy):
                   "selected_clients_metrics_history": selected_clients_metrics_history,
                   "clients_profiles": clients_profiles,
                   "time_limit": round_timeout_in_seconds,
+                  "root_output_folder": self._root_output_folder,
                   "logger": logger}
         if server_strategy_settings.get("monitor_clients_reliability_score", False):
             # Get the clients' reliability score history.
@@ -1674,6 +1675,7 @@ class FlowerServer(Strategy):
                   "selected_clients_metrics_history": selected_clients_metrics_history,
                   "clients_profiles": clients_profiles,
                   "time_limit": round_timeout_in_seconds,
+                  "root_output_folder": self._root_output_folder,
                   "logger": logger}
         if server_strategy_settings.get("monitor_clients_reliability_score", False):
             # Get the clients' reliability score history.

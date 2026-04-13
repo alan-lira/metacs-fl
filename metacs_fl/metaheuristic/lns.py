@@ -1,11 +1,13 @@
 from copy import deepcopy
-from math import floor, inf
+from csv import DictWriter
+from math import floor
 from numpy import ndarray
 from numpy.random import Generator
+from pathlib import Path
 from time import perf_counter
+from traceback import format_exc
 
-from metacs_fl.utils.task_scheduler_util import calculate_percentage_change, estimate_costs, normalize_costs, \
-    update_min_max_costs
+from metacs_fl.utils.task_scheduler_util import calculate_percentage_change, estimate_costs, normalize_costs
 
 
 def to_stop_lns(it: int,
@@ -229,8 +231,20 @@ def lns_F(obj_func_costs: dict,
           + (obj_func_weights["E_weight"] * obj_func_costs["E_X"]) \
           - (obj_func_weights["D_weight"] * obj_func_costs["D_X"]) \
           - (obj_func_weights["KCov_weight"] * obj_func_costs["KCov_X"]) \
-          + (obj_func_weights["KStd_weight"] * obj_func_costs["KStd_X"])
+          + (obj_func_weights["KStd_weight"] * obj_func_costs["KStd_X"]) \
+          - (obj_func_weights["U_weight"] * obj_func_costs["U_X"])
     return F_X
+
+
+def _write_lns_trace_rows_to_csv_file(lns_trace_rows: list,
+                                      lns_traces_output_file: Path) -> None:
+    if not lns_trace_rows:
+        return
+    lns_traces_output_file.parent.mkdir(parents=True, exist_ok=True)
+    with lns_traces_output_file.open("w", newline="") as f:
+        writer = DictWriter(f, fieldnames=lns_trace_rows[0].keys())
+        writer.writeheader()
+        writer.writerows(lns_trace_rows)
 
 
 def run_lns(X_init: list,
@@ -245,20 +259,22 @@ def run_lns(X_init: list,
             B: list,
             G: list,
             E: list,
+            phi_list: list,
+            psi_list: list,
+            alpha: float,
             stop_criteria: dict,
             accept_criteria: dict,
             obj_func_weights: dict,
-            X_dist_approaches: dict)-> tuple:
-    # Initialize the dict of min-max costs.
-    min_max_costs = {"min_M_X": inf,
-                     "max_M_X": 0,
-                     "min_E_X": inf,
-                     "max_E_X": 0}
+            X_dist_approaches: dict,
+            normalization_bounds: dict,
+            lns_traces_output_file: Path | None = None) -> tuple:
     # Initialize the current and best solutions.
     X_curr = deepcopy(X_init)
     X_best = deepcopy(X_init)
     # Initialize the best solution costs.
     X_best_costs = {}
+    # Initialize the lightweight diagnostics list.
+    lns_trace_rows = []
     # Initialize the iteration counter.
     it = 1
     # Get the start time.
@@ -266,42 +282,89 @@ def run_lns(X_init: list,
     # Initialize the elapsed time.
     t_it = 0
     while True:
-        # Check the stopping criteria for the metaheuristic.
-        to_stop_lns_execution = to_stop_lns(it, t_it, stop_criteria)
-        if to_stop_lns_execution:
-            # Stop the metaheuristic execution.
-            break
-        # LNS Block (Begin).
-        # Destroy the current solution.
-        X_dest, dest_indices = lns_destroy(rng, A, X_curr, destroy_approach)
-        # Repair the destroyed solution.
-        X_rpr = lns_repair(rng, t, A, X_dest, dest_indices)
-        # Estimate costs.
-        sol_costs = estimate_costs(n, t, A, Y, I, B, G, E, X_init, X_best, X_rpr, X_dist_approaches)
-        # Update the min-max costs.
-        min_max_costs = update_min_max_costs(sol_costs, min_max_costs)
-        # Check if the repaired solution is acceptable.
-        to_accept = lns_accept(sol_costs, accept_criteria, tau, t, A)
-        if to_accept:
-            # Update the current solution.
-            X_curr = deepcopy(X_rpr)
-            # Normalize the solution costs (particularly, M and E).
-            norm_sol_costs = normalize_costs(sol_costs, min_max_costs)
-            # Calculate the objective function value for X_rpr.
-            F_X_rpr = lns_F(norm_sol_costs["X_rpr"], obj_func_weights)
-            # Calculate the objective function value for X_best.
-            F_X_best = lns_F(norm_sol_costs["X_best"], obj_func_weights)
-            # Verify if the repaired solution is better than the best solution.
-            if F_X_rpr < F_X_best:
-                # Update the best solution.
-                X_best = deepcopy(X_rpr)
-                X_best_costs = deepcopy(sol_costs["X_rpr"])
-        # LNS Block (End).
-        # Update the iteration counter.
-        it = it + 1
-        # Update the elapsed time.
-        t_it = perf_counter() - t_0
+        trace_stage = "loop_start"
+        try:
+            # Check the stopping criteria for the metaheuristic.
+            trace_stage = "to_stop_lns"
+            to_stop_lns_execution = to_stop_lns(it, t_it, stop_criteria)
+            if to_stop_lns_execution:
+                # Stop the metaheuristic execution.
+                break
+            # LNS Block (Begin).
+            # Destroy the current solution.
+            trace_stage = "lns_destroy"
+            X_dest, dest_indices = lns_destroy(rng, A, X_curr, destroy_approach)
+            # Repair the destroyed solution.
+            trace_stage = "lns_repair"
+            X_rpr = lns_repair(rng, t, A, X_dest, dest_indices)
+            changed_vs_curr = int(list(X_rpr) != list(X_curr))
+            # Estimate costs.
+            trace_stage = "estimate_costs"
+            sol_costs = estimate_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha, X_init, X_best, X_rpr, X_dist_approaches)
+            # Check if the repaired solution is acceptable.
+            trace_stage = "lns_accept"
+            to_accept = lns_accept(sol_costs, accept_criteria, tau, t, A)
+            improved_best = 0
+            F_X_rpr = float("nan")
+            F_X_best = float("nan")
+            if to_accept:
+                # Update the current solution.
+                X_curr = deepcopy(X_rpr)
+                # Normalize the solution costs (particularly, M, E, and U).
+                trace_stage = "normalize_costs"
+                norm_sol_costs = normalize_costs(sol_costs, normalization_bounds)
+                # Calculate the objective function values.
+                trace_stage = "lns_F"
+                F_X_rpr = lns_F(norm_sol_costs["X_rpr"], obj_func_weights)
+                F_X_best = lns_F(norm_sol_costs["X_best"], obj_func_weights)
+                # Verify if the repaired solution is better than the best solution.
+                if F_X_rpr < F_X_best:
+                    improved_best = 1
+                    X_best = deepcopy(X_rpr)
+                    X_best_costs = deepcopy(sol_costs["X_rpr"])
+            # Append the lns diagnostic collection trace row.
+            trace_stage = "collect_trace_row"
+            lns_trace_row = {"iteration": it,
+                             "elapsed_time": t_it,
+                             "stage": trace_stage,
+                             "accepted": int(to_accept),
+                             "changed_vs_curr": changed_vs_curr,
+                             "improved_best": improved_best,
+                             "F_X_rpr": F_X_rpr,
+                             "F_X_best": F_X_best,
+                             "M_X_rpr": sol_costs["X_rpr"]["M_X"],
+                             "E_X_rpr": sol_costs["X_rpr"]["E_X"],
+                             "D_X_rpr": sol_costs["X_rpr"]["D_X"],
+                             "KCov_X_rpr": sol_costs["X_rpr"]["KCov_X"],
+                             "KStd_X_rpr": sol_costs["X_rpr"]["KStd_X"],
+                             "U_X_rpr": sol_costs["X_rpr"]["U_X"]}
+            lns_trace_rows.append(lns_trace_row)
+            # LNS Block (End).
+            # Update the iteration counter.
+            it = it + 1
+            # Update the elapsed time.
+            t_it = perf_counter() - t_0
+            # Heartbeat every x iterations.
+            lns_heartbeat_pace = 50
+            if it % lns_heartbeat_pace == 0:
+                print("[LNS HEARTBEAT] it={0}, elapsed={1:.2f}s, trace_rows={2}".format(it, t_it, len(lns_trace_rows)))
+        except Exception as e:
+            print("\n[LNS ERROR]")
+            print("iteration: {0}".format(it))
+            print("elapsed_time: {0}".format(t_it))
+            print("trace_stage: {0}".format(trace_stage))
+            print("exception: {0}".format(repr(e)))
+            print(format_exc())
+            raise
+    # Write trace to output CSV file if requested.
+    if lns_traces_output_file is not None:
+        try:
+            _write_lns_trace_rows_to_csv_file(lns_trace_rows, lns_traces_output_file)
+        except Exception as e:
+            print("\n[LNS TRACE WRITE ERROR]")
+            print(f"exception: {repr(e)}")
+            print(format_exc())
     # Set the LNS execution statistics.
-    lns_statistics = {"time_lapsed": t_it, "num_iterations": it}
+    lns_statistics = {"time_lapsed": t_it, "num_iterations": it, "lns_trace_rows": lns_trace_rows}
     # Return the best solution, the best solution costs, and the LNS execution statistics.
     return X_best, X_best_costs, lns_statistics

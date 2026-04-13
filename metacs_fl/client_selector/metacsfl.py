@@ -1,7 +1,7 @@
 from copy import deepcopy
 from logging import Logger
-
 from numpy.random import default_rng, SeedSequence
+from pathlib import Path
 
 from metacs_fl.metaheuristic.lns import run_lns
 from metacs_fl.task_scheduler.ecmtc import ecmtc
@@ -130,6 +130,219 @@ class MetaCSFL:
                                "weighted_mean_accuracies": weighted_mean_accuracies}
         # Return the dictionary of the metrics lists.
         return metrics_past_rounds
+
+    @staticmethod
+    def _get_profile_loss_for_phase(client_id: str,
+                                    candidate_clients: dict,
+                                    clients_profiles: dict,
+                                    phase: str) -> float | None:
+        if client_id not in candidate_clients:
+            return None
+        if client_id not in clients_profiles:
+            return None
+        if phase not in clients_profiles[client_id]:
+            return None
+        profile_phase_dict = clients_profiles[client_id][phase]
+        if not profile_phase_dict:
+            return None
+        task_assignment_capacities_phase_key = "client_task_assignment_capacities_{0}".format(phase)
+        task_assignment_capacities_i = candidate_clients[client_id][task_assignment_capacities_phase_key]
+        max_ac = max(task_assignment_capacities_i)
+        closest_x = min(profile_phase_dict.keys(), key=lambda x: abs(int(x) - max_ac))
+        profiled_metrics = profile_phase_dict[closest_x]
+        if "loss" not in profiled_metrics:
+            return None
+        return profiled_metrics["loss"]
+
+    @staticmethod
+    def _normalize_value(value: float,
+                         min_value: float,
+                         max_value: float) -> float:
+        if max_value <= min_value:
+            return 0.0
+        normalized_value = (value - min_value) / (max_value - min_value)
+        if normalized_value < 0:
+            return 0.0
+        if normalized_value > 1:
+            return 1.0
+        return normalized_value
+
+    def _collect_client_losses_from_history(self,
+                                            selected_clients_metrics_history: dict,
+                                            candidate_clients: dict,
+                                            clients_profiles: dict) -> tuple:
+        candidate_client_ids = list(candidate_clients.keys())
+        train_losses_by_client = {client_id: [] for client_id in candidate_client_ids}
+        test_losses_by_client = {client_id: [] for client_id in candidate_client_ids}
+        all_train_losses = []
+        all_test_losses = []
+        for round_idx in sorted(selected_clients_metrics_history.keys()):
+            round_metrics = selected_clients_metrics_history[round_idx]
+            # Training losses.
+            if "train" in round_metrics and "clients_metrics_dicts" in round_metrics["train"]:
+                clients_metrics_dicts = round_metrics["train"]["clients_metrics_dicts"]
+                for client_metrics_dict in clients_metrics_dicts:
+                    client_id = next(iter(client_metrics_dict))
+                    if client_id not in train_losses_by_client:
+                        continue
+                    client_metrics = client_metrics_dict[client_id]
+                    if "loss" in client_metrics:
+                        loss_value = client_metrics["loss"]
+                        train_losses_by_client[client_id].append(loss_value)
+                        all_train_losses.append(loss_value)
+            # Testing losses.
+            if "test" in round_metrics and "clients_metrics_dicts" in round_metrics["test"]:
+                clients_metrics_dicts = round_metrics["test"]["clients_metrics_dicts"]
+                for client_metrics_dict in clients_metrics_dicts:
+                    client_id = next(iter(client_metrics_dict))
+                    if client_id not in test_losses_by_client:
+                        continue
+                    client_metrics = client_metrics_dict[client_id]
+                    if "loss" in client_metrics:
+                        loss_value = client_metrics["loss"]
+                        test_losses_by_client[client_id].append(loss_value)
+                        all_test_losses.append(loss_value)
+        # Fallback to profiling losses when no history exists for a client.
+        for client_id in candidate_client_ids:
+            if not train_losses_by_client[client_id]:
+                train_profile_loss = self._get_profile_loss_for_phase(client_id,
+                                                                      candidate_clients,
+                                                                      clients_profiles,
+                                                                      "train")
+                if train_profile_loss is not None:
+                    train_losses_by_client[client_id].append(train_profile_loss)
+                    all_train_losses.append(train_profile_loss)
+            if not test_losses_by_client[client_id]:
+                test_profile_loss = self._get_profile_loss_for_phase(client_id,
+                                                                     candidate_clients,
+                                                                     clients_profiles,
+                                                                     "test")
+                if test_profile_loss is not None:
+                    test_losses_by_client[client_id].append(test_profile_loss)
+                    all_test_losses.append(test_profile_loss)
+        return train_losses_by_client, test_losses_by_client, all_train_losses, all_test_losses
+
+    def _build_utility_inputs(self,
+                              candidate_clients: dict,
+                              selected_clients_metrics_history: dict,
+                              clients_profiles: dict,
+                              q: int) -> tuple:
+        candidate_client_ids = list(candidate_clients.keys())
+        train_losses_by_client, test_losses_by_client, all_train_losses, all_test_losses = \
+            self._collect_client_losses_from_history(selected_clients_metrics_history, candidate_clients, clients_profiles)
+        # Safe bounds from observed historical values.
+        min_train_loss = min(all_train_losses) if all_train_losses else 0.0
+        max_train_loss = max(all_train_losses) if all_train_losses else 1.0
+        min_test_loss = min(all_test_losses) if all_test_losses else 0.0
+        max_test_loss = max(all_test_losses) if all_test_losses else 1.0
+        phi_list = []
+        psi_list = []
+        for client_id in candidate_client_ids:
+            client_train_losses = train_losses_by_client.get(client_id, [])
+            client_test_losses = test_losses_by_client.get(client_id, [])
+            # Use the last q training participation.
+            recent_train_losses = client_train_losses[-q:] if q > 0 else client_train_losses
+            normalized_recent_train_losses = [self._normalize_value(loss_value, min_train_loss, max_train_loss)
+                                              for loss_value in recent_train_losses]
+            normalized_latest_test_loss = 1.0
+            if client_test_losses:
+                latest_test_loss = client_test_losses[-1]
+                normalized_latest_test_loss = self._normalize_value(latest_test_loss, min_test_loss, max_test_loss)
+            # Assumption: every eligible client has at least one profiling round with train/test loss (defensive fallbacks).
+            if normalized_recent_train_losses:
+                avg_normalized_train_loss = sum(normalized_recent_train_losses) / len(normalized_recent_train_losses)
+                phi_i = 1 - avg_normalized_train_loss
+            else:
+                phi_i = 0.0
+            psi_i = 1 - normalized_latest_test_loss
+            # Clamp to [0, 1].
+            phi_i = max(0.0, min(1.0, phi_i))
+            psi_i = max(0.0, min(1.0, psi_i))
+            phi_list.append(phi_i)
+            psi_list.append(psi_i)
+        return phi_list, psi_list
+
+    @staticmethod
+    def _build_fixed_normalization_bounds(current_phase: str,
+                                          selected_clients_metrics_history: dict,
+                                          candidate_clients: dict,
+                                          clients_profiles: dict) -> dict:
+        historical_makespans = []
+        historical_energy_consumptions = []
+        # Collect prior observed round-level metrics for the current phase.
+        for round_idx in sorted(selected_clients_metrics_history.keys()):
+            round_metrics = selected_clients_metrics_history[round_idx]
+            if current_phase not in round_metrics:
+                continue
+            if "clients_metrics_dicts" not in round_metrics[current_phase]:
+                continue
+            clients_metrics_dicts = round_metrics[current_phase]["clients_metrics_dicts"]
+            makespan_r = 0.0
+            energy_r = 0.0
+            for client_metrics_dict in clients_metrics_dicts:
+                client_id = next(iter(client_metrics_dict))
+                client_metrics = client_metrics_dict[client_id]
+                time_key = "{0}ing_time_in_seconds".format(current_phase)
+                energy_key = "{0}ing_energy_in_joules".format(current_phase)
+                time_i = client_metrics[time_key] if time_key in client_metrics else 0.0
+                energy_i = client_metrics[energy_key] if energy_key in client_metrics else 0.0
+                if time_i > makespan_r:
+                    makespan_r = time_i
+                energy_r += energy_i
+            if makespan_r > 0:
+                historical_makespans.append(makespan_r)
+            if energy_r > 0:
+                historical_energy_consumptions.append(energy_r)
+        # Fallback to profiling-derived approximations if history is sparse.
+        if not historical_makespans or not historical_energy_consumptions:
+            profiled_times = []
+            profiled_energies = []
+            for client_id, client_map in candidate_clients.items():
+                if client_id not in clients_profiles:
+                    continue
+                if current_phase not in clients_profiles[client_id]:
+                    continue
+                profile_phase_dict = clients_profiles[client_id][current_phase]
+                if not profile_phase_dict:
+                    continue
+                task_assignment_capacities_i = client_map["client_task_assignment_capacities_{0}".format(current_phase)]
+                max_ac = max(task_assignment_capacities_i)
+                closest_x = min(profile_phase_dict.keys(), key=lambda x: abs(int(x) - max_ac))
+                profiled_metrics = profile_phase_dict[closest_x]
+                time_key = "{0}ing_time_in_seconds".format(current_phase)
+                energy_key = "{0}ing_energy_in_joules".format(current_phase)
+                if time_key in profiled_metrics:
+                    profiled_times.append(profiled_metrics[time_key])
+                if energy_key in profiled_metrics:
+                    profiled_energies.append(profiled_metrics[energy_key])
+            if profiled_times:
+                # Conservative bounds based on single-client profile observations.
+                historical_makespans.extend(profiled_times)
+            if profiled_energies:
+                historical_energy_consumptions.extend(profiled_energies)
+        # Final safe defaults.
+        if historical_makespans:
+            min_M_X = min(historical_makespans)
+            max_M_X = max(historical_makespans)
+        else:
+            min_M_X = 0.0
+            max_M_X = 1.0
+        if historical_energy_consumptions:
+            min_E_X = min(historical_energy_consumptions)
+            max_E_X = max(historical_energy_consumptions)
+        else:
+            min_E_X = 0.0
+            max_E_X = 1.0
+        # Avoid degenerate equal bounds.
+        if max_M_X <= min_M_X:
+            max_M_X = min_M_X + 1.0
+        if max_E_X <= min_E_X:
+            max_E_X = min_E_X + 1.0
+        normalization_bounds = {"min_M_X": min_M_X,
+                                "max_M_X": max_M_X,
+                                "min_E_X": min_E_X,
+                                "max_E_X": max_E_X}
+        return normalization_bounds
 
     def _new_client_selection_needed(self,
                                      current_round: int,
@@ -522,6 +735,7 @@ class MetaCSFL:
                         clients_profiles: dict,
                         time_limit: float,
                         data_privacy_approach: str,
+                        root_output_folder: Path,
                         logger: Logger) -> dict:
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
@@ -559,6 +773,19 @@ class MetaCSFL:
         metaheuristic = client_selection_settings["metaheuristic"]
         metaheuristic_name = metaheuristic["name"]
         metaheuristic_stopping_criteria = metaheuristic["stopping_criteria"]
+        # TODO: Get the utility score settings.
+        utility_score_settings = {"alpha": 0.5, "q": 3}
+        alpha = utility_score_settings["alpha"]
+        q = utility_score_settings["q"]
+        # Build the utility inputs for the current candidate clients.
+        phi_list, psi_list = self._build_utility_inputs(candidate_clients,
+                                                        selected_clients_metrics_history,
+                                                        clients_profiles,
+                                                        q)
+        normalization_bounds = self._build_fixed_normalization_bounds(current_phase,
+                                                                      selected_clients_metrics_history,
+                                                                      candidate_clients,
+                                                                      clients_profiles)
         # Initialize the best solution and its tasks' distribution.
         X_best = deepcopy(X_init)
         X_best_dist = deepcopy(X_init_dist)
@@ -573,14 +800,21 @@ class MetaCSFL:
             log_message(logger, message, "INFO")
             match metaheuristic_name:
                 case "LNS":
-                    # Run the LNS metaheuristic.
+                    # Get the LNS settings.
                     destroy_approach = metaheuristic["destroy_approach"]
                     accept_criteria = metaheuristic["accept_criteria"]
                     obj_func_weights = metaheuristic["obj_func_weights"]
+                    # Set the LNS traces output file.
+                    lns_traces_output_file = None
+                    write_traces_to_output_file = metaheuristic.get("write_traces_to_output_file", False)
+                    if write_traces_to_output_file:
+                        lns_traces_output_file_name = "lns_traces/round_{0}_{1}.csv".format(current_round, current_phase)
+                        lns_traces_output_file = Path(root_output_folder).joinpath(lns_traces_output_file_name)
                     # Set the schedules' task distribution approaches.
                     X_dist_approaches = {"X_init": client_selection_settings["initial_solution_tasks_distribution_scheme"],
                                          "X_rpr": client_selection_settings["metaheuristic_solution_tasks_distribution_scheme"],
                                          "X_best": client_selection_settings["metaheuristic_solution_tasks_distribution_scheme"]}
+                    # Run the LNS metaheuristic.
                     X_best, X_best_costs, mh_statistics = run_lns(X_init,
                                                                   rng,
                                                                   destroy_approach,
@@ -593,10 +827,15 @@ class MetaCSFL:
                                                                   remaining_battery_energy_list,
                                                                   time_costs,
                                                                   energy_costs,
+                                                                  phi_list,
+                                                                  psi_list,
+                                                                  alpha,
                                                                   metaheuristic_stopping_criteria,
                                                                   accept_criteria,
                                                                   obj_func_weights,
-                                                                  X_dist_approaches)
+                                                                  X_dist_approaches,
+                                                                  normalization_bounds,
+                                                                  lns_traces_output_file)
             # Log a 'metaheuristic execution time and iterations' message.
             message = "[MetaCS-FL | Round {0}] The '{1}' metaheuristic execution took {2} seconds " \
                       "(number of iterations: {3})." \
@@ -709,6 +948,7 @@ class MetaCSFL:
         clients_profiles = kwargs["clients_profiles"]
         time_limit = kwargs["time_limit"]
         data_privacy_approach = kwargs["data_privacy_approach"]
+        root_output_folder = kwargs["root_output_folder"]
         logger = kwargs["logger"]
         # Get the necessary properties of the candidate clients.
         task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
@@ -753,6 +993,7 @@ class MetaCSFL:
                                                     clients_profiles,
                                                     time_limit,
                                                     data_privacy_approach,
+                                                    root_output_folder,
                                                     logger)
         else:
             # Get the latest set of selected clients, if available.

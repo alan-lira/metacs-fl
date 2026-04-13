@@ -477,6 +477,28 @@ def calculate_class_coverage_and_standard_deviation_scores(X: list,
     return KCov_X, KStd_X
 
 
+def estimate_utility(X: list,
+                     t: int,
+                     phi_list: list,
+                     psi_list: list,
+                     alpha: float) -> float:
+    # Initialize the utility score of schedule X.
+    U_X = 0.0
+    for i, _ in enumerate(X):
+        # Get the number of tasks assigned to candidate client i.
+        x_i = X[i]
+        if x_i == 0:
+            u_i = 0.0
+        else:
+            phi_i = phi_list[i]
+            psi_i = psi_list[i]
+            u_i = (x_i / t) * ((alpha * phi_i) + ((1 - alpha) * psi_i))
+        # Update the utility score of the current candidate schedule.
+        U_X += u_i
+    # Return the utility score of schedule X.
+    return U_X
+
+
 def estimate_costs(n: int,
                    t: int,
                    A: list,
@@ -485,16 +507,19 @@ def estimate_costs(n: int,
                    B: list,
                    G: list,
                    E: list,
+                   phi_list: list,
+                   psi_list: list,
+                   alpha: float,
                    X_init: list,
                    X_best: list,
                    X_rpr: list,
                    X_dist_approaches: dict) -> dict:
     # Estimate the solution costs of the initial solution (X_init).
-    X_init_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, X_init, X_dist_approaches["X_init"])
+    X_init_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha, X_init, X_dist_approaches["X_init"])
     # Estimate the solution costs of the best solution (X_best).
-    X_best_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, X_best, X_dist_approaches["X_best"])
+    X_best_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha, X_best, X_dist_approaches["X_best"])
     # Estimate the solution costs of the repaired solution (X_rpr).
-    X_rpr_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, X_rpr, X_dist_approaches["X_rpr"])
+    X_rpr_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha, X_rpr, X_dist_approaches["X_rpr"])
     # Set the dictionary of estimated costs.
     estimated_costs = {"X_init": X_init_costs, "X_best": X_best_costs, "X_rpr": X_rpr_costs}
     # Return the dictionary of estimated costs.
@@ -528,19 +553,24 @@ def normalize_cost(cost: float,
                    cost_max: float) -> float:
     if cost_min == cost_max:
         return 0.0
+    # Avoid log(0).
+    epsilon = 1e-12
+    cost = max(cost, epsilon)
+    cost_min = max(cost_min, epsilon)
+    cost_max = max(cost_max, epsilon)
     cost_norm = (log(cost, e) - log(cost_min, e)) / (log(cost_max, e) - log(cost_min, e))
     return cost_norm
 
 
 def normalize_costs(sol_costs: dict,
-                    min_max_costs: dict) -> dict:
+                    normalization_bounds: dict) -> dict:
     normalized_costs = deepcopy(sol_costs)
     for k in normalized_costs.keys():
         if "M_X" in normalized_costs[k]:
-            M_X_norm = normalize_cost(normalized_costs[k]["M_X"], min_max_costs["min_M_X"], min_max_costs["max_M_X"])
+            M_X_norm = normalize_cost(normalized_costs[k]["M_X"], normalization_bounds["min_M_X"], normalization_bounds["max_M_X"])
             normalized_costs[k]["M_X"] = M_X_norm
         if "E_X" in normalized_costs[k]:
-            E_X_norm = normalize_cost(normalized_costs[k]["E_X"], min_max_costs["min_E_X"], min_max_costs["max_E_X"])
+            E_X_norm = normalize_cost(normalized_costs[k]["E_X"], normalization_bounds["min_E_X"], normalization_bounds["max_E_X"])
             normalized_costs[k]["E_X"] = E_X_norm
     return normalized_costs
 
@@ -553,6 +583,9 @@ def estimate_solution_costs(n: int,
                             B: list,
                             G: list,
                             E: list,
+                            phi_list: list,
+                            psi_list: list,
+                            alpha: float,
                             X: list,
                             X_dist_approach: str) -> dict:
     # Estimate the makespan.
@@ -572,6 +605,8 @@ def estimate_solution_costs(n: int,
             X_dist = distribute_tasks_with_globally_balanced_approach(X, Y)
     # Calculate the class coverage and class standard deviation scores.
     KCov_X, KStd_X = calculate_class_coverage_and_standard_deviation_scores(X, X_dist, t, Y)
+    # Estimate the utility score.
+    U_X = estimate_utility(X, t, phi_list, psi_list, alpha)
     # Set the dictionary of estimated costs for the schedule X.
     X_costs = {"X": X,
                "X_dist": X_dist,
@@ -580,6 +615,7 @@ def estimate_solution_costs(n: int,
                "B_X": B_X,
                "D_X": D_X,
                "KCov_X": KCov_X,
-               "KStd_X": KStd_X}
+               "KStd_X": KStd_X,
+               "U_X": U_X}
     # Return the dictionary of estimated costs for the schedule X.
     return X_costs
