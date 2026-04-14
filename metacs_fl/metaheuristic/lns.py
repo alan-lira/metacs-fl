@@ -262,6 +262,11 @@ def run_lns(X_init: list,
             phi_list: list,
             psi_list: list,
             alpha: float,
+            candidate_client_ids: list,
+            current_round: int,
+            client_diversity_last_q_rounds: int,
+            candidate_clients_history_ids: dict,
+            selected_clients_history_ids: dict,
             stop_criteria: dict,
             accept_criteria: dict,
             obj_func_weights: dict,
@@ -300,7 +305,13 @@ def run_lns(X_init: list,
             changed_vs_curr = int(list(X_rpr) != list(X_curr))
             # Estimate costs.
             trace_stage = "estimate_costs"
-            sol_costs = estimate_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha, X_init, X_best, X_rpr, X_dist_approaches)
+            sol_costs = estimate_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha,
+                                       X_init, X_best, X_rpr, X_dist_approaches,
+                                       candidate_client_ids,
+                                       current_round,
+                                       client_diversity_last_q_rounds,
+                                       candidate_clients_history_ids,
+                                       selected_clients_history_ids)
             # Check if the repaired solution is acceptable.
             trace_stage = "lns_accept"
             to_accept = lns_accept(sol_costs, accept_criteria, tau, t, A)

@@ -56,56 +56,82 @@ def estimate_energy_consumption(X: list,
 
 
 def calculate_client_diversity_score(X: list,
-                                     n: int) -> float:
-    P = []
-    for i, _ in enumerate(X):
-        s_i = 1 if X[i] > 0 else 0
-        p_i = s_i / n
-        P.append(p_i)
+                                     candidate_client_ids: list,
+                                     current_round: int,
+                                     q: int,
+                                     candidate_clients_history_ids: dict,
+                                     selected_clients_history_ids: dict) -> float:
+    # Build a temporary copy of the selection history so we can evaluate X as the
+    # current round without mutating the original state.
+    selected_hist = deepcopy(selected_clients_history_ids or {})
+    # Selected clients induced by schedule X in the current round.
+    selected_client_ids = [candidate_client_ids[i] for i, x_i in enumerate(X) if x_i > 0]
+    selected_hist[current_round] = selected_client_ids
+    # History window: current round + previous q-1 rounds.
+    first_round = max(1, current_round - q + 1)
+    rounds_window = range(first_round, current_round + 1)
+    # Count selections in the window.
+    selection_counter = Counter()
+    for r in rounds_window:
+        S_r = selected_hist.get(r, [])
+        selection_counter.update(S_r)
+    # No selections at all.
+    total_selected = sum(selection_counter.values())
+    if total_selected == 0:
+        return 0.0
+    # Not enough candidate clients to define diversity.
+    if len(candidate_client_ids) <= 1:
+        return 0.0
+    # Relative participation frequency p_{i,r}.
+    P_sel = []
+    for client_id in candidate_client_ids:
+        p_i_r = selection_counter.get(client_id, 0) / total_selected
+        if p_i_r > 0:
+            P_sel.append(p_i_r)
     # Shannon Evenness Index.
-    H = - sum(pi * log(pi, e) for pi in P if pi > 0)
-    H_max = log(n, e)
-    D = H / H_max if H_max > 0 else 0
+    H = -sum(pi * log(pi, e) for pi in P_sel)
+    H_max = log(len(candidate_client_ids), e)
+    D = H / H_max if H_max > 0 else 0.0
     return D
 
 
-def calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_clients_history_ids: dict,
+def calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_client_ids: list,
+                                                                   candidate_clients_history_ids: dict,
                                                                    selected_clients_history_ids: dict,
                                                                    x: int) -> float:
-    if not selected_clients_history_ids:
-        return 0.0  # No data
-    # Determine last round number.
-    last_round = max(selected_clients_history_ids.keys())
+    if not candidate_client_ids:
+        return 0.0  # No candidate clients
+    if len(candidate_client_ids) <= 1:
+        return 0.0  # Not enough candidate clients to define diversity
+    # Determine last round number from the available history.
+    history_round_keys = set(candidate_clients_history_ids.keys()) | set(selected_clients_history_ids.keys())
+    if not history_round_keys:
+        return 0.0
+    last_round = max(history_round_keys)
     # Get keys of past x rounds.
     past_rounds_keys = [r for r in range(last_round - x + 1, last_round + 1) if r > 0]
-    candidate_counter = Counter()
+    # Count selections in the history window.
     selection_counter = Counter()
     for r in past_rounds_keys:
-        if r not in selected_clients_history_ids or r not in candidate_clients_history_ids:
-            continue  # skip missing rounds safely
-        C_r = candidate_clients_history_ids[r]
+        if r not in selected_clients_history_ids:
+            continue
         S_r = selected_clients_history_ids[r]
-        candidate_counter.update(C_r)
         selection_counter.update(S_r)
-    # Build normalized selection frequencies.
-    relative_freqs = []
-    for client in candidate_counter:
-        candidate_count = candidate_counter[client]
-        selection_count = selection_counter.get(client, 0)
-        # Avoid division by zero (shouldn't happen but safe).
-        rel_freq = selection_count / candidate_count if candidate_count > 0 else 0
-        relative_freqs.append(rel_freq)
-    if len(relative_freqs) <= 1:
-        return 0.0  # Not enough diversity to compute.
-    # Normalize relative frequencies to sum to 1.
-    total_rel_freq = sum(relative_freqs)
-    if total_rel_freq == 0:
-        return 0.0  # No selections at all.
-    P_sel = [rf / total_rel_freq for rf in relative_freqs]
+    # No selections at all.
+    total_selected = sum(selection_counter.values())
+    if total_selected == 0:
+        return 0.0
+    # Relative participation frequency p_i over the history window,
+    # using the current candidate set as the support.
+    P_sel = []
+    for client_id in candidate_client_ids:
+        p_i = selection_counter.get(client_id, 0) / total_selected
+        if p_i > 0:
+            P_sel.append(p_i)
     # Shannon Evenness Index.
-    H = - sum(pi * log(pi, e) for pi in P_sel if pi > 0)
-    H_max = log(len(P_sel), e)
-    D = H / H_max if H_max > 0 else 0
+    H = -sum(pi * log(pi, e) for pi in P_sel)
+    H_max = log(len(candidate_client_ids), e)
+    D = H / H_max if H_max > 0 else 0.0
     return D
 
 
@@ -513,13 +539,27 @@ def estimate_costs(n: int,
                    X_init: list,
                    X_best: list,
                    X_rpr: list,
-                   X_dist_approaches: dict) -> dict:
+                   X_dist_approaches: dict,
+                   candidate_client_ids: list,
+                   current_round: int,
+                   q: int,
+                   candidate_clients_history_ids: dict,
+                   selected_clients_history_ids: dict) -> dict:
     # Estimate the solution costs of the initial solution (X_init).
-    X_init_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha, X_init, X_dist_approaches["X_init"])
+    X_init_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha,
+                                           X_init, X_dist_approaches["X_init"],
+                                           candidate_client_ids, current_round, q,
+                                           candidate_clients_history_ids, selected_clients_history_ids)
     # Estimate the solution costs of the best solution (X_best).
-    X_best_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha, X_best, X_dist_approaches["X_best"])
+    X_best_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha,
+                                           X_best, X_dist_approaches["X_best"],
+                                           candidate_client_ids, current_round, q,
+                                           candidate_clients_history_ids, selected_clients_history_ids)
     # Estimate the solution costs of the repaired solution (X_rpr).
-    X_rpr_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha, X_rpr, X_dist_approaches["X_rpr"])
+    X_rpr_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha,
+                                          X_rpr, X_dist_approaches["X_rpr"],
+                                          candidate_client_ids, current_round, q,
+                                          candidate_clients_history_ids, selected_clients_history_ids)
     # Set the dictionary of estimated costs.
     estimated_costs = {"X_init": X_init_costs, "X_best": X_best_costs, "X_rpr": X_rpr_costs}
     # Return the dictionary of estimated costs.
@@ -587,13 +627,18 @@ def estimate_solution_costs(n: int,
                             psi_list: list,
                             alpha: float,
                             X: list,
-                            X_dist_approach: str) -> dict:
+                            X_dist_approach: str,
+                            candidate_client_ids: list,
+                            current_round: int,
+                            q: int,
+                            candidate_clients_history_ids: dict,
+                            selected_clients_history_ids: dict) -> dict:
     # Estimate the makespan.
     M_X = estimate_makespan(X, A, G)
     # Estimate the energy consumption and remaining battery levels.
     E_X, B_X = estimate_energy_consumption(X, M_X, A, I, B, E)
     # Calculate the client diversity score.
-    D_X = calculate_client_diversity_score(X, n)
+    D_X = calculate_client_diversity_score(X, candidate_client_ids, current_round, q, candidate_clients_history_ids, selected_clients_history_ids)
     # Distribute the type of tasks scheduled per client.
     X_dist = []
     match X_dist_approach:

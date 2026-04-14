@@ -262,6 +262,32 @@ class MetaCSFL:
             psi_list.append(psi_i)
         return phi_list, psi_list
 
+    def _build_client_diversity_inputs(self,
+                                       current_round: int,
+                                       current_phase: str,
+                                       candidate_clients: dict,
+                                       q: int) -> tuple:
+        candidate_client_ids = list(candidate_clients.keys())
+        internal_candidate_clients_history = self.get_attribute("_internal_candidate_clients_history")
+        internal_selected_clients_history = self.get_attribute("_internal_selected_clients_history")
+        candidate_clients_history_ids = {}
+        selected_clients_history_ids = {}
+        # Define history window: last q rounds before current_round.
+        first_round = max(1, current_round - q)
+        rounds_window = range(first_round, current_round)
+        for round_key in rounds_window:
+            # Candidate history.
+            if round_key in internal_candidate_clients_history:
+                round_candidate_clients = internal_candidate_clients_history[round_key]
+                if current_phase in round_candidate_clients:
+                    candidate_clients_history_ids[round_key] = list(round_candidate_clients[current_phase].keys())
+            # Selected history.
+            if round_key in internal_selected_clients_history:
+                round_selected_clients = internal_selected_clients_history[round_key]
+                if current_phase in round_selected_clients:
+                    selected_clients_history_ids[round_key] = list(round_selected_clients[current_phase].keys())
+        return candidate_client_ids, candidate_clients_history_ids, selected_clients_history_ids
+
     @staticmethod
     def _build_fixed_normalization_bounds(current_phase: str,
                                           selected_clients_metrics_history: dict,
@@ -381,32 +407,32 @@ class MetaCSFL:
                         minimum_score = crit_conf.get("minimum_score", None)
                         maximum_relative_drop = crit_conf.get("maximum_relative_drop", None)
                         num_past_rounds = crit_conf["num_past_rounds"]
-                        internal_candidate_clients_history = self.get_attribute("_internal_candidate_clients_history")
-                        internal_selected_clients_history = self.get_attribute("_internal_selected_clients_history")
-                        candidate_clients_history_ids = {}
-                        selected_clients_history_ids = {}
-                        for round_key, round_candidate_clients in internal_candidate_clients_history.items():
-                            if phase_of_interest in round_candidate_clients:
-                                candidate_clients_history_ids.update({round_key: list(round_candidate_clients[phase_of_interest].keys())})
-                        for round_key, round_selected_clients in internal_selected_clients_history.items():
-                            if phase_of_interest in round_selected_clients:
-                                selected_clients_history_ids.update({round_key: list(round_selected_clients[phase_of_interest].keys())})
+                        candidate_client_ids, candidate_clients_history_ids, selected_clients_history_ids = \
+                            self._build_client_diversity_inputs(current_round,
+                                                                phase_of_interest,
+                                                                candidate_clients,
+                                                                num_past_rounds)
                         if minimum_score:
-                            accumulative_client_diversity_score \
-                               = calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_clients_history_ids,
-                                                                                                selected_clients_history_ids,
-                                                                                                num_past_rounds)
+                            accumulative_client_diversity_score = \
+                                calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_client_ids,
+                                                                                               candidate_clients_history_ids,
+                                                                                               selected_clients_history_ids,
+                                                                                               num_past_rounds)
                             if accumulative_client_diversity_score < minimum_score:
-                               new_client_selection_criteria.append(True)
-                               new_client_selection_reasons.append("The accumulative client diversity score over the past {0} rounds has fallen below {1} during the training phase ({2})."
-                                                                   .format(num_past_rounds, minimum_score, round(accumulative_client_diversity_score, 2)))
+                                new_client_selection_criteria.append(True)
+                                new_client_selection_reasons.append(
+                                    "The accumulative client diversity score over the past {0} rounds has fallen below {1} during the training phase ({2})."
+                                    .format(num_past_rounds, minimum_score,
+                                            round(accumulative_client_diversity_score, 2)))
                         elif maximum_relative_drop:
                             current_client_diversity_score = \
-                                calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_clients_history_ids,
+                                calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_client_ids,
+                                                                                               candidate_clients_history_ids,
                                                                                                selected_clients_history_ids,
                                                                                                num_past_rounds)
                             previous_client_diversity_score = \
-                                calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_clients_history_ids,
+                                calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_client_ids,
+                                                                                               candidate_clients_history_ids,
                                                                                                selected_clients_history_ids,
                                                                                                num_past_rounds + 1)
                             if previous_client_diversity_score > 0:
@@ -782,6 +808,13 @@ class MetaCSFL:
                                                         selected_clients_metrics_history,
                                                         clients_profiles,
                                                         q)
+        # Build the client diversity inputs for the current candidate clients.
+        candidate_client_ids, candidate_clients_history_ids, selected_clients_history_ids \
+            = self._build_client_diversity_inputs(current_round,
+                                                  current_phase,
+                                                  candidate_clients,
+                                                  q)
+        # Build the fixed normalization bounds.
         normalization_bounds = self._build_fixed_normalization_bounds(current_phase,
                                                                       selected_clients_metrics_history,
                                                                       candidate_clients,
@@ -830,6 +863,11 @@ class MetaCSFL:
                                                                   phi_list,
                                                                   psi_list,
                                                                   alpha,
+                                                                  candidate_client_ids,
+                                                                  current_round,
+                                                                  q,
+                                                                  candidate_clients_history_ids,
+                                                                  selected_clients_history_ids,
                                                                   metaheuristic_stopping_criteria,
                                                                   accept_criteria,
                                                                   obj_func_weights,
