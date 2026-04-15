@@ -212,8 +212,8 @@ def lns_accept(sol_costs: dict,
     # Validate the 'maximum makespan allowed' constraint.
     acpt_res.append(M_X_rpr <= tau)
     # Validate the 'remaining battery energy per client' constraint.
-    B_X_rpr = sol_costs["X_rpr"]["B_X"]
-    acpt_res.append(all(i >= accept_criteria["bl_min"] for i in B_X_rpr))
+    BL_X_rpr = sol_costs["X_rpr"]["BL_X"]
+    acpt_res.append(all(i >= accept_criteria["bl_min"] for i in BL_X_rpr))
     # Validate the 'total number of tasks scheduled' constraint.
     X_rpr = sol_costs["X_rpr"]["X"]
     t_X_rpr = sum(X_rpr[i] for i in range(0, len(X_rpr)))
@@ -230,8 +230,7 @@ def lns_F(obj_func_costs: dict,
     F_X = (obj_func_weights["M_weight"] * obj_func_costs["M_X"]) \
           + (obj_func_weights["E_weight"] * obj_func_costs["E_X"]) \
           - (obj_func_weights["D_weight"] * obj_func_costs["D_X"]) \
-          - (obj_func_weights["KCov_weight"] * obj_func_costs["KCov_X"]) \
-          + (obj_func_weights["KStd_weight"] * obj_func_costs["KStd_X"]) \
+          - (obj_func_weights["B_weight"] * obj_func_costs["B_X"]) \
           - (obj_func_weights["U_weight"] * obj_func_costs["U_X"])
     return F_X
 
@@ -346,8 +345,7 @@ def run_lns(X_init: list,
                              "M_X_rpr": sol_costs["X_rpr"]["M_X"],
                              "E_X_rpr": sol_costs["X_rpr"]["E_X"],
                              "D_X_rpr": sol_costs["X_rpr"]["D_X"],
-                             "KCov_X_rpr": sol_costs["X_rpr"]["KCov_X"],
-                             "KStd_X_rpr": sol_costs["X_rpr"]["KStd_X"],
+                             "B_X_rpr": sol_costs["X_rpr"]["B_X"],
                              "U_X_rpr": sol_costs["X_rpr"]["U_X"]}
             lns_trace_rows.append(lns_trace_row)
             # LNS Block (End).

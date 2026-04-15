@@ -31,7 +31,7 @@ def estimate_energy_consumption(X: list,
                                 E: list) -> tuple:
     # Initialize the estimated energy consumption and remaining battery level of schedule X.
     E_X = []
-    B_X = []
+    BL_X = []
     for i, _ in enumerate(X):
         # Get the number of tasks assigned to candidate client i.
         x_i = X[i]
@@ -48,11 +48,11 @@ def estimate_energy_consumption(X: list,
     # Get the remaining battery level of all clients.
     for i, _ in enumerate(X):
         bl_i = 0 if E_X[i] >= B[i] else B[i] - E_X[i]
-        B_X.append(bl_i)
+        BL_X.append(bl_i)
     # Calculate the total energy consumption of the current candidate schedule.
     E_X = sum(E_X)
     # Return the estimated energy consumption and remaining battery level of schedule X.
-    return E_X, B_X
+    return E_X, BL_X
 
 
 def calculate_client_diversity_score(X: list,
@@ -470,10 +470,11 @@ def adjust_num_epochs(X: list,
     return adjusted_num_epochs
 
 
-def calculate_class_coverage_and_standard_deviation_scores(X: list,
-                                                           X_dist: list,
-                                                           t: int,
-                                                           Y: list) -> tuple:
+def calculate_class_distribution_score(X: list,
+                                       X_dist: list,
+                                       t: int,
+                                       Y: list,
+                                       beta: float = 0.5) -> tuple:
     # Get the number of task classes from the first client.
     m = len(Y[0])
     # Initialize the lists of available and assigned types of tasks across the clients.
@@ -499,8 +500,10 @@ def calculate_class_coverage_and_standard_deviation_scores(X: list,
     max_std_dev = t / sqrt(m)
     # Normalized class standard deviation score (between 0 and 1).
     KStd_X = std_dev / max_std_dev if max_std_dev != 0 else 0
-    # Return the class coverage and standard deviation scores.
-    return KCov_X, KStd_X
+    # Calculate the class-distribution quality score (B_X).
+    B_X = (beta * KCov_X) + ((1 - beta) * (1 - KStd_X))
+    # Return the class-distribution quality score and intermediate scores.
+    return B_X, KCov_X, KStd_X
 
 
 def estimate_utility(X: list,
@@ -636,7 +639,7 @@ def estimate_solution_costs(n: int,
     # Estimate the makespan.
     M_X = estimate_makespan(X, A, G)
     # Estimate the energy consumption and remaining battery levels.
-    E_X, B_X = estimate_energy_consumption(X, M_X, A, I, B, E)
+    E_X, BL_X = estimate_energy_consumption(X, M_X, A, I, B, E)
     # Calculate the client diversity score.
     D_X = calculate_client_diversity_score(X, candidate_client_ids, current_round, q, candidate_clients_history_ids, selected_clients_history_ids)
     # Distribute the type of tasks scheduled per client.
@@ -648,8 +651,8 @@ def estimate_solution_costs(n: int,
             X_dist = distribute_tasks_with_locally_balanced_approach(X, Y)
         case "globally_balanced":
             X_dist = distribute_tasks_with_globally_balanced_approach(X, Y)
-    # Calculate the class coverage and class standard deviation scores.
-    KCov_X, KStd_X = calculate_class_coverage_and_standard_deviation_scores(X, X_dist, t, Y)
+    # Calculate the class-distribution quality score.
+    B_X, KCov_X, KStd_X = calculate_class_distribution_score(X, X_dist, t, Y)
     # Estimate the utility score.
     U_X = estimate_utility(X, t, phi_list, psi_list, alpha)
     # Set the dictionary of estimated costs for the schedule X.
@@ -657,8 +660,9 @@ def estimate_solution_costs(n: int,
                "X_dist": X_dist,
                "M_X": M_X,
                "E_X": E_X,
-               "B_X": B_X,
+               "BL_X": BL_X,
                "D_X": D_X,
+               "B_X": B_X,
                "KCov_X": KCov_X,
                "KStd_X": KStd_X,
                "U_X": U_X}
