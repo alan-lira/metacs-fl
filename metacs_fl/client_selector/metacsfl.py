@@ -58,7 +58,7 @@ class MetaCSFL:
     @staticmethod
     def _get_latest_selection(selected_clients_history: dict,
                               current_round: int,
-                              current_phase: str)-> dict:
+                              current_phase: str) -> dict:
         selected_clients = {}
         previous_round = current_round - 1
         if previous_round in selected_clients_history and current_phase in selected_clients_history[previous_round]:
@@ -167,13 +167,46 @@ class MetaCSFL:
             return 1.0
         return normalized_value
 
-    def _collect_client_losses_from_history(self,
-                                            selected_clients_metrics_history: dict,
-                                            candidate_clients: dict,
-                                            clients_profiles: dict) -> tuple:
+    @staticmethod
+    def _get_history_workload_for_client(round_idx: int,
+                                         phase: str,
+                                         client_id: str,
+                                         selected_clients_history: dict,
+                                         selected_clients_metrics_history: dict,
+                                         samples_per_task: int) -> float:
+        workload = None
+        if round_idx in selected_clients_history and phase in selected_clients_history[round_idx]:
+            selected_clients_phase = selected_clients_history[round_idx][phase]
+            if client_id in selected_clients_phase:
+                client_selection_info = selected_clients_phase[client_id]
+                if "client_num_tasks_scheduled" in client_selection_info:
+                    workload = client_selection_info["client_num_tasks_scheduled"]
+                elif "client_num_samples_scheduled" in client_selection_info:
+                    num_samples_scheduled = client_selection_info["client_num_samples_scheduled"]
+                    workload = num_samples_scheduled / samples_per_task if samples_per_task > 0 else num_samples_scheduled
+        if workload is not None:
+            return float(workload)
+        if round_idx in selected_clients_metrics_history and phase in selected_clients_metrics_history[round_idx]:
+            clients_metrics_dicts = selected_clients_metrics_history[round_idx][phase].get("clients_metrics_dicts", [])
+            for client_metrics_dict in clients_metrics_dicts:
+                if client_id in client_metrics_dict:
+                    client_metrics = client_metrics_dict[client_id]
+                    if "num_examples" in client_metrics:
+                        num_examples_used = client_metrics["num_examples"]
+                        if samples_per_task > 0:
+                            return float(num_examples_used) / samples_per_task
+                        return float(num_examples_used)
+        return 0.0
+
+    def _collect_client_weighted_loss_history(self,
+                                              selected_clients_history: dict,
+                                              selected_clients_metrics_history: dict,
+                                              candidate_clients: dict,
+                                              clients_profiles: dict,
+                                              samples_per_task: int) -> tuple:
         candidate_client_ids = list(candidate_clients.keys())
-        train_losses_by_client = {client_id: [] for client_id in candidate_client_ids}
-        test_losses_by_client = {client_id: [] for client_id in candidate_client_ids}
+        train_history_by_client = {client_id: [] for client_id in candidate_client_ids}
+        test_history_by_client = {client_id: [] for client_id in candidate_client_ids}
         all_train_losses = []
         all_test_losses = []
         for round_idx in sorted(selected_clients_metrics_history.keys()):
@@ -183,53 +216,81 @@ class MetaCSFL:
                 clients_metrics_dicts = round_metrics["train"]["clients_metrics_dicts"]
                 for client_metrics_dict in clients_metrics_dicts:
                     client_id = next(iter(client_metrics_dict))
-                    if client_id not in train_losses_by_client:
+                    if client_id not in train_history_by_client:
                         continue
                     client_metrics = client_metrics_dict[client_id]
                     if "loss" in client_metrics:
                         loss_value = client_metrics["loss"]
-                        train_losses_by_client[client_id].append(loss_value)
-                        all_train_losses.append(loss_value)
+                        workload_value = self._get_history_workload_for_client(round_idx,
+                                                                              "train",
+                                                                              client_id,
+                                                                              selected_clients_history,
+                                                                              selected_clients_metrics_history,
+                                                                              samples_per_task)
+                        if workload_value > 0:
+                            train_history_by_client[client_id].append({"loss": loss_value, "workload": workload_value})
+                            all_train_losses.append(loss_value)
             # Testing losses.
             if "test" in round_metrics and "clients_metrics_dicts" in round_metrics["test"]:
                 clients_metrics_dicts = round_metrics["test"]["clients_metrics_dicts"]
                 for client_metrics_dict in clients_metrics_dicts:
                     client_id = next(iter(client_metrics_dict))
-                    if client_id not in test_losses_by_client:
+                    if client_id not in test_history_by_client:
                         continue
                     client_metrics = client_metrics_dict[client_id]
                     if "loss" in client_metrics:
                         loss_value = client_metrics["loss"]
-                        test_losses_by_client[client_id].append(loss_value)
-                        all_test_losses.append(loss_value)
+                        workload_value = self._get_history_workload_for_client(round_idx,
+                                                                              "test",
+                                                                              client_id,
+                                                                              selected_clients_history,
+                                                                              selected_clients_metrics_history,
+                                                                              samples_per_task)
+                        if workload_value > 0:
+                            test_history_by_client[client_id].append({"loss": loss_value, "workload": workload_value})
+                            all_test_losses.append(loss_value)
         # Fallback to profiling losses when no history exists for a client.
         for client_id in candidate_client_ids:
-            if not train_losses_by_client[client_id]:
+            task_assignment_capacities_train_key = "client_task_assignment_capacities_train"
+            task_assignment_capacities_test_key = "client_task_assignment_capacities_test"
+            if not train_history_by_client[client_id]:
                 train_profile_loss = self._get_profile_loss_for_phase(client_id,
                                                                       candidate_clients,
                                                                       clients_profiles,
                                                                       "train")
                 if train_profile_loss is not None:
-                    train_losses_by_client[client_id].append(train_profile_loss)
+                    fallback_workload = 1.0
+                    if task_assignment_capacities_train_key in candidate_clients[client_id]:
+                        fallback_workload = float(max(candidate_clients[client_id][task_assignment_capacities_train_key]))
+                    train_history_by_client[client_id].append({"loss": train_profile_loss, "workload": fallback_workload})
                     all_train_losses.append(train_profile_loss)
-            if not test_losses_by_client[client_id]:
+            if not test_history_by_client[client_id]:
                 test_profile_loss = self._get_profile_loss_for_phase(client_id,
                                                                      candidate_clients,
                                                                      clients_profiles,
                                                                      "test")
                 if test_profile_loss is not None:
-                    test_losses_by_client[client_id].append(test_profile_loss)
+                    fallback_workload = 1.0
+                    if task_assignment_capacities_test_key in candidate_clients[client_id]:
+                        fallback_workload = float(max(candidate_clients[client_id][task_assignment_capacities_test_key]))
+                    test_history_by_client[client_id].append({"loss": test_profile_loss, "workload": fallback_workload})
                     all_test_losses.append(test_profile_loss)
-        return train_losses_by_client, test_losses_by_client, all_train_losses, all_test_losses
+        return train_history_by_client, test_history_by_client, all_train_losses, all_test_losses
 
     def _build_utility_inputs(self,
                               candidate_clients: dict,
+                              selected_clients_history: dict,
                               selected_clients_metrics_history: dict,
                               clients_profiles: dict,
-                              q: int) -> tuple:
+                              q: int,
+                              samples_per_task: int) -> tuple:
         candidate_client_ids = list(candidate_clients.keys())
-        train_losses_by_client, test_losses_by_client, all_train_losses, all_test_losses = \
-            self._collect_client_losses_from_history(selected_clients_metrics_history, candidate_clients, clients_profiles)
+        train_history_by_client, test_history_by_client, all_train_losses, all_test_losses = \
+            self._collect_client_weighted_loss_history(selected_clients_history,
+                                                       selected_clients_metrics_history,
+                                                       candidate_clients,
+                                                       clients_profiles,
+                                                       samples_per_task)
         # Safe bounds from observed historical values.
         min_train_loss = min(all_train_losses) if all_train_losses else 0.0
         max_train_loss = max(all_train_losses) if all_train_losses else 1.0
@@ -237,30 +298,48 @@ class MetaCSFL:
         max_test_loss = max(all_test_losses) if all_test_losses else 1.0
         phi_list = []
         psi_list = []
+        q_i_train_list = []
+        q_i_test_list = []
         for client_id in candidate_client_ids:
-            client_train_losses = train_losses_by_client.get(client_id, [])
-            client_test_losses = test_losses_by_client.get(client_id, [])
-            # Use the last q training participation.
-            recent_train_losses = client_train_losses[-q:] if q > 0 else client_train_losses
-            normalized_recent_train_losses = [self._normalize_value(loss_value, min_train_loss, max_train_loss)
-                                              for loss_value in recent_train_losses]
-            normalized_latest_test_loss = 1.0
-            if client_test_losses:
-                latest_test_loss = client_test_losses[-1]
-                normalized_latest_test_loss = self._normalize_value(latest_test_loss, min_test_loss, max_test_loss)
-            # Assumption: every eligible client has at least one profiling round with train/test loss (defensive fallbacks).
-            if normalized_recent_train_losses:
-                avg_normalized_train_loss = sum(normalized_recent_train_losses) / len(normalized_recent_train_losses)
-                phi_i = 1 - avg_normalized_train_loss
+            client_train_history = train_history_by_client.get(client_id, [])
+            client_test_history = test_history_by_client.get(client_id, [])
+            # Use the last q most recent participations available for each client.
+            recent_train_history = client_train_history[-q:] if q > 0 else client_train_history
+            recent_test_history = client_test_history[-q:] if q > 0 else client_test_history
+            q_i_train = len(recent_train_history)
+            q_i_test = len(recent_test_history)
+            q_i_train_list.append(q_i_train)
+            q_i_test_list.append(q_i_test)
+            # Weighted moving average of normalized training loss.
+            if recent_train_history:
+                weighted_train_loss_sum = 0.0
+                train_workload_sum = 0.0
+                for history_entry in recent_train_history:
+                    normalized_train_loss = self._normalize_value(history_entry["loss"], min_train_loss, max_train_loss)
+                    workload_value = history_entry["workload"]
+                    weighted_train_loss_sum += workload_value * normalized_train_loss
+                    train_workload_sum += workload_value
+                phi_i = 1 - (weighted_train_loss_sum / train_workload_sum) if train_workload_sum > 0 else 0.0
             else:
                 phi_i = 0.0
-            psi_i = 1 - normalized_latest_test_loss
+            # Weighted moving average of normalized test loss.
+            if recent_test_history:
+                weighted_test_loss_sum = 0.0
+                test_workload_sum = 0.0
+                for history_entry in recent_test_history:
+                    normalized_test_loss = self._normalize_value(history_entry["loss"], min_test_loss, max_test_loss)
+                    workload_value = history_entry["workload"]
+                    weighted_test_loss_sum += workload_value * normalized_test_loss
+                    test_workload_sum += workload_value
+                psi_i = 1 - (weighted_test_loss_sum / test_workload_sum) if test_workload_sum > 0 else 0.0
+            else:
+                psi_i = 0.0
             # Clamp to [0, 1].
             phi_i = max(0.0, min(1.0, phi_i))
             psi_i = max(0.0, min(1.0, psi_i))
             phi_list.append(phi_i)
             psi_list.append(psi_i)
-        return phi_list, psi_list
+        return phi_list, psi_list, q_i_train_list, q_i_test_list
 
     def _build_client_diversity_inputs(self,
                                        current_round: int,
@@ -757,6 +836,7 @@ class MetaCSFL:
                         base_learning_rate: float,
                         base_batch_size: int,
                         base_num_epochs: int,
+                        selected_clients_history: dict,
                         selected_clients_metrics_history: dict,
                         clients_profiles: dict,
                         time_limit: float,
@@ -799,15 +879,20 @@ class MetaCSFL:
         metaheuristic = client_selection_settings["metaheuristic"]
         metaheuristic_name = metaheuristic["name"]
         metaheuristic_stopping_criteria = metaheuristic["stopping_criteria"]
-        # TODO: Get the utility score settings.
-        utility_score_settings = {"alpha": 0.5, "q": 3}
-        alpha = utility_score_settings["alpha"]
-        q = utility_score_settings["q"]
+        # Get the utility score settings.
+        utility_score_settings = client_selection_settings.get("utility_score_settings", {})
+        alpha = utility_score_settings.get("alpha", 0.5)
+        q = utility_score_settings.get("q", 3)
+        # Get the class-distribution score settings.
+        class_distribution_score_settings = client_selection_settings.get("class_distribution_score_settings", {})
+        beta = class_distribution_score_settings.get("beta", 0.5)
         # Build the utility inputs for the current candidate clients.
-        phi_list, psi_list = self._build_utility_inputs(candidate_clients,
-                                                        selected_clients_metrics_history,
-                                                        clients_profiles,
-                                                        q)
+        phi_list, psi_list, q_i_train_list, q_i_test_list = self._build_utility_inputs(candidate_clients,
+                                                                                        selected_clients_history,
+                                                                                        selected_clients_metrics_history,
+                                                                                        clients_profiles,
+                                                                                        q,
+                                                                                        samples_per_task)
         # Build the client diversity inputs for the current candidate clients.
         candidate_client_ids, candidate_clients_history_ids, selected_clients_history_ids \
             = self._build_client_diversity_inputs(current_round,
@@ -863,6 +948,7 @@ class MetaCSFL:
                                                                   phi_list,
                                                                   psi_list,
                                                                   alpha,
+                                                                  beta,
                                                                   candidate_client_ids,
                                                                   current_round,
                                                                   q,
@@ -1027,6 +1113,7 @@ class MetaCSFL:
                                                     base_learning_rate,
                                                     base_batch_size,
                                                     base_num_epochs,
+                                                    selected_clients_history,
                                                     selected_clients_metrics_history,
                                                     clients_profiles,
                                                     time_limit,

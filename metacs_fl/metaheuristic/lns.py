@@ -230,7 +230,7 @@ def lns_F(obj_func_costs: dict,
     F_X = (obj_func_weights["M_weight"] * obj_func_costs["M_X"]) \
           + (obj_func_weights["E_weight"] * obj_func_costs["E_X"]) \
           - (obj_func_weights["D_weight"] * obj_func_costs["D_X"]) \
-          - (obj_func_weights["B_weight"] * obj_func_costs["B_X"]) \
+          - (obj_func_weights["K_weight"] * obj_func_costs["K_X"]) \
           - (obj_func_weights["U_weight"] * obj_func_costs["U_X"])
     return F_X
 
@@ -261,6 +261,7 @@ def run_lns(X_init: list,
             phi_list: list,
             psi_list: list,
             alpha: float,
+            beta: float,
             candidate_client_ids: list,
             current_round: int,
             client_diversity_last_q_rounds: int,
@@ -310,7 +311,8 @@ def run_lns(X_init: list,
                                        current_round,
                                        client_diversity_last_q_rounds,
                                        candidate_clients_history_ids,
-                                       selected_clients_history_ids)
+                                       selected_clients_history_ids,
+                                       beta)
             # Check if the repaired solution is acceptable.
             trace_stage = "lns_accept"
             to_accept = lns_accept(sol_costs, accept_criteria, tau, t, A)
@@ -345,7 +347,7 @@ def run_lns(X_init: list,
                              "M_X_rpr": sol_costs["X_rpr"]["M_X"],
                              "E_X_rpr": sol_costs["X_rpr"]["E_X"],
                              "D_X_rpr": sol_costs["X_rpr"]["D_X"],
-                             "B_X_rpr": sol_costs["X_rpr"]["B_X"],
+                             "K_X_rpr": sol_costs["X_rpr"]["K_X"],
                              "U_X_rpr": sol_costs["X_rpr"]["U_X"]}
             lns_trace_rows.append(lns_trace_row)
             # LNS Block (End).

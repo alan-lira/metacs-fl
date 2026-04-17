@@ -82,7 +82,7 @@ def calculate_client_diversity_score(X: list,
     # Not enough candidate clients to define diversity.
     if len(candidate_client_ids) <= 1:
         return 0.0
-    # Relative participation frequency p_{i,r}.
+    # Relative participation frequency over the last q rounds.
     P_sel = []
     for client_id in candidate_client_ids:
         p_i_r = selection_counter.get(client_id, 0) / total_selected
@@ -107,8 +107,8 @@ def calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_cli
     history_round_keys = set(candidate_clients_history_ids.keys()) | set(selected_clients_history_ids.keys())
     if not history_round_keys:
         return 0.0
-    last_round = max(history_round_keys)
     # Get keys of past x rounds.
+    last_round = max(history_round_keys)
     past_rounds_keys = [r for r in range(last_round - x + 1, last_round + 1) if r > 0]
     # Count selections in the history window.
     selection_counter = Counter()
@@ -121,7 +121,7 @@ def calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_cli
     total_selected = sum(selection_counter.values())
     if total_selected == 0:
         return 0.0
-    # Relative participation frequency p_i over the history window,
+    # Relative participation frequency over the history window,
     # using the current candidate set as the support.
     P_sel = []
     for client_id in candidate_client_ids:
@@ -477,18 +477,18 @@ def calculate_class_distribution_score(X: list,
                                        beta: float = 0.5) -> tuple:
     # Get the number of task classes from the first client.
     m = len(Y[0])
-    # Initialize the lists of available and assigned types of tasks across the clients.
-    KC = [0] * m  # Available class counts.
-    KS = [0] * m  # Assigned class counts.
-    # Calculate KC (available class counts).
+    # Initialize the lists of available and assigned tasks per class across the clients.
+    KC = [0] * m
+    KS = [0] * m
+    # Calculate KC (available tasks per class).
     for i in range(len(X)):
         for k, count in enumerate(Y[i]):
             KC[k] += count
-    # Calculate KS (assigned class counts).
+    # Calculate KS (assigned tasks per class).
     for i in range(len(X_dist)):
         for k, count in enumerate(X_dist[i]):
             KS[k] += count
-    # Calculate the class coverage score (KCov_X).
+    # Calculate the class coverage term (KCov_X).
     KCov_X = (1 / m) * sum((KS[k] / KC[k]) if KC[k] != 0 else 0 for k in range(m))
     # Mean number of tasks per class.
     mean_tasks_per_class = t / m
@@ -498,12 +498,12 @@ def calculate_class_distribution_score(X: list,
     std_dev = sqrt(variance)
     # Maximum possible standard deviation (normalization factor).
     max_std_dev = t / sqrt(m)
-    # Normalized class standard deviation score (between 0 and 1).
-    KStd_X = std_dev / max_std_dev if max_std_dev != 0 else 0
-    # Calculate the class-distribution quality score (B_X).
-    B_X = (beta * KCov_X) + ((1 - beta) * (1 - KStd_X))
-    # Return the class-distribution quality score and intermediate scores.
-    return B_X, KCov_X, KStd_X
+    # Normalized class imbalance term (between 0 and 1).
+    KImb_X = std_dev / max_std_dev if max_std_dev != 0 else 0
+    # Calculate the class-distribution score (K_X).
+    K_X = (beta * KCov_X) + ((1 - beta) * (1 - KImb_X))
+    # Return the class-distribution score and intermediate terms.
+    return K_X, KCov_X, KImb_X, KC, KS
 
 
 def estimate_utility(X: list,
@@ -547,22 +547,26 @@ def estimate_costs(n: int,
                    current_round: int,
                    q: int,
                    candidate_clients_history_ids: dict,
-                   selected_clients_history_ids: dict) -> dict:
+                   selected_clients_history_ids: dict,
+                   beta: float = 0.5) -> dict:
     # Estimate the solution costs of the initial solution (X_init).
     X_init_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha,
                                            X_init, X_dist_approaches["X_init"],
                                            candidate_client_ids, current_round, q,
-                                           candidate_clients_history_ids, selected_clients_history_ids)
+                                           candidate_clients_history_ids, selected_clients_history_ids,
+                                           beta)
     # Estimate the solution costs of the best solution (X_best).
     X_best_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha,
                                            X_best, X_dist_approaches["X_best"],
                                            candidate_client_ids, current_round, q,
-                                           candidate_clients_history_ids, selected_clients_history_ids)
+                                           candidate_clients_history_ids, selected_clients_history_ids,
+                                           beta)
     # Estimate the solution costs of the repaired solution (X_rpr).
     X_rpr_costs = estimate_solution_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha,
                                           X_rpr, X_dist_approaches["X_rpr"],
                                           candidate_client_ids, current_round, q,
-                                          candidate_clients_history_ids, selected_clients_history_ids)
+                                          candidate_clients_history_ids, selected_clients_history_ids,
+                                          beta)
     # Set the dictionary of estimated costs.
     estimated_costs = {"X_init": X_init_costs, "X_best": X_best_costs, "X_rpr": X_rpr_costs}
     # Return the dictionary of estimated costs.
@@ -635,7 +639,8 @@ def estimate_solution_costs(n: int,
                             current_round: int,
                             q: int,
                             candidate_clients_history_ids: dict,
-                            selected_clients_history_ids: dict) -> dict:
+                            selected_clients_history_ids: dict,
+                            beta: float = 0.5) -> dict:
     # Estimate the makespan.
     M_X = estimate_makespan(X, A, G)
     # Estimate the energy consumption and remaining battery levels.
@@ -651,8 +656,8 @@ def estimate_solution_costs(n: int,
             X_dist = distribute_tasks_with_locally_balanced_approach(X, Y)
         case "globally_balanced":
             X_dist = distribute_tasks_with_globally_balanced_approach(X, Y)
-    # Calculate the class-distribution quality score.
-    B_X, KCov_X, KStd_X = calculate_class_distribution_score(X, X_dist, t, Y)
+    # Calculate the class-distribution score.
+    K_X, KCov_X, KImb_X, KC_X, KS_X = calculate_class_distribution_score(X, X_dist, t, Y, beta)
     # Estimate the utility score.
     U_X = estimate_utility(X, t, phi_list, psi_list, alpha)
     # Set the dictionary of estimated costs for the schedule X.
@@ -662,9 +667,11 @@ def estimate_solution_costs(n: int,
                "E_X": E_X,
                "BL_X": BL_X,
                "D_X": D_X,
-               "B_X": B_X,
+               "K_X": K_X,
                "KCov_X": KCov_X,
-               "KStd_X": KStd_X,
+               "KImb_X": KImb_X,
+               "KC_X": KC_X,
+               "KS_X": KS_X,
                "U_X": U_X}
     # Return the dictionary of estimated costs for the schedule X.
     return X_costs
