@@ -206,6 +206,9 @@ class FlowerServerLauncher:
                                                                                     initial_solution_generator_testing_section)
                 initial_solution_generator_testing_settings.update({"name": initial_solution_generator_testing})
                 server_strategy_implementation_settings["initial_solution_generator_testing"] = initial_solution_generator_testing_settings
+                objective_function_section = "Objective Function Settings"
+                objective_function_settings = parse_config_section(config_file, objective_function_section)
+                server_strategy_implementation_settings["objective_function"] = objective_function_settings
                 metaheuristic = server_strategy_implementation_settings["metaheuristic"]
                 metaheuristic_section = "{0} Settings".format(metaheuristic)
                 metaheuristic_settings = parse_config_section(config_file, metaheuristic_section)

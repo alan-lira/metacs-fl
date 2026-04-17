@@ -879,13 +879,12 @@ class MetaCSFL:
         metaheuristic = client_selection_settings["metaheuristic"]
         metaheuristic_name = metaheuristic["name"]
         metaheuristic_stopping_criteria = metaheuristic["stopping_criteria"]
-        # Get the utility score settings.
-        utility_score_settings = client_selection_settings.get("utility_score_settings", {})
-        alpha = utility_score_settings.get("alpha", 0.5)
-        q = utility_score_settings.get("q", 3)
-        # Get the class-distribution score settings.
-        class_distribution_score_settings = client_selection_settings.get("class_distribution_score_settings", {})
-        beta = class_distribution_score_settings.get("beta", 0.5)
+        # Get the objective function settings.
+        objective_function_settings = client_selection_settings.get("objective_function", {})
+        obj_func_weights = objective_function_settings.get("obj_func_weights", {})
+        alpha = objective_function_settings.get("alpha", 0.5)
+        beta = objective_function_settings.get("beta", 0.5)
+        q = objective_function_settings.get("q", 3)
         # Build the utility inputs for the current candidate clients.
         phi_list, psi_list, q_i_train_list, q_i_test_list = self._build_utility_inputs(candidate_clients,
                                                                                         selected_clients_history,
@@ -921,7 +920,6 @@ class MetaCSFL:
                     # Get the LNS settings.
                     destroy_approach = metaheuristic["destroy_approach"]
                     accept_criteria = metaheuristic["accept_criteria"]
-                    obj_func_weights = metaheuristic["obj_func_weights"]
                     # Set the LNS traces output file.
                     lns_traces_output_file = None
                     write_traces_to_output_file = metaheuristic.get("write_traces_to_output_file", False)
