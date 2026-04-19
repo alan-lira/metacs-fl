@@ -27,6 +27,7 @@ class MetaCSFL:
         self._internal_candidate_clients_history = {}
         self._internal_selected_clients_history = {}
         self._task_assignment_capacities_list = []
+        self._metaheuristic_execution_history = {}
         # Initialize the random number generator with a fixed seed to allow replicable results.
         self._rng = default_rng(seed=seed)
 
@@ -874,7 +875,16 @@ class MetaCSFL:
         time_costs = cost_matrices["time_costs"]
         energy_costs = cost_matrices["energy_costs"]
         # Initialize the metaheuristic execution statistics.
-        mh_statistics = {"time_lapsed": 0, "num_iterations": 0}
+        mh_statistics = {"time_lapsed": 0,
+                         "num_iterations": 0,
+                         "iterations_per_second": 0,
+                         "cpu_time_seconds": 0,
+                         "rss_start_mb": 0,
+                         "rss_peak_mb": 0,
+                         "rss_avg_mb": 0,
+                         "num_accepted_moves": 0,
+                         "num_improving_moves": 0,
+                         "lns_trace_rows": []}
         # Get the metaheuristic settings.
         metaheuristic = client_selection_settings["metaheuristic"]
         metaheuristic_name = metaheuristic["name"]
@@ -966,6 +976,17 @@ class MetaCSFL:
                               round(mh_statistics["time_lapsed"], 2),
                               mh_statistics["num_iterations"])
             log_message(logger, message, "INFO")
+            # Log the metaheuristic resource overhead metrics.
+            message = "[MetaCS-FL | Round {0}] The '{1}' metaheuristic CPU time was {2} seconds, peak RSS memory was {3} MB, average RSS memory was {4} MB, iterations per second was {5}, accepted moves: {6}, improving moves: {7}." \
+                      .format(current_round,
+                              metaheuristic_name,
+                              round(mh_statistics.get("cpu_time_seconds", 0), 2),
+                              round(mh_statistics.get("rss_peak_mb", 0), 2),
+                              round(mh_statistics.get("rss_avg_mb", 0), 2),
+                              round(mh_statistics.get("iterations_per_second", 0), 2),
+                              mh_statistics.get("num_accepted_moves", 0),
+                              mh_statistics.get("num_improving_moves", 0))
+            log_message(logger, message, "INFO")
             # Log a 'best solution' message.
             message = "[MetaCS-FL | Round {0}] Best solution found: {1}" \
                       .format(current_round, X_best)
@@ -1049,6 +1070,13 @@ class MetaCSFL:
                 elif current_phase == "test":
                     client_info.update({"client_batch_size": batch_size_list[i]})
                 selected_clients.update({client_id_str: client_info})
+        # Update the metaheuristic execution history (internal).
+        metaheuristic_execution_history = self.get_attribute("_metaheuristic_execution_history")
+        if current_round not in metaheuristic_execution_history:
+            metaheuristic_execution_history.update({current_round: {current_phase: mh_statistics}})
+        else:
+            metaheuristic_execution_history[current_round].update({current_phase: mh_statistics})
+        self._set_attribute("_metaheuristic_execution_history", metaheuristic_execution_history)
         # Return the set of selected clients.
         return selected_clients
 

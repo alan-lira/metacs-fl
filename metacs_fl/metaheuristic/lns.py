@@ -3,7 +3,9 @@ from csv import DictWriter
 from math import floor
 from numpy import ndarray
 from numpy.random import Generator
+from os import getpid
 from pathlib import Path
+from psutil import Process
 from time import perf_counter
 from traceback import format_exc
 
@@ -282,6 +284,17 @@ def run_lns(X_init: list,
     lns_trace_rows = []
     # Initialize the iteration counter.
     it = 1
+    # Initialize the LNS execution statistics auxiliary counters.
+    num_accepted_moves = 0
+    num_improving_moves = 0
+    memory_sampling_interval = 10
+    process = Process(getpid())
+    cpu_times = process.cpu_times()
+    cpu_time_start = cpu_times.user + cpu_times.system
+    rss_start_bytes = process.memory_info().rss
+    rss_peak_bytes = rss_start_bytes
+    rss_samples_sum_bytes = rss_start_bytes
+    rss_samples_count = 1
     # Get the start time.
     t_0 = perf_counter()
     # Initialize the elapsed time.
@@ -320,6 +333,7 @@ def run_lns(X_init: list,
             F_X_rpr = float("nan")
             F_X_best = float("nan")
             if to_accept:
+                num_accepted_moves += 1
                 # Update the current solution.
                 X_curr = deepcopy(X_rpr)
                 # Normalize the solution costs (particularly, M, E, and U).
@@ -332,6 +346,7 @@ def run_lns(X_init: list,
                 # Verify if the repaired solution is better than the best solution.
                 if F_X_rpr < F_X_best:
                     improved_best = 1
+                    num_improving_moves += 1
                     X_best = deepcopy(X_rpr)
                     X_best_costs = deepcopy(sol_costs["X_rpr"])
             # Append the lns diagnostic collection trace row.
@@ -355,6 +370,11 @@ def run_lns(X_init: list,
             it = it + 1
             # Update the elapsed time.
             t_it = perf_counter() - t_0
+            if it % memory_sampling_interval == 0:
+                rss_now_bytes = process.memory_info().rss
+                rss_peak_bytes = max(rss_peak_bytes, rss_now_bytes)
+                rss_samples_sum_bytes += rss_now_bytes
+                rss_samples_count += 1
             # Heartbeat every x iterations.
             lns_heartbeat_pace = 50
             if it % lns_heartbeat_pace == 0:
@@ -375,7 +395,29 @@ def run_lns(X_init: list,
             print("\n[LNS TRACE WRITE ERROR]")
             print(f"exception: {repr(e)}")
             print(format_exc())
+    rss_avg_bytes = rss_start_bytes
+    cpu_times_end = process.cpu_times()
+    cpu_time_end = cpu_times_end.user + cpu_times_end.system
+    cpu_time_seconds = cpu_time_end - cpu_time_start
+    rss_now_bytes = process.memory_info().rss
+    rss_peak_bytes = max(rss_peak_bytes, rss_now_bytes)
+    rss_samples_sum_bytes += rss_now_bytes
+    rss_samples_count += 1
+    if rss_samples_count > 0:
+        rss_avg_bytes = rss_samples_sum_bytes / rss_samples_count
+    rss_start_mb = rss_start_bytes / (1024 ** 2)
+    rss_peak_mb = rss_peak_bytes / (1024 ** 2)
+    rss_avg_mb = rss_avg_bytes / (1024 ** 2)
     # Set the LNS execution statistics.
-    lns_statistics = {"time_lapsed": t_it, "num_iterations": it, "lns_trace_rows": lns_trace_rows}
+    lns_statistics = {"time_lapsed": t_it,
+                      "num_iterations": it,
+                      "iterations_per_second": (it / t_it) if t_it > 0 else 0.0,
+                      "cpu_time_seconds": cpu_time_seconds,
+                      "rss_start_mb": rss_start_mb,
+                      "rss_peak_mb": rss_peak_mb,
+                      "rss_avg_mb": rss_avg_mb,
+                      "num_accepted_moves": num_accepted_moves,
+                      "num_improving_moves": num_improving_moves,
+                      "lns_trace_rows": lns_trace_rows}
     # Return the best solution, the best solution costs, and the LNS execution statistics.
     return X_best, X_best_costs, lns_statistics
