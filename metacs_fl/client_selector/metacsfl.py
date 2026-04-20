@@ -932,10 +932,13 @@ class MetaCSFL:
                     accept_criteria = metaheuristic["accept_criteria"]
                     # Set the LNS traces output file.
                     lns_traces_output_file = None
+                    lns_summary_output_file = None
                     write_traces_to_output_file = metaheuristic.get("write_traces_to_output_file", False)
                     if write_traces_to_output_file:
                         lns_traces_output_file_name = "lns_traces/round_{0}_{1}.csv".format(current_round, current_phase)
                         lns_traces_output_file = Path(root_output_folder).joinpath(lns_traces_output_file_name)
+                        lns_summary_output_file_name = "lns_summary/round_{0}_{1}.csv".format(current_round, current_phase)
+                        lns_summary_output_file = Path(root_output_folder).joinpath(lns_summary_output_file_name)
                     # Set the schedules' task distribution approaches.
                     X_dist_approaches = {"X_init": client_selection_settings["initial_solution_tasks_distribution_scheme"],
                                          "X_rpr": client_selection_settings["metaheuristic_solution_tasks_distribution_scheme"],
@@ -967,7 +970,8 @@ class MetaCSFL:
                                                                   obj_func_weights,
                                                                   X_dist_approaches,
                                                                   normalization_bounds,
-                                                                  lns_traces_output_file)
+                                                                  lns_traces_output_file,
+                                                                  lns_summary_output_file)
             # Log a 'metaheuristic execution time and iterations' message.
             message = "[MetaCS-FL | Round {0}] The '{1}' metaheuristic execution took {2} seconds " \
                       "(number of iterations: {3})." \

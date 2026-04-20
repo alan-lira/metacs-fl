@@ -248,6 +248,25 @@ def _write_lns_trace_rows_to_csv_file(lns_trace_rows: list,
         writer.writerows(lns_trace_rows)
 
 
+def _write_lns_summary_to_csv_file(lns_statistics: dict,
+                                   lns_summary_output_file: Path) -> None:
+    lns_summary_output_file.parent.mkdir(parents=True, exist_ok=True)
+    summary_row = {"time_lapsed": lns_statistics["time_lapsed"],
+                   "num_iterations": lns_statistics["num_iterations"],
+                   "iterations_per_second": lns_statistics["iterations_per_second"],
+                   "cpu_time_seconds": lns_statistics["cpu_time_seconds"],
+                   "rss_start_mb": lns_statistics["rss_start_mb"],
+                   "rss_peak_mb": lns_statistics["rss_peak_mb"],
+                   "rss_avg_mb": lns_statistics["rss_avg_mb"],
+                   "rss_delta_mb": lns_statistics["rss_delta_mb"],
+                   "num_accepted_moves": lns_statistics["num_accepted_moves"],
+                   "num_improving_moves": lns_statistics["num_improving_moves"]}
+    with lns_summary_output_file.open("w", newline="") as f:
+        writer = DictWriter(f, fieldnames=summary_row.keys())
+        writer.writeheader()
+        writer.writerow(summary_row)
+
+
 def run_lns(X_init: list,
             rng: Generator,
             destroy_approach: dict,
@@ -274,7 +293,8 @@ def run_lns(X_init: list,
             obj_func_weights: dict,
             X_dist_approaches: dict,
             normalization_bounds: dict,
-            lns_traces_output_file: Path | None = None) -> tuple:
+            lns_traces_output_file: Path | None = None,
+            lns_summary_output_file: Path | None = None) -> tuple:
     # Initialize the current and best solutions.
     X_curr = deepcopy(X_init)
     X_best = deepcopy(X_init)
@@ -387,14 +407,6 @@ def run_lns(X_init: list,
             print("exception: {0}".format(repr(e)))
             print(format_exc())
             raise
-    # Write trace to output CSV file if requested.
-    if lns_traces_output_file is not None:
-        try:
-            _write_lns_trace_rows_to_csv_file(lns_trace_rows, lns_traces_output_file)
-        except Exception as e:
-            print("\n[LNS TRACE WRITE ERROR]")
-            print(f"exception: {repr(e)}")
-            print(format_exc())
     rss_avg_bytes = rss_start_bytes
     cpu_times_end = process.cpu_times()
     cpu_time_end = cpu_times_end.user + cpu_times_end.system
@@ -408,6 +420,7 @@ def run_lns(X_init: list,
     rss_start_mb = rss_start_bytes / (1024 ** 2)
     rss_peak_mb = rss_peak_bytes / (1024 ** 2)
     rss_avg_mb = rss_avg_bytes / (1024 ** 2)
+    rss_delta_mb = rss_peak_mb - rss_start_mb
     # Set the LNS execution statistics.
     lns_statistics = {"time_lapsed": t_it,
                       "num_iterations": it,
@@ -416,8 +429,25 @@ def run_lns(X_init: list,
                       "rss_start_mb": rss_start_mb,
                       "rss_peak_mb": rss_peak_mb,
                       "rss_avg_mb": rss_avg_mb,
+                      "rss_delta_mb": rss_delta_mb,
                       "num_accepted_moves": num_accepted_moves,
                       "num_improving_moves": num_improving_moves,
                       "lns_trace_rows": lns_trace_rows}
+    # Write trace to output CSV file if requested.
+    if lns_traces_output_file is not None:
+        try:
+            _write_lns_trace_rows_to_csv_file(lns_trace_rows, lns_traces_output_file)
+        except Exception as e:
+            print("\n[LNS TRACE WRITE ERROR]")
+            print("Exception: {0}".format(repr(e)))
+            print(format_exc())
+    # Write LNS summary to output CSV file if requested.
+    if lns_summary_output_file is not None:
+        try:
+            _write_lns_summary_to_csv_file(lns_statistics, lns_summary_output_file)
+        except Exception as e:
+            print("\n[LNS SUMMARY WRITE ERROR]")
+            print("Exception: {0}".format(repr(e)))
+            print(format_exc())
     # Return the best solution, the best solution costs, and the LNS execution statistics.
     return X_best, X_best_costs, lns_statistics
