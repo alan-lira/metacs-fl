@@ -2,13 +2,13 @@ from collections import defaultdict
 from concurrent.futures import as_completed, ThreadPoolExecutor, Future
 from copy import deepcopy
 from logging import Logger
-from numpy import array, inf, sum as numpy_sum, mean, clip, int32, ndarray
+from numpy import array, concatenate, inf, sum as numpy_sum, mean, clip, int32, ndarray
 from numpy.random import default_rng
 from os import cpu_count
 from pathlib import Path
 from threading import Lock, Thread
 from time import process_time, sleep
-from traceback import format_exc
+from traceback import format_exc, print_exc
 from typing import Dict, List, Optional, Tuple, Union
 
 from flwr.common import EvaluateIns, EvaluateRes, FitIns, FitRes, GetPropertiesIns, Metrics, NDArrays, Parameters, \
@@ -19,6 +19,8 @@ from flwr.server.strategy.strategy import Strategy
 from flwr.server.superlink.fleet.grpc_bidi.grpc_client_proxy import GrpcClientProxy
 
 from metacs_fl.client_selector.metacsfl import MetaCSFL
+from metacs_fl.client_selector.ecsm import ECSM
+from metacs_fl.client_selector.divfl import DivFL
 from metacs_fl.client_selector.oort import Oort
 from metacs_fl.client_selector.random import Random
 from metacs_fl.client_selector.sbacpad_2024 import SBACPAD2024
@@ -62,6 +64,7 @@ class FlowerServer(Strategy):
         self._client_selection_duration_history = {}
         self._selected_clients_metrics_history = {}
         self._clients_histograms = {}
+        self._client_gradients_history = {}
         self._clients_reliability_score_history = {}
         self._clients_consecutive_failures_history = {}
         self._clients_profiles = {}
@@ -88,6 +91,12 @@ class FlowerServer(Strategy):
             case "Oort":
                 # Instantiate the Oort's client selector.
                 client_selector = Oort(server_strategy_settings, seed)
+            case "DivFL":
+                # Instantiate the DivFL's client selector.
+                client_selector = DivFL(server_strategy_settings, seed)
+            case "ECSM":
+                # Instantiate the ECSM's client selector.
+                client_selector = ECSM(server_strategy_settings, seed)
             case "MetaCS-FL":
                 # Instantiate the MetaCS-FL's client selector.
                 client_selector = MetaCSFL(server_strategy_settings, seed)
@@ -862,6 +871,32 @@ class FlowerServer(Strategy):
             phase_pairs_history.update(current_round_phase_pairs)
             self._set_attribute(phase_pairs_history_attribute, phase_pairs_history)
 
+    def _update_client_gradients_history(self,
+                                         current_round: int,
+                                         results: List[Tuple[ClientProxy, FitRes]]) -> None:
+        global_parameters = self.get_attribute("_global_parameters")
+        global_ndarrays = parameters_to_ndarrays(global_parameters)
+        client_gradients_history = self.get_attribute("_client_gradients_history")
+        round_updates = {}
+        for _, result in results:
+            client_id = result.metrics["client_id"]
+            client_id_str = "client_{0}".format(client_id)
+            client_ndarrays = parameters_to_ndarrays(result.parameters)
+            update_layers = [client_layer - global_layer
+                             for client_layer, global_layer in zip(client_ndarrays, global_ndarrays)]
+            flattened_parts = [layer.ravel() for layer in update_layers]
+            if flattened_parts:
+                update_vector = flattened_parts[0]
+                for part in flattened_parts[1:]:
+                    update_vector = concatenate((update_vector, part))
+            else:
+                update_vector = array([], dtype=float)
+            round_updates[client_id_str] = update_vector
+        if current_round not in client_gradients_history:
+            client_gradients_history[current_round] = {}
+        client_gradients_history[current_round].update(round_updates)
+        self._set_attribute("_client_gradients_history", client_gradients_history)
+
     def _update_individual_metrics_history(self,
                                            current_round: int,
                                            current_phase: str,
@@ -1413,6 +1448,7 @@ class FlowerServer(Strategy):
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
+        client_gradients_history = self.get_attribute("_client_gradients_history")
         client_selector = self.get_attribute("_client_selector")
         # Log a 'start of the configure_fit call' debug message.
         message = "[Server {0} | Round {1}] Start of the 'configure_fit' call!".format(server_id, server_round)
@@ -1469,6 +1505,7 @@ class FlowerServer(Strategy):
                   "base_num_epochs": base_num_epochs,
                   "selected_clients_history": selected_clients_history,
                   "selected_clients_metrics_history": selected_clients_metrics_history,
+                  "client_gradients_history": client_gradients_history,
                   "clients_profiles": clients_profiles,
                   "time_limit": round_timeout_in_seconds,
                   "root_output_folder": self._root_output_folder,
@@ -1496,7 +1533,17 @@ class FlowerServer(Strategy):
             use_async = server_strategy_settings["use_async"]
             kwargs.update({"use_async": use_async})
         # Run the client selection procedure.
-        selected_clients = client_selector.run_client_selection_procedure(**kwargs)
+        try:
+            selected_clients = client_selector.run_client_selection_procedure(**kwargs)
+        except Exception as e:
+            message = "Exception happened during client selection:\n" \
+                      "Type: {0}\n" \
+                      "Message: {1}\n" \
+                      "Traceback:\n{2}" \
+                      .format(type(e).__name__, e, format_exc())
+            log_message(logger, message, "INFO")
+            print_exc()
+            raise
         if isinstance(selected_clients, list):
             # Monitor the future objects in a daemon thread (non-blocking).
             monitor_future_objects_thread = Thread(target=self._monitor_future_objects,
@@ -1565,6 +1612,8 @@ class FlowerServer(Strategy):
         # Do not aggregate if there are no results or if there are clients' failures and failures are not accepted.
         if not results or (failures and not accept_clients_failures):
             return None, {}
+        # Save client updates BEFORE overwriting the global model.
+        self._update_client_gradients_history(server_round, results)
         # Log the global model weights' sum (before aggregation).
         global_parameters = self.get_attribute("_global_parameters")
         message = ("[Server {0} | Round {1}] Global model weight's sum (before aggregation): {2}"
@@ -1638,6 +1687,7 @@ class FlowerServer(Strategy):
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
+        client_gradients_history = self.get_attribute("_client_gradients_history")
         client_selector = self.get_attribute("_client_selector")
         # Log a 'start of the configure_evaluate call' debug message.
         message = "[Server {0} | Round {1}] Start of the 'configure_evaluate' call!".format(server_id, server_round)
@@ -1673,6 +1723,7 @@ class FlowerServer(Strategy):
                   "base_batch_size": base_batch_size,
                   "selected_clients_history": selected_clients_history,
                   "selected_clients_metrics_history": selected_clients_metrics_history,
+                  "client_gradients_history": client_gradients_history,
                   "clients_profiles": clients_profiles,
                   "time_limit": round_timeout_in_seconds,
                   "root_output_folder": self._root_output_folder,
@@ -1700,7 +1751,17 @@ class FlowerServer(Strategy):
             use_async = server_strategy_settings["use_async"]
             kwargs.update({"use_async": use_async})
         # Run the client selection procedure.
-        selected_clients = client_selector.run_client_selection_procedure(**kwargs)
+        try:
+            selected_clients = client_selector.run_client_selection_procedure(**kwargs)
+        except Exception as e:
+            message = "Exception happened during client selection:\n" \
+                      "Type: {0}\n" \
+                      "Message: {1}\n" \
+                      "Traceback:\n{2}" \
+                      .format(type(e).__name__, e, format_exc())
+            log_message(logger, message, "INFO")
+            print_exc()
+            raise
         if isinstance(selected_clients, list):
             # Monitor the future objects in a daemon thread (non-blocking).
             monitor_future_objects_thread = Thread(target=self._monitor_future_objects,
