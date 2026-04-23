@@ -1,6 +1,6 @@
 from copy import deepcopy
 from csv import DictWriter
-from math import floor
+from math import floor, inf
 from numpy import ndarray
 from numpy.random import Generator
 from os import getpid
@@ -9,7 +9,8 @@ from psutil import Process
 from time import perf_counter
 from traceback import format_exc
 
-from metacs_fl.utils.task_scheduler_util import calculate_percentage_change, estimate_costs, normalize_costs
+from metacs_fl.utils.task_scheduler_util import calculate_percentage_change, estimate_costs, normalize_costs, \
+    update_min_max_costs
 
 
 def to_stop_lns(it: int,
@@ -292,9 +293,15 @@ def run_lns(X_init: list,
             accept_criteria: dict,
             obj_func_weights: dict,
             X_dist_approaches: dict,
-            normalization_bounds: dict,
+            normalization_mode: str = "fixed",
+            normalization_bounds: dict | None = None,
             lns_traces_output_file: Path | None = None,
             lns_summary_output_file: Path | None = None) -> tuple:
+    # Initialize the dict of min-max costs (used by the online normalization).
+    min_max_costs = {"min_M_X": inf,
+                     "max_M_X": 0,
+                     "min_E_X": inf,
+                     "max_E_X": 0}
     # Initialize the current and best solutions.
     X_curr = deepcopy(X_init)
     X_best = deepcopy(X_init)
@@ -346,6 +353,10 @@ def run_lns(X_init: list,
                                        candidate_clients_history_ids,
                                        selected_clients_history_ids,
                                        beta)
+            # Update min/max costs (only for the online normalization).
+            if normalization_mode == "online":
+                trace_stage = "update_min_max_costs"
+                min_max_costs = update_min_max_costs(sol_costs, min_max_costs)
             # Check if the repaired solution is acceptable.
             trace_stage = "lns_accept"
             to_accept = lns_accept(sol_costs, accept_criteria, tau, t, A)
@@ -356,9 +367,16 @@ def run_lns(X_init: list,
                 num_accepted_moves += 1
                 # Update the current solution.
                 X_curr = deepcopy(X_rpr)
-                # Normalize the solution costs (particularly, M, E, and U).
+                # Normalize the solution costs according to the selected mode.
                 trace_stage = "normalize_costs"
-                norm_sol_costs = normalize_costs(sol_costs, normalization_bounds)
+                if normalization_mode == "online":
+                    norm_sol_costs = normalize_costs(sol_costs, min_max_costs)
+                elif normalization_mode == "fixed":
+                    if normalization_bounds is None:
+                        raise ValueError("normalization_bounds must be provided when normalization_mode='fixed'")
+                    norm_sol_costs = normalize_costs(sol_costs, normalization_bounds)
+                else:
+                    raise ValueError("Unsupported normalization_mode: {0}".format(normalization_mode))
                 # Calculate the objective function values.
                 trace_stage = "lns_F"
                 F_X_rpr = lns_F(norm_sol_costs["X_rpr"], obj_func_weights)
@@ -390,15 +408,13 @@ def run_lns(X_init: list,
             it = it + 1
             # Update the elapsed time.
             t_it = perf_counter() - t_0
+            # Sample memory statistics periodically.
             if it % memory_sampling_interval == 0:
-                rss_now_bytes = process.memory_info().rss
-                rss_peak_bytes = max(rss_peak_bytes, rss_now_bytes)
-                rss_samples_sum_bytes += rss_now_bytes
+                rss_current_bytes = process.memory_info().rss
+                rss_samples_sum_bytes += rss_current_bytes
                 rss_samples_count += 1
-            # Heartbeat every x iterations.
-            lns_heartbeat_pace = 50
-            if it % lns_heartbeat_pace == 0:
-                print("[LNS HEARTBEAT] it={0}, elapsed={1:.2f}s, trace_rows={2}".format(it, t_it, len(lns_trace_rows)))
+                if rss_current_bytes > rss_peak_bytes:
+                    rss_peak_bytes = rss_current_bytes
         except Exception as e:
             print("\n[LNS ERROR]")
             print("iteration: {0}".format(it))
@@ -407,29 +423,25 @@ def run_lns(X_init: list,
             print("exception: {0}".format(repr(e)))
             print(format_exc())
             raise
-    rss_avg_bytes = rss_start_bytes
-    cpu_times_end = process.cpu_times()
-    cpu_time_end = cpu_times_end.user + cpu_times_end.system
+    # Final process stats.
+    cpu_times = process.cpu_times()
+    cpu_time_end = cpu_times.user + cpu_times.system
     cpu_time_seconds = cpu_time_end - cpu_time_start
-    rss_now_bytes = process.memory_info().rss
-    rss_peak_bytes = max(rss_peak_bytes, rss_now_bytes)
-    rss_samples_sum_bytes += rss_now_bytes
-    rss_samples_count += 1
-    if rss_samples_count > 0:
-        rss_avg_bytes = rss_samples_sum_bytes / rss_samples_count
-    rss_start_mb = rss_start_bytes / (1024 ** 2)
-    rss_peak_mb = rss_peak_bytes / (1024 ** 2)
-    rss_avg_mb = rss_avg_bytes / (1024 ** 2)
-    rss_delta_mb = rss_peak_mb - rss_start_mb
-    # Set the LNS execution statistics.
-    lns_statistics = {"time_lapsed": t_it,
-                      "num_iterations": it,
-                      "iterations_per_second": (it / t_it) if t_it > 0 else 0.0,
+    rss_end_bytes = process.memory_info().rss
+    if rss_end_bytes > rss_peak_bytes:
+        rss_peak_bytes = rss_end_bytes
+    rss_avg_bytes = rss_samples_sum_bytes / rss_samples_count if rss_samples_count > 0 else rss_end_bytes
+    time_lapsed = t_it
+    num_iterations = it
+    iterations_per_second = (num_iterations / time_lapsed) if time_lapsed > 0 else 0
+    lns_statistics = {"time_lapsed": time_lapsed,
+                      "num_iterations": num_iterations,
+                      "iterations_per_second": iterations_per_second,
                       "cpu_time_seconds": cpu_time_seconds,
-                      "rss_start_mb": rss_start_mb,
-                      "rss_peak_mb": rss_peak_mb,
-                      "rss_avg_mb": rss_avg_mb,
-                      "rss_delta_mb": rss_delta_mb,
+                      "rss_start_mb": rss_start_bytes / (1024 * 1024),
+                      "rss_peak_mb": rss_peak_bytes / (1024 * 1024),
+                      "rss_avg_mb": rss_avg_bytes / (1024 * 1024),
+                      "rss_delta_mb": (rss_peak_bytes - rss_start_bytes) / (1024 * 1024),
                       "num_accepted_moves": num_accepted_moves,
                       "num_improving_moves": num_improving_moves,
                       "lns_trace_rows": lns_trace_rows}

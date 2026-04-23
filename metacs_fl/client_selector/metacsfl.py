@@ -895,6 +895,7 @@ class MetaCSFL:
         alpha = objective_function_settings.get("alpha", 0.5)
         beta = objective_function_settings.get("beta", 0.5)
         q = objective_function_settings.get("q", 3)
+        normalization_mode = objective_function_settings.get("normalization_mode", "fixed")
         # Build the utility inputs for the current candidate clients.
         phi_list, psi_list, q_i_train_list, q_i_test_list = self._build_utility_inputs(candidate_clients,
                                                                                         selected_clients_history,
@@ -908,11 +909,13 @@ class MetaCSFL:
                                                   current_phase,
                                                   candidate_clients,
                                                   q)
-        # Build the fixed normalization bounds.
-        normalization_bounds = self._build_fixed_normalization_bounds(current_phase,
-                                                                      selected_clients_metrics_history,
-                                                                      candidate_clients,
-                                                                      clients_profiles)
+        # Build normalization bounds (if normalization mode is fixed).
+        normalization_bounds = None
+        if normalization_mode == "fixed":
+            normalization_bounds = self._build_fixed_normalization_bounds(current_phase,
+                                                                          selected_clients_metrics_history,
+                                                                          candidate_clients,
+                                                                          clients_profiles)
         # Initialize the best solution and its tasks' distribution.
         X_best = deepcopy(X_init)
         X_best_dist = deepcopy(X_init_dist)
@@ -969,6 +972,7 @@ class MetaCSFL:
                                                                   accept_criteria,
                                                                   obj_func_weights,
                                                                   X_dist_approaches,
+                                                                  normalization_mode,
                                                                   normalization_bounds,
                                                                   lns_traces_output_file,
                                                                   lns_summary_output_file)
