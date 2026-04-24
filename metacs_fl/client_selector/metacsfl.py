@@ -492,24 +492,23 @@ class MetaCSFL:
                                                                 phase_of_interest,
                                                                 candidate_clients,
                                                                 num_past_rounds)
-                        if minimum_score:
-                            accumulative_client_diversity_score = \
-                                calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_client_ids,
-                                                                                               candidate_clients_history_ids,
-                                                                                               selected_clients_history_ids,
-                                                                                               num_past_rounds)
-                            if accumulative_client_diversity_score < minimum_score:
+                        # Compute diversity once (avoid recomputation)
+                        current_client_diversity_score = \
+                            calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_client_ids,
+                                                                                           candidate_clients_history_ids,
+                                                                                           selected_clients_history_ids,
+                                                                                           num_past_rounds)
+
+                        # (1) Minimum score condition (fairness floor).
+                        if minimum_score is not None:
+                            if current_client_diversity_score < minimum_score:
                                 new_client_selection_criteria.append(True)
-                                new_client_selection_reasons.append(
-                                    "The accumulative client diversity score over the past {0} rounds has fallen below {1} during the training phase ({2})."
-                                    .format(num_past_rounds, minimum_score,
-                                            round(accumulative_client_diversity_score, 2)))
-                        elif maximum_relative_drop:
-                            current_client_diversity_score = \
-                                calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_client_ids,
-                                                                                               candidate_clients_history_ids,
-                                                                                               selected_clients_history_ids,
-                                                                                               num_past_rounds)
+                                new_client_selection_reasons.append("The client diversity score over the past {0} rounds ({1}) is below the minimum threshold ({2})."
+                                                                    .format(num_past_rounds,
+                                                                            round(current_client_diversity_score, 2),
+                                                                            minimum_score))
+                        # (2) Relative drop condition (degradation detection).
+                        if maximum_relative_drop is not None:
                             previous_client_diversity_score = \
                                 calculate_normalized_client_diversity_score_over_past_x_rounds(candidate_client_ids,
                                                                                                candidate_clients_history_ids,
