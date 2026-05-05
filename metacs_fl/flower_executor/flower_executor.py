@@ -1,10 +1,13 @@
+from collections import defaultdict
 from configparser import ConfigParser
 from copy import deepcopy
 from multiprocessing import Barrier, Process
+from shutil import copytree
+from subprocess import CalledProcessError, run
 from numpy import array, exp, median, percentile, zeros
 from numpy.random import default_rng, Generator
 from pathlib import Path
-from socket import create_connection
+from socket import create_connection, getaddrinfo, gethostname
 from sys import stdout as sys_stdout, stderr as sys_stderr
 from time import perf_counter, sleep
 from threading import BrokenBarrierError
@@ -23,10 +26,14 @@ class FlowerExecutor:
 
     def __init__(self,
                  config_file: Path,
-                 repetitions: int) -> None:
+                 repetitions: int,
+                 hostfile: Path | None = None,
+                 output_gathering_settings: dict | None = None) -> None:
         # Initialize the attributes.
         self._config_file = config_file
         self._repetitions = repetitions
+        self._hostfile = hostfile
+        self._output_gathering_settings = output_gathering_settings or {}
         self._current_execution = {}
         self._current_execution_devices = []
         self._rng = default_rng()
@@ -40,6 +47,274 @@ class FlowerExecutor:
     def get_attribute(self,
                       attribute_name: str) -> any:
         return getattr(self, attribute_name)
+
+    @staticmethod
+    def _is_localhost_ip(ip_address: str) -> bool:
+        return ip_address in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+    @staticmethod
+    def _get_local_ip_addresses() -> set[str]:
+        local_ips = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+        try:
+            hostname = gethostname()
+            local_ips.add(hostname)
+            for info in getaddrinfo(hostname, None):
+                local_ips.add(info[4][0])
+        except Exception as _:
+            pass
+        return local_ips
+
+    @classmethod
+    def _is_this_node(cls, ip_address: str) -> bool:
+        if cls._is_localhost_ip(ip_address):
+            return True
+        local_ips = cls._get_local_ip_addresses()
+        return ip_address in local_ips
+
+    @staticmethod
+    def _load_nodes_file(nodes_file: Path) -> dict:
+        """
+        Load a role-based nodes file.
+
+        Expected format:
+            server 192.168.1.10
+            client 192.168.1.11
+            client 192.168.1.12
+
+        Lines starting with '#' are ignored.
+        """
+        if not nodes_file.is_file():
+            raise FileNotFoundError("Nodes file not found: {0}".format(nodes_file))
+        server_ip = None
+        client_ips = []
+        with open(file=nodes_file, mode="r", encoding="utf-8") as n_f:
+            for line in n_f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if len(parts) != 2:
+                    raise ValueError("Invalid nodes file line: '{0}'. Expected: '<server|client> <ip>'."
+                                     .format(line))
+                role, ip_address = parts[0].lower(), parts[1]
+                match role:
+                    case "server":
+                        if server_ip is not None:
+                            raise ValueError("Only one server entry is allowed in the nodes file.")
+                        server_ip = ip_address
+                    case "client":
+                        client_ips.append(ip_address)
+                    case _:
+                        raise ValueError("Invalid node role '{0}'. Use 'server' or 'client'.".format(role))
+        if server_ip is None:
+            raise ValueError("Nodes file must contain one 'server <ip>' entry.")
+        if not client_ips:
+            raise ValueError("Nodes file must contain at least one 'client <ip>' entry.")
+        return {"server_ip": server_ip,
+                "client_ips": client_ips}
+
+    @staticmethod
+    def _assign_clients_to_nodes(num_clients: int,
+                                 client_ips: list[str]) -> dict:
+        clients_by_ip = defaultdict(list)
+        for client_id in range(num_clients):
+            client_ip = client_ips[client_id % len(client_ips)]
+            clients_by_ip[client_ip].append(client_id)
+        return dict(clients_by_ip)
+
+    @classmethod
+    def _get_clients_for_this_node(cls,
+                                   clients_by_ip: dict) -> list[int]:
+        local_client_ids = []
+        for ip_address, client_ids in clients_by_ip.items():
+            if cls._is_this_node(ip_address):
+                local_client_ids.extend(client_ids)
+        return sorted(local_client_ids)
+
+    @staticmethod
+    def _is_distributed_nodes_plan(nodes_plan: dict) -> bool:
+        all_ips = [nodes_plan["server_ip"]] + nodes_plan["client_ips"]
+        return any(ip not in {"localhost", "127.0.0.1", "0.0.0.0", "::1"} for ip in all_ips)
+
+    @staticmethod
+    def _as_bool(value: any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return bool(value)
+
+    @staticmethod
+    def _sanitize_for_path(value: str) -> str:
+        sanitized = []
+        for char in str(value):
+            if char.isalnum() or char in {"-", "_"}:
+                sanitized.append(char)
+            elif char in {".", ":", "/", "\\", " ", "@"}:
+                sanitized.append("_")
+            else:
+                sanitized.append("_")
+        return "".join(sanitized).strip("_") or "unknown"
+
+    @classmethod
+    def _get_this_node_identifier(cls) -> str:
+        hostname = gethostname()
+        local_ips = sorted(cls._get_local_ip_addresses())
+        non_local_ips = [ip for ip in local_ips if not cls._is_localhost_ip(ip)]
+        if non_local_ips:
+            return cls._sanitize_for_path("{0}_{1}".format(hostname, non_local_ips[0]))
+        return cls._sanitize_for_path(hostname)
+
+    @staticmethod
+    def _write_node_manifest(output_folder: Path,
+                             execution_name: str,
+                             is_server_node: bool,
+                             local_client_ids: list[int],
+                             is_distributed_execution: bool) -> None:
+        output_folder.mkdir(exist_ok=True, parents=True)
+        manifest_file = output_folder.joinpath("distributed_node_manifest.txt")
+        try:
+            hostname = gethostname()
+            local_ips = sorted(FlowerExecutor._get_local_ip_addresses())
+            with open(file=manifest_file, mode="w", encoding="utf-8") as m_f:
+                m_f.write("execution_name={0}\n".format(execution_name))
+                m_f.write("hostname={0}\n".format(hostname))
+                m_f.write("local_ips={0}\n".format(",".join(local_ips)))
+                m_f.write("is_distributed_execution={0}\n".format(is_distributed_execution))
+                m_f.write("is_server_node={0}\n".format(is_server_node))
+                m_f.write("local_client_ids={0}\n".format(",".join(map(str, local_client_ids))))
+        except Exception as e:
+            print("[Output Collection] Failed to write node manifest: {0}".format(e),
+                  file=sys_stdout,
+                  flush=True)
+            print(format_exc(), file=sys_stdout, flush=True)
+
+    @staticmethod
+    def _run_command_with_trace(command: list[str],
+                                description: str) -> None:
+        print("[Output Collection] {0}: {1}".format(description, " ".join(command)),
+              file=sys_stdout,
+              flush=True)
+        try:
+            completed = run(command,
+                            check=True,
+                            capture_output=True,
+                            text=True)
+            if completed.stdout:
+                print(completed.stdout, file=sys_stdout, flush=True)
+            if completed.stderr:
+                print(completed.stderr, file=sys_stdout, flush=True)
+        except CalledProcessError as e:
+            print("[Output Collection] Command failed while {0}.".format(description),
+                  file=sys_stdout,
+                  flush=True)
+            print("[Output Collection] Return code: {0}".format(e.returncode),
+                  file=sys_stdout,
+                  flush=True)
+            print("[Output Collection] stdout:\n{0}".format(e.stdout),
+                  file=sys_stdout,
+                  flush=True)
+            print("[Output Collection] stderr:\n{0}".format(e.stderr),
+                  file=sys_stdout,
+                  flush=True)
+            raise
+
+    def _collect_outputs_to_collector(self,
+                                      execution_name: str,
+                                      execution_settings: dict,
+                                      is_distributed_execution: bool,
+                                      is_server_node: bool,
+                                      local_client_ids: list[int]) -> None:
+        gather_outputs = self._as_bool(execution_settings.get("gather_outputs", False))
+        if not gather_outputs:
+            return
+        gather_single_node_execution = self._as_bool(execution_settings.get("gather_single_node_execution", False))
+        if not is_distributed_execution and not gather_single_node_execution:
+            print("[Output Collection] Skipping output collection because this is not a distributed execution.",
+                  file=sys_stdout,
+                  flush=True)
+            return
+        fail_on_collection_error = self._as_bool(execution_settings.get("fail_on_output_collection_error", True))
+        try:
+            local_output_folder = Path(execution_settings["execution_output_folder"])
+            if not local_output_folder.is_dir():
+                print("[Output Collection] Local output folder does not exist on this node: {0}"
+                      .format(local_output_folder),
+                      file=sys_stdout,
+                      flush=True)
+                return
+
+            self._write_node_manifest(local_output_folder,
+                                      execution_name,
+                                      is_server_node,
+                                      local_client_ids,
+                                      is_distributed_execution)
+            collector_folder = Path(execution_settings["output_collector_folder"])
+            collector_ip = execution_settings.get("output_collector_ip", "127.0.0.1")
+            collector_user = execution_settings.get("output_collector_user", None)
+            collection_method = execution_settings.get("output_collection_method", "rsync")
+            node_identifier = execution_settings.get("output_node_identifier", None)
+            if node_identifier is None:
+                node_identifier = self._get_this_node_identifier()
+            else:
+                node_identifier = self._sanitize_for_path(node_identifier)
+            destination_subfolder = Path(self._sanitize_for_path(execution_name)).joinpath("node_{0}".format(node_identifier))
+            if self._is_this_node(collector_ip) or self._is_localhost_ip(collector_ip):
+                destination_folder = collector_folder.joinpath(destination_subfolder)
+                print("[Output Collection] Copying local output folder to collector path: {0}"
+                      .format(destination_folder),
+                      file=sys_stdout,
+                      flush=True)
+                destination_folder.mkdir(exist_ok=True, parents=True)
+                copytree(src=local_output_folder,
+                         dst=destination_folder,
+                         dirs_exist_ok=True)
+                return
+            if collector_user is None:
+                raise ValueError("output_collector_user must be set when output_collector_ip is remote.")
+            remote_destination_folder = collector_folder.joinpath(destination_subfolder)
+            remote_login = "{0}@{1}".format(collector_user, collector_ip)
+            if collection_method == "rsync":
+                mkdir_command = ["ssh", remote_login, "mkdir -p {0}".format(str(remote_destination_folder))]
+                self._run_command_with_trace(mkdir_command,
+                                             "creating remote collector folder")
+                rsync_command = ["rsync",
+                                 "-az",
+                                 str(local_output_folder) + "/",
+                                 "{0}:{1}/".format(remote_login, remote_destination_folder)]
+                self._run_command_with_trace(rsync_command,
+                                             "sending output folder to collector")
+            elif collection_method == "scp":
+                mkdir_command = ["ssh", remote_login, "mkdir -p {0}".format(str(remote_destination_folder))]
+                self._run_command_with_trace(mkdir_command,
+                                             "creating remote collector folder")
+                scp_command = ["scp",
+                               "-r",
+                               str(local_output_folder) + "/.",
+                               "{0}:{1}/".format(remote_login, remote_destination_folder)]
+                self._run_command_with_trace(scp_command,
+                                             "copying output folder to collector")
+            else:
+                raise ValueError("Unsupported output_collection_method: {0}".format(collection_method))
+        except Exception as e:
+            print("[Output Collection] Failed to gather outputs: {0}".format(e),
+                  file=sys_stdout,
+                  flush=True)
+            print(format_exc(), file=sys_stdout, flush=True)
+            if fail_on_collection_error:
+                raise
+
+    def _apply_output_gathering_overrides(self,
+                                          execution_settings: dict) -> None:
+        output_gathering_settings = self.get_attribute("_output_gathering_settings")
+        if not output_gathering_settings:
+            return
+        for key, value in output_gathering_settings.items():
+            execution_settings[key] = value
 
     @staticmethod
     def _get_personalized_settings_for_server(base_server_config_file: Path,
@@ -72,6 +347,11 @@ class FlowerExecutor:
             fl_settings = parse_config_section(base_server_config_file, "FL Settings")
             fl_settings["wait_for_initial_clients"]["num_clients_to_wait"] = num_clients_to_wait
             personalized_settings.update({"_fl_settings": fl_settings})
+            # Override server gRPC settings according to the executor/nodes plan.
+            grpc_settings = parse_config_section(base_server_config_file, "gRPC Settings")
+            grpc_settings["listen_ip_address"] = execution_settings.get("server_listen_ip_address", "0.0.0.0")
+            grpc_settings["listen_port"] = execution_settings.get("server_port", grpc_settings["listen_port"])
+            personalized_settings.update({"_grpc_settings": grpc_settings})
         # Return the personalized_settings dictionary.
         return personalized_settings
 
@@ -110,6 +390,11 @@ class FlowerExecutor:
                 late_join_first_appearance_round = execution_settings["round_of_first_appearance_of_late_join_clients"]
                 late_join_settings.update({"late_join_first_appearance_round": late_join_first_appearance_round})
             personalized_settings["_late_join_settings"] = late_join_settings
+            # Override client gRPC settings according to the executor/nodes plan.
+            grpc_settings = parse_config_section(base_client_config_file, "gRPC Settings")
+            grpc_settings["server_ip_address"] = execution_settings.get("server_ip", grpc_settings["server_ip_address"])
+            grpc_settings["server_port"] = execution_settings.get("server_port", grpc_settings["server_port"])
+            personalized_settings.update({"_grpc_settings": grpc_settings})
         # Set the device emulation settings.
         if current_execution_devices:
             device_emulation_settings = current_execution_devices[client_id][1]
@@ -347,25 +632,43 @@ class FlowerExecutor:
             # Return the flower server launcher.
             return fsl
         except Exception as _:
-            print(format_exc())
+            print(format_exc(), file=sys_stdout, flush=True)
             sys_stdout.flush()
             sys_stderr.flush()
             raise
+
+    def _launch_flower_server_safely(self,
+                                     server_id: int) -> None:
+        try:
+            server_launcher = self._launch_flower_server(server_id)
+            server_launcher.launch_server()
+        except Exception as e:
+            print("Error in server {0}: {1}".format(server_id, e), file=sys_stdout, flush=True)
+            print(format_exc(), file=sys_stdout, flush=True)
+            sys_stdout.flush()
+            sys_stderr.flush()
+            raise SystemExit(1)
 
     @staticmethod
     def _wait_for_server(server_id: int,
                          server_ip: str,
                          server_port: int,
-                         server_timeout: int = 60) -> None:
+                         server_timeout: int = 60,
+                         server_process: Process | None = None) -> None:
         start = perf_counter()
         while perf_counter() - start < server_timeout:
+            if server_process is not None and server_process.exitcode is not None:
+                raise RuntimeError("Server '{0}' process exited before becoming reachable. Exit code: {1}."
+                                   .format(server_id, server_process.exitcode))
             try:
                 with create_connection((server_ip, server_port), timeout=1):
-                    print("Server '{0}' is reachable on {1}:{2}!".format(server_id, server_ip, server_port))
+                    print("Server '{0}' is reachable on {1}:{2}!".format(server_id, server_ip, server_port),
+                          flush=True)
                     return
             except OSError as _:
                 sleep(1)
-        raise RuntimeError("Server '{0}' did not become ready in time!".format(server_id))
+        raise RuntimeError("Server '{0}' did not become ready in time at {1}:{2}."
+                           .format(server_id, server_ip, server_port))
 
     @staticmethod
     def _verify_dataset_loaded(fcl: FlowerClientLauncher,
@@ -450,23 +753,37 @@ class FlowerExecutor:
 
     def _launch_flower_client_safely(self,
                                      client_id: int,
-                                     dataset_loaded_barrier: Barrier) -> None:
+                                     dataset_loaded_barrier: Barrier = None) -> None:
         try:
             client_launcher = self._launch_flower_client(client_id, dataset_loaded_barrier)
             # Only launch the client if dataset was verified (though barrier will be passed regardless).
             client_launcher.launch_client()
         except Exception as e:
             print("Error in client {0}: {1}".format(client_id, e))
-            print(format_exc())
-            try:
-                dataset_loaded_barrier.wait()
-            except BrokenBarrierError:
-                print("[Client {0}] Barrier broken.".format(client_id))
-            except Exception as e2:
-                print("[Client {0}] Barrier wait failed: {1}".format(client_id, e2))
-                print(format_exc())
+            print(format_exc(), file=sys_stdout, flush=True)
+            if dataset_loaded_barrier is not None:
+                try:
+                    dataset_loaded_barrier.wait()
+                except BrokenBarrierError:
+                    print("[Client {0}] Barrier broken.".format(client_id))
+                except Exception as e2:
+                    print("[Client {0}] Barrier wait failed: {1}".format(client_id, e2), file=sys_stdout, flush=True)
+                    print(format_exc(), file=sys_stdout, flush=True)
+            sys_stdout.flush()
+            sys_stderr.flush()
+            raise SystemExit(1)
 
     def execute_fl_with_flower(self) -> None:
+        try:
+            self._execute_fl_with_flower_impl()
+        except Exception as e:
+            print("Fatal error in execute_fl_with_flower: {0}".format(e), file=sys_stdout, flush=True)
+            print(format_exc(), file=sys_stdout, flush=True)
+            sys_stdout.flush()
+            sys_stderr.flush()
+            raise
+
+    def _execute_fl_with_flower_impl(self) -> None:
         executions_to_execute = []
         # Print the number of the repetitions (independent executions).
         print("Number of repetitions (independent executions): {0}".format(self._repetitions))
@@ -477,10 +794,12 @@ class FlowerExecutor:
         for execution_section in execution_sections:
             execution_settings = parse_config_section(config_file, execution_section)
             for repetition_idx in range(1, self._repetitions + 1):
-                execution_name = execution_section.replace("_N Settings", f"_{repetition_idx}")
+                execution_name = execution_section.replace("_N Settings", "_{0}".format(repetition_idx))
                 execution_settings_copy = deepcopy(execution_settings)
                 execution_settings_copy["execution_output_folder"] = \
                     execution_settings_copy["execution_output_folder"].replace("N", str(repetition_idx))
+                execution_settings_copy["output_collector_folder"] = \
+                    execution_settings_copy["output_collector_folder"].replace("N", str(repetition_idx))
                 executions_to_execute.append({execution_name: execution_settings_copy})
         # Iterate through the list of executions to execute.
         for current_execution in executions_to_execute:
@@ -489,6 +808,8 @@ class FlowerExecutor:
             # Get the execution name and settings.
             execution_name = next(iter(current_execution))
             execution_settings = current_execution[execution_name]
+            # Apply command-line overrides for output gathering, if provided.
+            self._apply_output_gathering_overrides(execution_settings)
             # Check if the devices performance emulation is enabled.
             emulate_devices_performance = execution_settings["emulate_devices_performance"]
             if emulate_devices_performance:
@@ -643,44 +964,92 @@ class FlowerExecutor:
                                                       late_join_clients_performance_profile,
                                                       late_join_clients_round_of_first_appearance,
                                                       execution_output_folder)
-            # Create a barrier to synchronize dataset loading.
-            dataset_loaded_barrier = Barrier(num_clients + 1)
-            # Start the Flower server in a separate process.
-            server_id = execution_settings["server_id"]
-            print("Launching Server '{0}'...".format(server_id))
-            server_process = Process(target=lambda: self._launch_flower_server(server_id).launch_server())
-            server_process.start()
-            # Wait for the server to start.
-            server_ip = execution_settings.get("server_ip", "127.0.0.1")
+            # Resolve the execution placement.
+            hostfile = self.get_attribute("_hostfile")
+            if hostfile is not None:
+                nodes_file = hostfile
+            else:
+                nodes_file = execution_settings.get("nodes_file", None)
+            if nodes_file:
+                nodes_plan = self._load_nodes_file(Path(nodes_file))
+            else:
+                nodes_plan = {"server_ip": execution_settings.get("server_ip", "127.0.0.1"),
+                              "client_ips": ["127.0.0.1"]}
+            server_ip = nodes_plan["server_ip"]
+            client_ips = nodes_plan["client_ips"]
             server_port = execution_settings.get("server_port", 8080)
             server_timeout = execution_settings.get("server_timeout", 60)
+            # Store the resolved server endpoint in the current execution settings. These values are
+            # later injected into the client/server personalized gRPC settings.
+            execution_settings["server_ip"] = server_ip
+            execution_settings["server_port"] = server_port
+            clients_by_ip = self._assign_clients_to_nodes(num_clients, client_ips)
+            local_client_ids = self._get_clients_for_this_node(clients_by_ip)
+            is_server_node = self._is_this_node(server_ip)
+            is_distributed_execution = self._is_distributed_nodes_plan(nodes_plan)
+            print("Execution placement:")
+            print("  Server IP: {0}".format(server_ip))
+            print("  Server port: {0}".format(server_port))
+            print("  Distributed execution: {0}".format(is_distributed_execution))
+            print("  Clients assigned to this node: {0}".format(local_client_ids))
+            # Start the Flower server only on the server node.
+            server_process = None
+            server_id = execution_settings["server_id"]
+            if is_server_node:
+                print("Launching Server '{0}' on this node...".format(server_id))
+                server_process = Process(target=self._launch_flower_server_safely, args=(server_id,))
+                server_process.start()
+            else:
+                print("This node is not the server node. Server will not be launched here.")
+            # Wait until the server gRPC endpoint is reachable.
             try:
-                self._wait_for_server(server_id, server_ip, server_port, server_timeout)
-            except RuntimeError as _:
-                print("Server '{0}' failed to start!".format(server_id))
-                server_process.terminate()
-                server_process.join()
-                return
-            print("Server '{0}' successfully started!".format(server_id))
-            # Start multiple Flower clients in separate processes.
+                self._wait_for_server(server_id, server_ip, server_port, server_timeout, server_process)
+            except RuntimeError as e:
+                print("Server '{0}' failed to become reachable at {1}:{2}: {3}"
+                      .format(server_id, server_ip, server_port, e), file=sys_stdout, flush=True)
+                if server_process is not None:
+                    server_process.terminate()
+                    server_process.join()
+                raise
+            print("Server '{0}' is reachable.".format(server_id))
+            # Start only the Flower clients assigned to this node.
             client_processes = []
             # Get the process wait time (after launching).
             process_wait_time = execution_settings.get("process_wait_time", 5)
-            for idx in range(num_clients):
-                p = Process(target=self._launch_flower_client_safely, args=(idx, dataset_loaded_barrier))
+            if is_distributed_execution:
+                # multiprocessing.Barrier only works for local processes.
+                dataset_loaded_barrier = None
+            else:
+                dataset_loaded_barrier = Barrier(num_clients + 1)
+            for client_id in local_client_ids:
+                p = Process(target=self._launch_flower_client_safely, args=(client_id, dataset_loaded_barrier))
                 p.start()
                 client_processes.append(p)
                 sleep(process_wait_time)
-                print("Launched the Client '{0}'...".format(idx))
-            # Wait for all clients to safely load their datasets.
-            print("Waiting for all clients to load and verify their datasets...")
-            dataset_loaded_barrier.wait()
-            print("All clients have completed dataset loading verification!")
-            # Wait for all client processes to finish.
-            for p in client_processes:
+                print("Launched the Client '{0}' on this node...".format(client_id))
+            # Wait for all local clients to safely load their datasets.
+            if not is_distributed_execution and dataset_loaded_barrier is not None:
+                print("Waiting for all local clients to load and verify their datasets...")
+                dataset_loaded_barrier.wait()
+                print("All local clients have completed dataset loading verification!")
+            # Wait for all local client processes to finish and propagate child-process failures.
+            for client_id, p in zip(local_client_ids, client_processes):
                 p.join()
-            # Wait for the server process to finish (finite rounds).
-            server_process.join()
+                if p.exitcode != 0:
+                    raise RuntimeError("Client process {0} exited with non-zero exit code {1}."
+                                       .format(client_id, p.exitcode))
+            # Wait for the server process to finish only on the server node and propagate failures.
+            if server_process is not None:
+                server_process.join()
+                if server_process.exitcode != 0:
+                    raise RuntimeError("Server process {0} exited with non-zero exit code {1}."
+                                       .format(server_id, server_process.exitcode))
+            # Gather this node's local output folder into the collector machine, if enabled.
+            self._collect_outputs_to_collector(execution_name,
+                                               execution_settings,
+                                               is_distributed_execution,
+                                               is_server_node,
+                                               local_client_ids)
             # End the execution timer.
             end = perf_counter()
             # Print the elapsed time for the execution.

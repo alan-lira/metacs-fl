@@ -1530,14 +1530,20 @@ def calculate_memory_slowdown_factor_i_r(client_attributes: dict,
 
 def calculate_computation_time(client_attributes: dict,
                                phase: str) -> float:
-    # Estimate the total number of floating-point operations required for the client to train/test the model.
+    # Estimate the total number of FLOPs for the current candidate assignment.
     tfpo_m_i = calculate_total_floating_point_operations_i_r(client_attributes, phase)
-    # Estimate the effective floating-point operations throughput of the client when training/testing the model.
-    etp_m_i = calculate_effective_flop_throughput_i_r(client_attributes, phase)
-    # Estimate the memory slowdown factor of the client when training/testing the model.
-    msd_m_i = calculate_memory_slowdown_factor_i_r(client_attributes, etp_m_i, phase)
-    # Estimate the time spent with computation by a client i on round r (in seconds).
-    computation_time_in_seconds = tfpo_m_i / (etp_m_i * msd_m_i)
+    # Scale the client-reported computation time according to the FLOP ratio.
+    if "computation_time_in_seconds" not in client_attributes:
+        raise KeyError("Missing 'computation_time_in_seconds' in client_attributes.")
+    if "total_float_ops" not in client_attributes:
+        raise KeyError("Missing 'total_float_ops' in client_attributes.")
+    reference_computation_time_in_seconds = float(client_attributes["computation_time_in_seconds"])
+    reference_total_float_ops = float(client_attributes["total_float_ops"])
+    if reference_computation_time_in_seconds <= 0:
+        raise ValueError("'computation_time_in_seconds' must be positive.")
+    if reference_total_float_ops <= 0:
+        raise ValueError("'total_float_ops' must be positive.")
+    computation_time_in_seconds = reference_computation_time_in_seconds * (tfpo_m_i / reference_total_float_ops)
     # Return the estimated computation time (in seconds).
     return computation_time_in_seconds
 
