@@ -172,13 +172,18 @@ metacs_fl/server/config/flower_server.cfg
 # Ignore all logging files.
 logging/
 
-# Ignore all output files.
+# Experiment/runtime outputs
 output/
 output_execution/
 output_simulation/
+setup_logs/
 distributed_launch_logs/
+campaign_runs/
 gathered_results/
 merged_results/
+server_only_logs/
+server_only_results/
+.distributed_runtime_configs/
 
 # Ignore GloVe embedding files.
 glove_embeddings

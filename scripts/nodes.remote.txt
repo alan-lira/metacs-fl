@@ -1,0 +1,5 @@
+mode remote
+
+server ubuntu@server.example.com server.example.com
+client ubuntu@client1.example.com client1.example.com
+client ubuntu@client2.example.com client2.example.com

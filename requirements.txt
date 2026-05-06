@@ -14,6 +14,7 @@ psutil==7.1.0
 pycryptodome==3.23.0
 pyJoules==0.5.1
 pynvml==13.0.1
+pyRAPL==0.2.3.1
 python-dateutil==2.9.0.post0
 ray[default]==2.31.0
 requests==2.32.5

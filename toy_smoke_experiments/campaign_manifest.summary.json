@@ -1,0 +1,17 @@
+{
+  "pack": "toy_smoke_experiments",
+  "total": 2,
+  "by_backend": {
+    "distributed_flower": 1,
+    "server_only_python": 1
+  },
+  "by_group": {
+    "toy_smoke_distributed": 1,
+    "toy_smoke_server_only": 1
+  },
+  "notes": [
+    "This folder is intentionally outside experiments/ and is meant only for validating orchestration scripts.",
+    "The server-only smoke script is self-contained and validates run_on_server_only.sh without depending on the real scalability experiment script.",
+    "The distributed configs validate the Flower launcher, runtime config staging, executor patching, gRPC patching, gather, merge, and campaign markers."
+  ]
+}

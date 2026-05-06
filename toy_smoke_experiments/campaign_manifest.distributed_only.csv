@@ -1,0 +1,2 @@
+experiment_id,backend,group,num_clients,dataset,distribution,approach,executor_cfg,server_cfg,client_cfg,server_script,server_config,remote_output_dir
+toy_distributed__cifar_10__iid__fedavg_2clients_1round,distributed_flower,toy_smoke_distributed,2_clients,cifar_10,iid,fedavg,toy_smoke_experiments/distributed/cifar_10_iid_fedavg/fedavg.cfg,toy_smoke_experiments/distributed/cifar_10_iid_fedavg/fedavg_server.cfg,toy_smoke_experiments/distributed/cifar_10_iid_fedavg/client.cfg,,,
