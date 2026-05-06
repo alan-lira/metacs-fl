@@ -176,6 +176,9 @@ logging/
 output/
 output_execution/
 output_simulation/
+distributed_launch_logs/
+gathered_results/
+merged_results/
 
 # Ignore GloVe embedding files.
 glove_embeddings

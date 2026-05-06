@@ -53,23 +53,64 @@ class FlowerExecutor:
         return ip_address in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
     @staticmethod
-    def _get_local_ip_addresses() -> set[str]:
-        local_ips = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+    def _normalize_hostname(value: str) -> str:
+        return str(value).strip().lower().rstrip(".")
+
+    @staticmethod
+    def _short_hostname(value: str) -> str:
+        value = FlowerExecutor._normalize_hostname(value)
+        return value.split(".")[0]
+
+    @staticmethod
+    def _resolve_host_addresses(host: str) -> set[str]:
+        addresses = set()
+        if not host:
+            return addresses
         try:
-            hostname = gethostname()
-            local_ips.add(hostname)
-            for info in getaddrinfo(hostname, None):
-                local_ips.add(info[4][0])
+            for info in getaddrinfo(host, None):
+                addresses.add(info[4][0])
         except Exception as _:
             pass
-        return local_ips
+        return addresses
+
+    @staticmethod
+    def _get_local_ip_addresses() -> set[str]:
+        local_values = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+        try:
+            hostname = gethostname()
+            hostname_normalized = FlowerExecutor._normalize_hostname(hostname)
+            hostname_short = FlowerExecutor._short_hostname(hostname)
+            local_values.add(hostname_normalized)
+            local_values.add(hostname_short)
+            # Resolve both the hostname returned by the OS and its short form.
+            for address in FlowerExecutor._resolve_host_addresses(hostname_normalized):
+                local_values.add(address)
+            for address in FlowerExecutor._resolve_host_addresses(hostname_short):
+                local_values.add(address)
+        except Exception as _:
+            pass
+        return local_values
 
     @classmethod
     def _is_this_node(cls, ip_address: str) -> bool:
         if cls._is_localhost_ip(ip_address):
             return True
-        local_ips = cls._get_local_ip_addresses()
-        return ip_address in local_ips
+        target = cls._normalize_hostname(ip_address)
+        target_short = cls._short_hostname(ip_address)
+        local_values = cls._get_local_ip_addresses()
+        local_normalized = {cls._normalize_hostname(v) for v in local_values}
+        local_short = {cls._short_hostname(v) for v in local_values}
+        # Match exact hostname/IP, or short hostnames (such as paradoxe-1 == paradoxe-1.rennes.g5k).
+        if target in local_normalized:
+            return True
+        if target_short in local_short:
+            return True
+        # Match by resolved IP addresses. This covers cases where the hostfile
+        # uses FQDNs but the local node identifies itself by IP, or vice versa.
+        target_addresses = cls._resolve_host_addresses(target)
+        if target_addresses.intersection(local_values):
+            return True
+        return False
 
     @staticmethod
     def _load_nodes_file(nodes_file: Path) -> dict:
