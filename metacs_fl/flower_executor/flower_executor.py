@@ -91,15 +91,15 @@ class FlowerExecutor:
             pass
         return local_values
 
-    @classmethod
-    def _is_this_node(cls, ip_address: str) -> bool:
-        if cls._is_localhost_ip(ip_address):
+    def _is_this_node(self,
+                      ip_address: str) -> bool:
+        if self._is_localhost_ip(ip_address):
             return True
-        target = cls._normalize_hostname(ip_address)
-        target_short = cls._short_hostname(ip_address)
-        local_values = cls._get_local_ip_addresses()
-        local_normalized = {cls._normalize_hostname(v) for v in local_values}
-        local_short = {cls._short_hostname(v) for v in local_values}
+        target = self._normalize_hostname(ip_address)
+        target_short = self._short_hostname(ip_address)
+        local_values = self._get_local_ip_addresses()
+        local_normalized = {self._normalize_hostname(v) for v in local_values}
+        local_short = {self._short_hostname(v) for v in local_values}
         # Match exact hostname/IP, or short hostnames (such as paradoxe-1 == paradoxe-1.rennes.g5k).
         if target in local_normalized:
             return True
@@ -107,7 +107,7 @@ class FlowerExecutor:
             return True
         # Match by resolved IP addresses. This covers cases where the hostfile
         # uses FQDNs but the local node identifies itself by IP, or vice versa.
-        target_addresses = cls._resolve_host_addresses(target)
+        target_addresses = self._resolve_host_addresses(target)
         if target_addresses.intersection(local_values):
             return True
         return False
@@ -163,12 +163,11 @@ class FlowerExecutor:
             clients_by_ip[client_ip].append(client_id)
         return dict(clients_by_ip)
 
-    @classmethod
-    def _get_clients_for_this_node(cls,
+    def _get_clients_for_this_node(self,
                                    clients_by_ip: dict) -> list[int]:
         local_client_ids = []
         for ip_address, client_ids in clients_by_ip.items():
-            if cls._is_this_node(ip_address):
+            if self._is_this_node(ip_address):
                 local_client_ids.extend(client_ids)
         return sorted(local_client_ids)
 
@@ -201,14 +200,13 @@ class FlowerExecutor:
                 sanitized.append("_")
         return "".join(sanitized).strip("_") or "unknown"
 
-    @classmethod
-    def _get_this_node_identifier(cls) -> str:
+    def _get_this_node_identifier(self) -> str:
         hostname = gethostname()
-        local_ips = sorted(cls._get_local_ip_addresses())
-        non_local_ips = [ip for ip in local_ips if not cls._is_localhost_ip(ip)]
+        local_ips = sorted(self._get_local_ip_addresses())
+        non_local_ips = [ip for ip in local_ips if not self._is_localhost_ip(ip)]
         if non_local_ips:
-            return cls._sanitize_for_path("{0}_{1}".format(hostname, non_local_ips[0]))
-        return cls._sanitize_for_path(hostname)
+            return self._sanitize_for_path("{0}_{1}".format(hostname, non_local_ips[0]))
+        return self._sanitize_for_path(hostname)
 
     @staticmethod
     def _write_node_manifest(output_folder: Path,
@@ -288,12 +286,14 @@ class FlowerExecutor:
                       file=sys_stdout,
                       flush=True)
                 return
-
             self._write_node_manifest(local_output_folder,
                                       execution_name,
                                       is_server_node,
                                       local_client_ids,
                                       is_distributed_execution)
+            if "output_collector_folder" not in execution_settings:
+                raise ValueError("gather_outputs is enabled, but output_collector_folder was not provided. "
+                                 "Set it in the executor config or inject it through the distributed launcher.")
             collector_folder = Path(execution_settings["output_collector_folder"])
             collector_ip = execution_settings.get("output_collector_ip", "127.0.0.1")
             collector_user = execution_settings.get("output_collector_user", None)
@@ -349,12 +349,43 @@ class FlowerExecutor:
             if fail_on_collection_error:
                 raise
 
+    @staticmethod
+    def _replace_repetition_placeholder(value: any,
+                                        repetition_idx: int) -> any:
+        if value is None:
+            return value
+        if isinstance(value, Path):
+            return Path(str(value).replace("N", str(repetition_idx)))
+        if isinstance(value, str):
+            return value.replace("N", str(repetition_idx))
+        return value
+
+    def _apply_repetition_placeholder_to_settings(self,
+                                                  execution_settings: dict,
+                                                  repetition_idx: int,
+                                                  required_keys: list[str] | None = None,
+                                                  optional_keys: list[str] | None = None) -> None:
+        required_keys = required_keys or []
+        optional_keys = optional_keys or []
+        for key in required_keys:
+            if key not in execution_settings:
+                raise KeyError(key)
+            execution_settings[key] = self._replace_repetition_placeholder(execution_settings[key],
+                                                                           repetition_idx)
+        for key in optional_keys:
+            if key in execution_settings:
+                execution_settings[key] = self._replace_repetition_placeholder(execution_settings[key],
+                                                                               repetition_idx)
+
     def _apply_output_gathering_overrides(self,
-                                          execution_settings: dict) -> None:
+                                          execution_settings: dict,
+                                          repetition_idx: int | None = None) -> None:
         output_gathering_settings = self.get_attribute("_output_gathering_settings")
         if not output_gathering_settings:
             return
         for key, value in output_gathering_settings.items():
+            if repetition_idx is not None:
+                value = self._replace_repetition_placeholder(value, repetition_idx)
             execution_settings[key] = value
 
     @staticmethod
@@ -837,20 +868,22 @@ class FlowerExecutor:
             for repetition_idx in range(1, self._repetitions + 1):
                 execution_name = execution_section.replace("_N Settings", "_{0}".format(repetition_idx))
                 execution_settings_copy = deepcopy(execution_settings)
-                execution_settings_copy["execution_output_folder"] = \
-                    execution_settings_copy["execution_output_folder"].replace("N", str(repetition_idx))
-                execution_settings_copy["output_collector_folder"] = \
-                    execution_settings_copy["output_collector_folder"].replace("N", str(repetition_idx))
-                executions_to_execute.append({execution_name: execution_settings_copy})
+                self._apply_repetition_placeholder_to_settings(execution_settings_copy,
+                                                               repetition_idx,
+                                                               required_keys=["execution_output_folder"],
+                                                               optional_keys=["output_collector_folder"])
+                executions_to_execute.append({execution_name: execution_settings_copy,
+                                              "_repetition_idx": repetition_idx})
         # Iterate through the list of executions to execute.
         for current_execution in executions_to_execute:
             # Update the current execution.
             self._set_attribute("_current_execution", current_execution)
             # Get the execution name and settings.
+            repetition_idx = current_execution.pop("_repetition_idx")
             execution_name = next(iter(current_execution))
             execution_settings = current_execution[execution_name]
             # Apply command-line overrides for output gathering, if provided.
-            self._apply_output_gathering_overrides(execution_settings)
+            self._apply_output_gathering_overrides(execution_settings, repetition_idx)
             # Check if the devices performance emulation is enabled.
             emulate_devices_performance = execution_settings["emulate_devices_performance"]
             if emulate_devices_performance:
