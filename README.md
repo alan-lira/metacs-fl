@@ -54,6 +54,8 @@ MetaCS-FL supports:
   - [Full campaign](#full-campaign)
   - [Resume campaign](#resume-campaign)
 - [Notes for Grid'5000](#notes-for-grid5000)
+- [Results](#results)
+  - [FGCS 2026](#fgcs-2026)
 - [Scientific Productions](#scientific-productions)
   - [1. MetaCS-FL: A Metaheuristic-Based Framework for Client Selection in Federated Learning Systems](#1-metacs-fl-a-metaheuristic-based-framework-for-client-selection-in-federated-learning-systems)
 - [License](#license)
@@ -1061,6 +1063,54 @@ ssh root@paradoxe-1.rennes.g5k
 4. Use short runtime hostnames such as `paradoxe-1` if the executor matches nodes using short hostnames.
 
 5. Always run the toy smoke test first.
+
+[Back to table of contents](#table-of-contents)
+
+---
+
+## Results
+
+### FGCS 2026
+
+The FGCS 2026 experiment results are available for download here:
+
+- [Download `fgcs_2026_results.tar.xz`](https://osf.io/rejq9/files/sd4a6)
+
+To download the archive directly from a terminal, run one of the following commands:
+
+```bash
+# Using curl
+curl -L -o fgcs_2026_results.tar.xz https://osf.io/sd4a6/download
+
+# Or using wget
+wget -O fgcs_2026_results.tar.xz https://osf.io/sd4a6/download
+```
+
+The results folder was compressed as a `.tar.xz` archive using `tar` and `xz` with all available CPU threads enabled by `xz -T0`:
+
+```bash
+tar -c fgcs_2026_results | xz -T0 -v > fgcs_2026_results.tar.xz
+```
+
+
+
+The downloadable compressed archive has approximately **435.2 MiB**, while the uncompressed folder has approximately **4416.2 MiB**.
+
+To extract the archive, run:
+
+```bash
+xz -dc fgcs_2026_results.tar.xz | tar -xv
+```
+
+For reference, the generic commands are:
+
+```bash
+# Compress a folder into a .tar.xz archive
+tar -c folder_name | xz -T0 -v > folder_name.tar.xz
+
+# Extract a .tar.xz archive with progress from tar
+xz -dc folder_name.tar.xz | tar -xv
+```
 
 [Back to table of contents](#table-of-contents)
 
