@@ -1,4 +1,4 @@
-# Copyright 2020 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,8 +15,8 @@
 """Flower client."""
 
 
-from .app import start_client as start_client
-from .app import start_numpy_client as start_numpy_client
+from ..compat.client.app import start_client as start_client  # Deprecated
+from ..compat.client.app import start_numpy_client as start_numpy_client  # Deprecated
 from .client import Client as Client
 from .client_app import ClientApp as ClientApp
 from .numpy_client import NumPyClient as NumPyClient

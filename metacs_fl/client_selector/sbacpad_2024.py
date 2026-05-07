@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from logging import Logger
 from numpy import array
 from numpy.random import default_rng, SeedSequence
@@ -9,7 +9,7 @@ from metacs_fl.task_scheduler.ecmtc import ecmtc
 from metacs_fl.task_scheduler.mec import mec
 from metacs_fl.task_scheduler.random import random_selection
 from metacs_fl.utils.client_selector_util import calculate_linear_interpolation_or_extrapolation, \
-    calculate_quadratic_interpolation_or_extrapolation, select_all_available_clients, schedule_tasks_to_selected_clients
+    calculate_quadratic_interpolation_or_extrapolation, get_all_possible_sums, take_closest
 from metacs_fl.utils.logger_util import log_message
 from metacs_fl.utils.task_scheduler_util import distribute_tasks_with_random_approach, \
     build_class_capacity_vectors_list, distribute_tasks_with_locally_balanced_approach, organize_tasks_distribution
@@ -24,6 +24,7 @@ class SBACPAD2024:
         self._initial_solution_generation_history = {}
         self._internal_candidate_clients_history = {}
         self._internal_selected_clients_history = {}
+        self._task_assignment_capacities_list = []
         # Initialize the random number generator with a fixed seed to allow replicable results.
         self._rng = default_rng(seed=seed)
 
@@ -36,14 +37,14 @@ class SBACPAD2024:
                       attribute_name: str) -> any:
         return getattr(self, attribute_name)
 
-    @staticmethod
-    def _generate_cost_matrices(current_phase: str,
+    def _generate_cost_matrices(self,
+                                current_phase: str,
                                 candidate_clients: dict,
                                 selected_clients_metrics_history: dict,
-                                history_checker: str) -> dict:
+                                history_checker: str,
+                                clients_profiles: dict) -> dict:
         # Get the necessary properties of the candidate clients.
-        task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
-                                           for _, client_map in candidate_clients.items()]
+        task_assignment_capacities_list = self.get_attribute("_task_assignment_capacities_list")
         # Initialize the cost matrices.
         time_costs = []
         energy_costs = []
@@ -91,6 +92,20 @@ class SBACPAD2024:
                                             candidate_clients_costs_hist[client_id][x_i][cost_key].extend(cost_value)
                                 else:
                                     candidate_clients_costs_hist[client_id].update({x_i: client_costs})
+        for client_id, _ in candidate_clients.items():
+            if client_id not in candidate_clients_costs_hist:
+                candidate_clients_costs_hist[client_id] = {}
+                profile_phase_dict = clients_profiles[client_id][current_phase]
+                # profile_phase_dict: {num_samples: {metric: value}}
+                for x_i, metrics in profile_phase_dict.items():
+                    if x_i not in candidate_clients_costs_hist[client_id]:
+                        time_i = 0
+                        energy_i = 0
+                        if "{0}ing_time_in_seconds".format(current_phase) in metrics:
+                            time_i = metrics["{0}ing_time_in_seconds".format(current_phase)]
+                        if "{0}ing_energy_in_joules".format(current_phase) in metrics:
+                            energy_i = metrics["{0}ing_energy_in_joules".format(current_phase)]
+                        candidate_clients_costs_hist[client_id][x_i] = {"time_costs": [time_i], "energy_costs": [energy_i]}
         # Calculate the averages of the historical costs per number of tasks per client.
         for client_id, _ in candidate_clients_costs_hist.items():
             client_costs_dict = candidate_clients_costs_hist[client_id]
@@ -288,8 +303,10 @@ class SBACPAD2024:
                              current_phase: str,
                              candidate_clients: dict,
                              num_tasks: int,
+                             samples_per_task: int,
                              cost_matrices: dict,
                              time_limit: float,
+                             data_privacy_approach: str,
                              logger: Logger) -> dict:
         # Start the clients' selection duration timer.
         selection_duration_start = process_time()
@@ -298,10 +315,10 @@ class SBACPAD2024:
         # Initialize the solution.
         X = []
         X_dist = []
-        # Get the necessary properties of the candidate clients.
-        tasks_per_class_list = [client_map["client_tasks_per_class_{0}".format(current_phase)]
-                                for _, client_map in candidate_clients.items()]
-        class_capacity_vectors_list, sorted_classes = build_class_capacity_vectors_list(tasks_per_class_list)
+        # Build the class capacity vectors list.
+        class_capacity_vectors_list, sorted_classes = build_class_capacity_vectors_list(candidate_clients,
+                                                                                        data_privacy_approach,
+                                                                                        current_phase)
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
         client_selector_phase = client_selection_settings["client_selector_{0}ing".format(current_phase)]
@@ -318,81 +335,65 @@ class SBACPAD2024:
                                      num_tasks,
                                      candidate_clients,
                                      fraction_clients)
-                X_dist = distribute_tasks_with_random_approach(X, class_capacity_vectors_list)
+                # Scale the assigned tasks back to sample-level counts (since distribution is based on samples per class).
+                X_scaled = [x_i * samples_per_task for x_i in X]
+                X_dist = distribute_tasks_with_random_approach(X_scaled, class_capacity_vectors_list)
             case "MEC":
-                if fl_round == 1:
-                    # Log a 'selecting all available clients' message.
-                    message = "[SBAC-PAD_2024 | Round {0}] Selecting all available clients ({1}) for {2}ing (profiling round)..." \
-                        .format(fl_round, len(candidate_clients), current_phase)
-                    log_message(logger, message, "INFO")
-                    # Schedule tasks to all available (candidate) clients, respecting assignment capacities.
-                    selected_clients = select_all_available_clients(candidate_clients, current_phase)
-                    selected_clients = schedule_tasks_to_selected_clients(num_tasks,
-                                                                          selected_clients,
-                                                                          current_phase,
-                                                                          profiling_round=True,
-                                                                          schedule_to_all_clients=True)
-                else:
-                    # Select clients using the 'MEC' algorithm.
-                    task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
-                                                       for _, client_map in candidate_clients.items()]
-                    time_costs = cost_matrices["time_costs"]
-                    energy_costs = cost_matrices["energy_costs"]
-                    X, _, _ = mec(len(candidate_clients),
-                                  num_tasks,
-                                  task_assignment_capacities_list,
-                                  time_costs,
-                                  energy_costs)
-                    X_dist = distribute_tasks_with_locally_balanced_approach(X, class_capacity_vectors_list)
+                # Select clients using the 'MEC' algorithm.
+                task_assignment_capacities_list = self.get_attribute("_task_assignment_capacities_list")
+                time_costs = cost_matrices["time_costs"]
+                energy_costs = cost_matrices["energy_costs"]
+                X, _, _ = mec(len(candidate_clients),
+                              num_tasks,
+                              task_assignment_capacities_list,
+                              time_costs,
+                              energy_costs)
+                # Scale the assigned tasks back to sample-level counts (since distribution is based on samples per class).
+                X_scaled = [x_i * samples_per_task for x_i in X]
+                X_dist = distribute_tasks_with_locally_balanced_approach(X_scaled, class_capacity_vectors_list)
             case "ECMTC":
-                if fl_round == 1:
-                    # Log a 'selecting all available clients' message.
-                    message = "[SBAC-PAD_2024 | Round {0}] Selecting all available clients ({1}) for {2}ing (profiling round)..." \
-                        .format(fl_round, len(candidate_clients), current_phase)
-                    log_message(logger, message, "INFO")
-                    # Schedule tasks to all available (candidate) clients, respecting assignment capacities.
-                    selected_clients = select_all_available_clients(candidate_clients, current_phase)
-                    selected_clients = schedule_tasks_to_selected_clients(num_tasks,
-                                                                          selected_clients,
-                                                                          current_phase,
-                                                                          profiling_round=True,
-                                                                          schedule_to_all_clients=True)
-                else:
-                    # Select clients using the 'ECMTC' algorithm.
-                    task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
-                                                       for _, client_map in candidate_clients.items()]
-                    time_costs = cost_matrices["time_costs"]
-                    energy_costs = cost_matrices["energy_costs"]
-                    X, _, _ = ecmtc(len(candidate_clients),
-                                    num_tasks,
-                                    task_assignment_capacities_list,
-                                    time_costs,
-                                    energy_costs,
-                                    time_limit)
-                    X_dist = distribute_tasks_with_locally_balanced_approach(X, class_capacity_vectors_list)
+                # Select clients using the 'ECMTC' algorithm.
+                task_assignment_capacities_list = self.get_attribute("_task_assignment_capacities_list")
+                time_costs = cost_matrices["time_costs"]
+                energy_costs = cost_matrices["energy_costs"]
+                X, _, _ = ecmtc(len(candidate_clients),
+                                num_tasks,
+                                task_assignment_capacities_list,
+                                time_costs,
+                                energy_costs,
+                                time_limit)
+                # Scale the assigned tasks back to sample-level counts (since distribution is based on samples per class).
+                X_scaled = [x_i * samples_per_task for x_i in X]
+                X_dist = distribute_tasks_with_locally_balanced_approach(X_scaled, class_capacity_vectors_list)
         if not selected_clients:
             # Organize the tasks' distribution.
             X_dist = organize_tasks_distribution(X_dist, sorted_classes)
             for i, _ in enumerate(X):
-                # Get the number of tasks assigned to client i.
-                x_i = int(X[i])
                 # Get the tasks per class assigned to client i.
+                x_i = int(X[i])
                 x_dist_i = X_dist[i]
-                x_dist_i_str = "|".join([str(k) + "=" + str(v) for k, v in x_dist_i.items()])
+                total_samples_i = x_i * samples_per_task
+                x_dist_i_str = "|".join(["{0}={1}".format(k, v) for k, v in x_dist_i.items()])
                 if x_i > 0:
                     # Update the set of selected clients.
-                    client_id_str = "client_{0}".format(i)
+                    client_id_str = list(candidate_clients.keys())[i]
                     client_proxy = candidate_clients[client_id_str]["client_proxy"]
-                    client_task_assignment_capacities_phase_key = "client_task_assignment_capacities_{0}".format(current_phase)
-                    client_task_assignment_capacities_phase \
-                        = candidate_clients[client_id_str][client_task_assignment_capacities_phase_key]
+                    capacity_key = "client_task_assignment_capacities_{0}".format(current_phase)
+                    client_task_assignment_capacities_phase = candidate_clients[client_id_str][capacity_key]
                     client_max_task_capacity = max(client_task_assignment_capacities_phase)
                     client_info = {"client_proxy": client_proxy,
-                                   client_task_assignment_capacities_phase_key: client_task_assignment_capacities_phase,
+                                   capacity_key: client_task_assignment_capacities_phase,
                                    "client_max_task_capacity": client_max_task_capacity,
                                    "client_num_tasks_scheduled": x_i,
+                                   "client_num_samples_scheduled": total_samples_i,
                                    "client_num_tasks_per_class_scheduled": x_dist_i_str}
-                    selected_clients.update({client_id_str: client_info})
+                    selected_clients[client_id_str] = client_info
+        # Log a 'number of tasks → number of samples' per-client message.
+        for client_id, client_info in selected_clients.items():
+            message = "{0}: {1} tasks → {2} samples".format(client_id,
+                                                            client_info['client_num_tasks_scheduled'],
+                                                            client_info['client_num_samples_scheduled'])
+            log_message(logger, message, "INFO")
         # Get the clients' selection duration.
         selection_duration_in_seconds = process_time() - selection_duration_start
         # Log a 'clients' selection duration' message.
@@ -409,8 +410,11 @@ class SBACPAD2024:
                               current_phase: str,
                               candidate_clients: dict,
                               num_tasks: int,
+                              samples_per_task: int,
                               selected_clients_metrics_history: dict,
                               time_limit: float,
+                              data_privacy_approach: str,
+                              clients_profiles: dict,
                               logger: Logger) -> list:
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
@@ -419,7 +423,8 @@ class SBACPAD2024:
         cost_matrices = self._generate_cost_matrices(current_phase,
                                                      candidate_clients,
                                                      selected_clients_metrics_history,
-                                                     history_checker)
+                                                     history_checker,
+                                                     clients_profiles)
         # Initialize the list of selected clients' Future objects.
         selected_clients_futures = []
         target = self._select_clients_task
@@ -429,11 +434,51 @@ class SBACPAD2024:
                         current_phase,
                         candidate_clients,
                         num_tasks,
+                        samples_per_task,
                         cost_matrices,
                         time_limit,
+                        data_privacy_approach,
                         logger)
                 selected_clients_future = executor.submit(target, *args)
                 selected_clients_futures.append(selected_clients_future)
+        # Return the list of selected clients' Future objects.
+        return selected_clients_futures
+
+    def _select_clients_sync(self,
+                             rounds_to_select_clients: list,
+                             current_phase: str,
+                             candidate_clients: dict,
+                             num_tasks: int,
+                             samples_per_task: int,
+                             selected_clients_metrics_history: dict,
+                             time_limit: float,
+                             data_privacy_approach: str,
+                             clients_profiles: dict,
+                             logger: Logger) -> list:
+        # Get the necessary attributes.
+        client_selection_settings = self.get_attribute("_client_selection_settings")
+        # Generate the cost matrices.
+        history_checker = client_selection_settings["history_checker"]
+        cost_matrices = self._generate_cost_matrices(current_phase,
+                                                     candidate_clients,
+                                                     selected_clients_metrics_history,
+                                                     history_checker,
+                                                     clients_profiles)
+        # Initialize the list of selected clients' Future objects (already completed).
+        selected_clients_futures = []
+        for round_to_select_clients in rounds_to_select_clients:
+            result = self._select_clients_task(round_to_select_clients,
+                                               current_phase,
+                                               candidate_clients,
+                                               num_tasks,
+                                               samples_per_task,
+                                               cost_matrices,
+                                               time_limit,
+                                               data_privacy_approach,
+                                               logger)
+            selected_clients_future = Future()
+            selected_clients_future.set_result(result)
+            selected_clients_futures.append(selected_clients_future)
         # Return the list of selected clients' Future objects.
         return selected_clients_futures
 
@@ -445,9 +490,13 @@ class SBACPAD2024:
         candidate_clients = kwargs["candidate_clients"]
         num_rounds = kwargs["num_rounds"]
         num_tasks = kwargs["num_tasks"]
+        samples_per_task = kwargs["samples_per_task"]
         selected_clients_metrics_history = kwargs["selected_clients_metrics_history"]
+        clients_profiles = kwargs["clients_profiles"]
         time_limit = kwargs["time_limit"]
+        data_privacy_approach = kwargs["data_privacy_approach"]
         logger = kwargs["logger"]
+        use_async = kwargs["use_async"]
         # Get the necessary attributes.
         client_selection_settings = self.get_attribute("_client_selection_settings")
         select_clients_for_immediate_next_round_while_executing_current_phase \
@@ -455,14 +504,23 @@ class SBACPAD2024:
         # Get the necessary properties of the candidate clients.
         task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
                                            for _, client_map in candidate_clients.items()]
+        self._set_attribute("_task_assignment_capacities_list", task_assignment_capacities_list)
+        scaled_task_assignment_capacities_list = [sorted(set(capacities * samples_per_task))
+                                                  for capacities in task_assignment_capacities_list]
         # Calculate the maximum number of tasks that can be scheduled.
-        max_num_tasks = sum(max(list(task_assignment_capacities_i))
-                            for task_assignment_capacities_i in task_assignment_capacities_list)
-        # Adjust the number of tasks to be scheduled (in case there are insufficient task assignment capacities).
-        if isinstance(num_tasks, int):
-            num_tasks = min(num_tasks, max_num_tasks)
-        elif isinstance(num_tasks, float):
-            num_tasks = min(int(num_tasks * max_num_tasks), max_num_tasks)
+        max_num_tasks = sum(max(capacities) for capacities in scaled_task_assignment_capacities_list)
+        # Convert num_tasks → task count (fraction adjustment).
+        if isinstance(num_tasks, float):
+            # Always treat as fraction of total capacity.
+            num_tasks = int(num_tasks * max_num_tasks)
+        # Clamp to valid range.
+        num_tasks = max(1, min(num_tasks, max_num_tasks))
+        # Compute all the possible sums of task assignments, considering one assignment per client.
+        all_possible_task_assignment_sums = get_all_possible_sums(scaled_task_assignment_capacities_list)
+        # If the number of tasks to schedule is infeasible...
+        if num_tasks not in all_possible_task_assignment_sums:
+            # Set a new valid number of tasks to schedule.
+            num_tasks = take_closest(all_possible_task_assignment_sums, num_tasks)
         # Set the list of rounds to select clients.
         rounds_to_select_clients = []
         if not select_clients_for_immediate_next_round_while_executing_current_phase or current_round == 1:
@@ -482,16 +540,32 @@ class SBACPAD2024:
                 if immediate_next_round <= num_rounds:
                     rounds_to_select_clients.append(immediate_next_round)
         # Initialize the list of selected clients' Future objects.
-        selected_clients_futures = []
+        selected_clients_results = []
         # If the list of rounds to select clients is not empty...
         if rounds_to_select_clients:
-            # Select clients asynchronously, considering the list of rounds to select clients.
-            selected_clients_futures = self._select_clients_async(rounds_to_select_clients,
-                                                                  current_phase,
-                                                                  candidate_clients,
-                                                                  num_tasks,
-                                                                  selected_clients_metrics_history,
-                                                                  time_limit,
-                                                                  logger)
+            if use_async:
+                # Select clients asynchronously, considering the list of rounds to select clients.
+                selected_clients_results = self._select_clients_async(rounds_to_select_clients,
+                                                                      current_phase,
+                                                                      candidate_clients,
+                                                                      num_tasks,
+                                                                      samples_per_task,
+                                                                      selected_clients_metrics_history,
+                                                                      time_limit,
+                                                                      data_privacy_approach,
+                                                                      clients_profiles,
+                                                                      logger)
+            else:
+                # Select clients synchronously, considering the list of rounds to select clients.
+                selected_clients_results = self._select_clients_sync(rounds_to_select_clients,
+                                                                     current_phase,
+                                                                     candidate_clients,
+                                                                     num_tasks,
+                                                                     samples_per_task,
+                                                                     selected_clients_metrics_history,
+                                                                     time_limit,
+                                                                     data_privacy_approach,
+                                                                     clients_profiles,
+                                                                     logger)
         # Return the list of selected clients' Future objects.
-        return selected_clients_futures
+        return selected_clients_results

@@ -1,4 +1,4 @@
-# Copyright 2020 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 """Flower server."""
 
 """
-Modifications made by Alan L. Nunes (base version of Flower: 1.13.1):
+Modifications made by Alan L. Nunes (base version of Flower: 1.21.0):
 1) Line 32: Imported 'Any', 'Callable', and 'Text' from 'typing'.
 2) Line 46: Imported 'GetPropertiesIns' from 'flwr.common.typing'.
 3) Lines 68-74: Implemented the '_time_function_execution' function, used to measure the elapsed time of a RPC task.

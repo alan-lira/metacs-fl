@@ -3,50 +3,90 @@
 isort:skip_file
 """
 import abc
-import flwr.proto.run_pb2
+import flwr.proto.control_pb2
 import grpc
+import typing
 
 class ControlStub:
     def __init__(self, channel: grpc.Channel) -> None: ...
-    CreateRun: grpc.UnaryUnaryMultiCallable[
-        flwr.proto.run_pb2.CreateRunRequest,
-        flwr.proto.run_pb2.CreateRunResponse]
-    """Request to create a new run"""
+    StartRun: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.control_pb2.StartRunRequest,
+        flwr.proto.control_pb2.StartRunResponse]
+    """Start run upon request"""
 
-    GetRunStatus: grpc.UnaryUnaryMultiCallable[
-        flwr.proto.run_pb2.GetRunStatusRequest,
-        flwr.proto.run_pb2.GetRunStatusResponse]
-    """Get the status of a given run"""
+    StopRun: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.control_pb2.StopRunRequest,
+        flwr.proto.control_pb2.StopRunResponse]
+    """Stop run upon request"""
 
-    UpdateRunStatus: grpc.UnaryUnaryMultiCallable[
-        flwr.proto.run_pb2.UpdateRunStatusRequest,
-        flwr.proto.run_pb2.UpdateRunStatusResponse]
-    """Update the status of a given run"""
+    StreamLogs: grpc.UnaryStreamMultiCallable[
+        flwr.proto.control_pb2.StreamLogsRequest,
+        flwr.proto.control_pb2.StreamLogsResponse]
+    """Start log stream upon request"""
+
+    ListRuns: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.control_pb2.ListRunsRequest,
+        flwr.proto.control_pb2.ListRunsResponse]
+    """flwr ls command"""
+
+    GetLoginDetails: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.control_pb2.GetLoginDetailsRequest,
+        flwr.proto.control_pb2.GetLoginDetailsResponse]
+    """Get login details upon request"""
+
+    GetAuthTokens: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.control_pb2.GetAuthTokensRequest,
+        flwr.proto.control_pb2.GetAuthTokensResponse]
+    """Get auth tokens upon request"""
 
 
 class ControlServicer(metaclass=abc.ABCMeta):
     @abc.abstractmethod
-    def CreateRun(self,
-        request: flwr.proto.run_pb2.CreateRunRequest,
+    def StartRun(self,
+        request: flwr.proto.control_pb2.StartRunRequest,
         context: grpc.ServicerContext,
-    ) -> flwr.proto.run_pb2.CreateRunResponse:
-        """Request to create a new run"""
+    ) -> flwr.proto.control_pb2.StartRunResponse:
+        """Start run upon request"""
         pass
 
     @abc.abstractmethod
-    def GetRunStatus(self,
-        request: flwr.proto.run_pb2.GetRunStatusRequest,
+    def StopRun(self,
+        request: flwr.proto.control_pb2.StopRunRequest,
         context: grpc.ServicerContext,
-    ) -> flwr.proto.run_pb2.GetRunStatusResponse:
-        """Get the status of a given run"""
+    ) -> flwr.proto.control_pb2.StopRunResponse:
+        """Stop run upon request"""
         pass
 
     @abc.abstractmethod
-    def UpdateRunStatus(self,
-        request: flwr.proto.run_pb2.UpdateRunStatusRequest,
+    def StreamLogs(self,
+        request: flwr.proto.control_pb2.StreamLogsRequest,
         context: grpc.ServicerContext,
-    ) -> flwr.proto.run_pb2.UpdateRunStatusResponse:
-        """Update the status of a given run"""
+    ) -> typing.Iterator[flwr.proto.control_pb2.StreamLogsResponse]:
+        """Start log stream upon request"""
+        pass
+
+    @abc.abstractmethod
+    def ListRuns(self,
+        request: flwr.proto.control_pb2.ListRunsRequest,
+        context: grpc.ServicerContext,
+    ) -> flwr.proto.control_pb2.ListRunsResponse:
+        """flwr ls command"""
+        pass
+
+    @abc.abstractmethod
+    def GetLoginDetails(self,
+        request: flwr.proto.control_pb2.GetLoginDetailsRequest,
+        context: grpc.ServicerContext,
+    ) -> flwr.proto.control_pb2.GetLoginDetailsResponse:
+        """Get login details upon request"""
+        pass
+
+    @abc.abstractmethod
+    def GetAuthTokens(self,
+        request: flwr.proto.control_pb2.GetAuthTokensRequest,
+        context: grpc.ServicerContext,
+    ) -> flwr.proto.control_pb2.GetAuthTokensResponse:
+        """Get auth tokens upon request"""
         pass
 
 

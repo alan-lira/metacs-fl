@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,31 +17,40 @@
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Awaitable
 from typing import Callable, TypeVar, cast
 
 from google.protobuf.message import Message as GrpcMessage
 
-from flwr.common.constant import MISSING_EXTRA_REST
+from flwr.common.exit import ExitCode, flwr_exit
 from flwr.proto.fab_pb2 import GetFabRequest, GetFabResponse  # pylint: disable=E0611
 from flwr.proto.fleet_pb2 import (  # pylint: disable=E0611
     CreateNodeRequest,
     CreateNodeResponse,
     DeleteNodeRequest,
     DeleteNodeResponse,
-    PingRequest,
-    PingResponse,
-    PullTaskInsRequest,
-    PullTaskInsResponse,
-    PushTaskResRequest,
-    PushTaskResResponse,
+    PullMessagesRequest,
+    PullMessagesResponse,
+    PushMessagesRequest,
+    PushMessagesResponse,
+)
+from flwr.proto.heartbeat_pb2 import (  # pylint: disable=E0611
+    SendNodeHeartbeatRequest,
+    SendNodeHeartbeatResponse,
+)
+from flwr.proto.message_pb2 import (  # pylint: disable=E0611
+    ConfirmMessageReceivedRequest,
+    ConfirmMessageReceivedResponse,
+    PullObjectRequest,
+    PullObjectResponse,
+    PushObjectRequest,
+    PushObjectResponse,
 )
 from flwr.proto.run_pb2 import GetRunRequest, GetRunResponse  # pylint: disable=E0611
-from flwr.server.superlink.ffs.ffs import Ffs
-from flwr.server.superlink.ffs.ffs_factory import FfsFactory
 from flwr.server.superlink.fleet.message_handler import message_handler
 from flwr.server.superlink.linkstate import LinkState, LinkStateFactory
+from flwr.supercore.ffs import Ffs, FfsFactory
+from flwr.supercore.object_store import ObjectStore, ObjectStoreFactory
 
 try:
     from starlette.applications import Starlette
@@ -51,7 +60,7 @@ try:
     from starlette.responses import Response
     from starlette.routing import Route
 except ModuleNotFoundError:
-    sys.exit(MISSING_EXTRA_REST)
+    flwr_exit(ExitCode.COMMON_MISSING_EXTRA_REST)
 
 
 GrpcRequest = TypeVar("GrpcRequest", bound=GrpcMessage)
@@ -107,35 +116,60 @@ async def delete_node(request: DeleteNodeRequest) -> DeleteNodeResponse:
     return message_handler.delete_node(request=request, state=state)
 
 
-@rest_request_response(PullTaskInsRequest)
-async def pull_task_ins(request: PullTaskInsRequest) -> PullTaskInsResponse:
-    """Pull TaskIns."""
+@rest_request_response(PullMessagesRequest)
+async def pull_message(request: PullMessagesRequest) -> PullMessagesResponse:
+    """Pull PullMessages."""
+    # Get state from app
+    state: LinkState = cast(LinkStateFactory, app.state.STATE_FACTORY).state()
+    store: ObjectStore = cast(ObjectStoreFactory, app.state.OBJECTSTORE_FACTORY).store()
+
+    # Handle message
+    return message_handler.pull_messages(request=request, state=state, store=store)
+
+
+@rest_request_response(PushMessagesRequest)
+async def push_message(request: PushMessagesRequest) -> PushMessagesResponse:
+    """Pull PushMessages."""
+    # Get state from app
+    state: LinkState = cast(LinkStateFactory, app.state.STATE_FACTORY).state()
+    store: ObjectStore = cast(ObjectStoreFactory, app.state.OBJECTSTORE_FACTORY).store()
+
+    # Handle message
+    return message_handler.push_messages(request=request, state=state, store=store)
+
+
+@rest_request_response(PullObjectRequest)
+async def pull_object(request: PullObjectRequest) -> PullObjectResponse:
+    """Pull PullObject."""
+    # Get state from app
+    state: LinkState = cast(LinkStateFactory, app.state.STATE_FACTORY).state()
+    store: ObjectStore = cast(ObjectStoreFactory, app.state.OBJECTSTORE_FACTORY).store()
+
+    # Handle message
+    return message_handler.pull_object(request=request, state=state, store=store)
+
+
+@rest_request_response(PushObjectRequest)
+async def push_object(request: PushObjectRequest) -> PushObjectResponse:
+    """Pull PushObject."""
+    # Get state from app
+    state: LinkState = cast(LinkStateFactory, app.state.STATE_FACTORY).state()
+    store: ObjectStore = cast(ObjectStoreFactory, app.state.OBJECTSTORE_FACTORY).store()
+
+    # Handle message
+    return message_handler.push_object(request=request, state=state, store=store)
+
+
+@rest_request_response(SendNodeHeartbeatRequest)
+async def send_node_heartbeat(
+    request: SendNodeHeartbeatRequest,
+) -> SendNodeHeartbeatResponse:
+    """Send node heartbeat."""
     # Get state from app
     state: LinkState = cast(LinkStateFactory, app.state.STATE_FACTORY).state()
 
     # Handle message
-    return message_handler.pull_task_ins(request=request, state=state)
-
-
-# Check if token is needed here
-@rest_request_response(PushTaskResRequest)
-async def push_task_res(request: PushTaskResRequest) -> PushTaskResResponse:
-    """Push TaskRes."""
-    # Get state from app
-    state: LinkState = cast(LinkStateFactory, app.state.STATE_FACTORY).state()
-
-    # Handle message
-    return message_handler.push_task_res(request=request, state=state)
-
-
-@rest_request_response(PingRequest)
-async def ping(request: PingRequest) -> PingResponse:
-    """Ping."""
-    # Get state from app
-    state: LinkState = cast(LinkStateFactory, app.state.STATE_FACTORY).state()
-
-    # Handle message
-    return message_handler.ping(request=request, state=state)
+    return message_handler.send_node_heartbeat(request=request, state=state)
 
 
 @rest_request_response(GetRunRequest)
@@ -143,9 +177,10 @@ async def get_run(request: GetRunRequest) -> GetRunResponse:
     """GetRun."""
     # Get state from app
     state: LinkState = cast(LinkStateFactory, app.state.STATE_FACTORY).state()
+    store: ObjectStore = cast(ObjectStoreFactory, app.state.OBJECTSTORE_FACTORY).store()
 
     # Handle message
-    return message_handler.get_run(request=request, state=state)
+    return message_handler.get_run(request=request, state=state, store=store)
 
 
 @rest_request_response(GetFabRequest)
@@ -154,18 +189,44 @@ async def get_fab(request: GetFabRequest) -> GetFabResponse:
     # Get ffs from app
     ffs: Ffs = cast(FfsFactory, app.state.FFS_FACTORY).ffs()
 
+    # Get state from app
+    state: LinkState = cast(LinkStateFactory, app.state.STATE_FACTORY).state()
+    store: ObjectStore = cast(ObjectStoreFactory, app.state.OBJECTSTORE_FACTORY).store()
+
     # Handle message
-    return message_handler.get_fab(request=request, ffs=ffs)
+    return message_handler.get_fab(request=request, ffs=ffs, state=state, store=store)
+
+
+@rest_request_response(ConfirmMessageReceivedRequest)
+async def confirm_message_received(
+    request: ConfirmMessageReceivedRequest,
+) -> ConfirmMessageReceivedResponse:
+    """Confirm message received."""
+    # Get state from app
+    state: LinkState = cast(LinkStateFactory, app.state.STATE_FACTORY).state()
+    store: ObjectStore = cast(ObjectStoreFactory, app.state.OBJECTSTORE_FACTORY).store()
+
+    # Handle message
+    return message_handler.confirm_message_received(
+        request=request, state=state, store=store
+    )
 
 
 routes = [
     Route("/api/v0/fleet/create-node", create_node, methods=["POST"]),
     Route("/api/v0/fleet/delete-node", delete_node, methods=["POST"]),
-    Route("/api/v0/fleet/pull-task-ins", pull_task_ins, methods=["POST"]),
-    Route("/api/v0/fleet/push-task-res", push_task_res, methods=["POST"]),
-    Route("/api/v0/fleet/ping", ping, methods=["POST"]),
+    Route("/api/v0/fleet/pull-messages", pull_message, methods=["POST"]),
+    Route("/api/v0/fleet/push-messages", push_message, methods=["POST"]),
+    Route("/api/v0/fleet/pull-object", pull_object, methods=["POST"]),
+    Route("/api/v0/fleet/push-object", push_object, methods=["POST"]),
+    Route("/api/v0/fleet/send-node-heartbeat", send_node_heartbeat, methods=["POST"]),
     Route("/api/v0/fleet/get-run", get_run, methods=["POST"]),
     Route("/api/v0/fleet/get-fab", get_fab, methods=["POST"]),
+    Route(
+        "/api/v0/fleet/confirm-message-received",
+        confirm_message_received,
+        methods=["POST"],
+    ),
 ]
 
 app: Starlette = Starlette(

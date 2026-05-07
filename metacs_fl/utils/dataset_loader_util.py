@@ -1,26 +1,41 @@
 import sys
-from os import devnull, environ
+from os import devnull, environ, fsync, getpid
 
 # Suppress TensorFlow C++ log messages (redirecting stderr to null).
 environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 sys.stderr = open(devnull, "w")
 
+from contractions import fix
+from emoji import demojize
+from fcntl import flock, LOCK_EX, LOCK_NB, LOCK_UN
 from flwr.common import NDArray
 from flwr_datasets import FederatedDataset
 from flwr_datasets.partitioner import DirichletPartitioner, IidPartitioner, PathologicalPartitioner
 from keras.applications.densenet import preprocess_input as densenet121_preprocess_input
 from keras.applications.efficientnet import preprocess_input as efficientnet_preprocess_input
-from keras.applications.efficientnet_v2  import preprocess_input as efficientnet_v2_preprocess_input
+from keras.applications.efficientnet_v2 import preprocess_input as efficientnet_v2_preprocess_input
 from keras.applications.mobilenet_v2 import preprocess_input as mobilenet_v2_preprocess_input
 from keras.applications.resnet import preprocess_input as resnet50_preprocess_input
 from keras.applications.vgg16 import preprocess_input as vgg16_preprocess_input
-from numpy import array, empty, int64, ndarray
+from nltk import download
+from nltk.corpus import stopwords
+from nltk.data import find, path
+from numpy import array, asarray, empty, int64, ndarray, int32
+from numpy.random import normal, permutation
 from pathlib import Path
+from pickle import dump as pickle_dump, load as pickle_load
 from PIL import Image
 from random import sample
+from re import sub
+from requests import get
 from tensorflow import expand_dims
 from tensorflow.image import resize
-from time import perf_counter
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from time import perf_counter, sleep, time
+from tqdm import tqdm
+from urllib.request import urlretrieve
+from zipfile import ZipFile
 
 
 def get_images_count(dataset_folder: Path) -> int:
@@ -39,17 +54,13 @@ def get_images_attributes(dataset_folder: Path) -> tuple:
 
 def get_classes_distribution(y: NDArray) -> dict:
     classes_distribution = {}
-    for index in range(0, len(y)):
-        y_label = None
-        if type(y[index]) == ndarray:
-            y_label = str(y[index][0])
-        elif type(y[index]) == int64:
-            y_label = str(y[index])
-        if y_label not in classes_distribution:
-            classes_distribution.update({y_label: 1})
-        else:
-            classes_distribution[y_label] += 1
-    sorted_keys = sorted(list(classes_distribution.keys()), key=lambda x: (len(x), x))
+    for index in range(len(y)):
+        val = y[index]
+        if isinstance(val, ndarray):
+            val = val.item() if val.size == 1 else val[0]
+        y_label = str(int(val))
+        classes_distribution[y_label] = classes_distribution.get(y_label, 0) + 1
+    sorted_keys = sorted(classes_distribution.keys(), key=lambda x: (len(x), x))
     classes_distribution = {k: classes_distribution[k] for k in sorted_keys}
     return classes_distribution
 
@@ -124,6 +135,12 @@ def instantiate_fds(federated_dataset_settings: dict) -> FederatedDataset:
         case "flwrlabs/cinic10":
             train_partitioner_key = "train"
             test_partitioner_key = "test"
+        case "adilbekovich/Sentiment140Twitter":
+            train_partitioner_key = "train"
+            test_partitioner_key = "test"
+        case "dair-ai/emotion":
+            train_partitioner_key = "train"
+            test_partitioner_key = None
     partitioners = {}
     training_dataset_partitioner = None
     test_dataset_partitioner = None
@@ -141,13 +158,20 @@ def instantiate_fds(federated_dataset_settings: dict) -> FederatedDataset:
             training_dataset_self_balancing = federated_dataset_settings["training_dataset_self_balancing"]
             training_dataset_shuffle = federated_dataset_settings["training_dataset_shuffle"]
             training_dataset_seed = federated_dataset_settings["training_dataset_seed"]
-            # Get the test dataset settings.
-            test_dataset_min_partition_size = federated_dataset_settings["test_dataset_min_partition_size"]
-            test_dataset_alpha = federated_dataset_settings["test_dataset_alpha"]
-            test_dataset_partition_by = federated_dataset_settings["test_dataset_partition_by"]
-            test_dataset_self_balancing = federated_dataset_settings["test_dataset_self_balancing"]
-            test_dataset_shuffle = federated_dataset_settings["test_dataset_shuffle"]
-            test_dataset_seed = federated_dataset_settings["test_dataset_seed"]
+            # Get the test dataset settings only if dataset has a test split.
+            test_dataset_min_partition_size = None
+            test_dataset_alpha = None
+            test_dataset_partition_by = None
+            test_dataset_self_balancing = None
+            test_dataset_shuffle = None
+            test_dataset_seed = None
+            if test_partitioner_key is not None:
+                test_dataset_min_partition_size = federated_dataset_settings["test_dataset_min_partition_size"]
+                test_dataset_alpha = federated_dataset_settings["test_dataset_alpha"]
+                test_dataset_partition_by = federated_dataset_settings["test_dataset_partition_by"]
+                test_dataset_self_balancing = federated_dataset_settings["test_dataset_self_balancing"]
+                test_dataset_shuffle = federated_dataset_settings["test_dataset_shuffle"]
+                test_dataset_seed = federated_dataset_settings["test_dataset_seed"]
             # Set the training dataset partitioner.
             training_dataset_partitioner = DirichletPartitioner(num_partitions=num_partitions,
                                                                 partition_by=training_dataset_partition_by,
@@ -156,14 +180,15 @@ def instantiate_fds(federated_dataset_settings: dict) -> FederatedDataset:
                                                                 self_balancing=training_dataset_self_balancing,
                                                                 shuffle=training_dataset_shuffle,
                                                                 seed=training_dataset_seed)
-            # Set the test dataset partitioner.
-            test_dataset_partitioner = DirichletPartitioner(num_partitions=num_partitions,
-                                                            partition_by=test_dataset_partition_by,
-                                                            alpha=test_dataset_alpha,
-                                                            min_partition_size=test_dataset_min_partition_size,
-                                                            self_balancing=test_dataset_self_balancing,
-                                                            shuffle=test_dataset_shuffle,
-                                                            seed=test_dataset_seed)
+            # Set the test dataset partitioner, if dataset has a test split.
+            if test_partitioner_key is not None:
+                test_dataset_partitioner = DirichletPartitioner(num_partitions=num_partitions,
+                                                                partition_by=test_dataset_partition_by,
+                                                                alpha=test_dataset_alpha,
+                                                                min_partition_size=test_dataset_min_partition_size,
+                                                                self_balancing=test_dataset_self_balancing,
+                                                                shuffle=test_dataset_shuffle,
+                                                                seed=test_dataset_seed)
         case "PathologicalPartitioner":
             # Get the training dataset settings.
             training_dataset_partition_by = federated_dataset_settings["training_dataset_partition_by"]
@@ -171,12 +196,18 @@ def instantiate_fds(federated_dataset_settings: dict) -> FederatedDataset:
             training_class_assignment_mode = federated_dataset_settings["training_class_assignment_mode"]
             training_dataset_shuffle = federated_dataset_settings["training_dataset_shuffle"]
             training_dataset_seed = federated_dataset_settings["training_dataset_seed"]
-            # Get the test dataset settings.
-            test_dataset_partition_by = federated_dataset_settings["test_dataset_partition_by"]
-            test_num_classes_per_partition = federated_dataset_settings["test_num_classes_per_partition"]
-            test_class_assignment_mode = federated_dataset_settings["test_class_assignment_mode"]
-            test_dataset_shuffle = federated_dataset_settings["test_dataset_shuffle"]
-            test_dataset_seed = federated_dataset_settings["test_dataset_seed"]
+            # Get the test dataset settings only if dataset has a test split.
+            test_dataset_partition_by = None
+            test_num_classes_per_partition = None
+            test_class_assignment_mode = None
+            test_dataset_shuffle = None
+            test_dataset_seed = None
+            if test_partitioner_key is not None:
+                test_dataset_partition_by = federated_dataset_settings["test_dataset_partition_by"]
+                test_num_classes_per_partition = federated_dataset_settings["test_num_classes_per_partition"]
+                test_class_assignment_mode = federated_dataset_settings["test_class_assignment_mode"]
+                test_dataset_shuffle = federated_dataset_settings["test_dataset_shuffle"]
+                test_dataset_seed = federated_dataset_settings["test_dataset_seed"]
             # Set the training dataset partitioner.
             training_dataset_partitioner = PathologicalPartitioner(num_partitions=num_partitions,
                                                                    partition_by=training_dataset_partition_by,
@@ -184,16 +215,18 @@ def instantiate_fds(federated_dataset_settings: dict) -> FederatedDataset:
                                                                    class_assignment_mode=training_class_assignment_mode,
                                                                    shuffle=training_dataset_shuffle,
                                                                    seed=training_dataset_seed)
-            # Set the test dataset partitioner.
-            test_dataset_partitioner = PathologicalPartitioner(num_partitions=num_partitions,
-                                                               partition_by=test_dataset_partition_by,
-                                                               num_classes_per_partition=test_num_classes_per_partition,
-                                                               class_assignment_mode=test_class_assignment_mode,
-                                                               shuffle=test_dataset_shuffle,
-                                                               seed=test_dataset_seed)
+            # Set the test dataset partitioner, if dataset has a test split.
+            if test_partitioner_key is not None:
+                test_dataset_partitioner = PathologicalPartitioner(num_partitions=num_partitions,
+                                                                   partition_by=test_dataset_partition_by,
+                                                                   num_classes_per_partition=test_num_classes_per_partition,
+                                                                   class_assignment_mode=test_class_assignment_mode,
+                                                                   shuffle=test_dataset_shuffle,
+                                                                   seed=test_dataset_seed)
     # Update the dictionary of partitioners.
-    partitioners.update({train_partitioner_key: training_dataset_partitioner,
-                         test_partitioner_key: test_dataset_partitioner})
+    partitioners.update({train_partitioner_key: training_dataset_partitioner})
+    if test_partitioner_key is not None:
+        partitioners.update({test_partitioner_key: test_dataset_partitioner})
     # Instantiate the FederatedDataset object.
     fds = FederatedDataset(dataset=dataset,
                            subset=subset,
@@ -253,15 +286,38 @@ def _load_federated_dataset(client_id: int,
             y_field_key = "label"
             train_split_key = "train"
             test_split_key = "test"
+        case "adilbekovich/Sentiment140Twitter":
+            x_field_key = "text"
+            y_field_key = "label"
+            train_split_key = "train"
+            test_split_key = "test"
+        case "dair-ai/emotion":
+            x_field_key = "text"
+            y_field_key = "label"
+            train_split_key = "train"
+            test_split_key = None
     # Get the client's partitions (based on its id).
     partition_train = fds.load_partition(client_id, train_split_key)
     partition_train.set_format("numpy")
-    partition_test = fds.load_partition(client_id, test_split_key)
-    partition_test.set_format("numpy")
-    # Load x_train and y_train.
-    x_train, y_train = partition_train[x_field_key], partition_train[y_field_key]
-    # Load x_test and y_test.
-    x_test, y_test = partition_test[x_field_key], partition_test[y_field_key]
+    x_all = partition_train[x_field_key]
+    y_all = partition_train[y_field_key]
+    # If dataset has no predefined test split (e.g., Emotion unsplit).
+    if test_split_key is None:
+        # Shuffle the local partition before splitting.
+        indices = permutation(len(x_all))
+        x_all = x_all[indices]
+        y_all = y_all[indices]
+        # 80/20 local split.
+        split_idx = int(0.8 * len(x_all))
+        x_train = x_all[:split_idx]
+        y_train = y_all[:split_idx]
+        x_test = x_all[split_idx:]
+        y_test = y_all[split_idx:]
+    else:
+        partition_test = fds.load_partition(client_id, test_split_key)
+        partition_test.set_format("numpy")
+        x_train, y_train = partition_train[x_field_key], partition_train[y_field_key]
+        x_test, y_test = partition_test[x_field_key], partition_test[y_field_key]
     # Return the loaded dataset (x_train, y_train, x_test, and y_test).
     return x_train, y_train, x_test, y_test
 
@@ -277,10 +333,299 @@ def _reshape_images(x: NDArray,
     return x_reshaped
 
 
-def _pre_process_dataset(dataset: str,
-                         model_settings: dict,
-                         x_train: NDArray,
-                         x_test: NDArray) -> tuple:
+def _build_or_load_shared_tokenizer(client_id: int,
+                                    fds: FederatedDataset,
+                                    federated_dataset_settings: dict,
+                                    vocab_size: int,
+                                    dataset_key: str,
+                                    root_output_folder: Path,
+                                    timeout: int = 1800,
+                                    poll_interval: float = 0.5) -> Tokenizer:
+    root_output_folder.mkdir(parents=True, exist_ok=True)
+    tokenizer_file = root_output_folder / "shared_tokenizer.pkl"
+    tmp_file = root_output_folder / "shared_tokenizer.pkl.tmp"
+    lock_file = root_output_folder / "shared_tokenizer.lock"
+    ready_file = root_output_folder / "shared_tokenizer.ready"
+    # Ready file exists -> tokenizer is complete.
+    if ready_file.exists() and tokenizer_file.exists():
+        with tokenizer_file.open("rb") as f:
+            return pickle_load(f)
+    start = time()
+    # Try to acquire lock (non-blocking loop with timeout).
+    with lock_file.open("a+b") as lock_f:
+        while True:
+            try:
+                flock(lock_f, LOCK_EX | LOCK_NB)
+                break
+            except BlockingIOError:
+                # If ready file appears while waiting, load and return.
+                if ready_file.exists() and tokenizer_file.exists():
+                    with tokenizer_file.open("rb") as f:
+                        return pickle_load(f)
+                if (time() - start) > timeout:
+                    raise TimeoutError("[Client {0}] Timeout waiting for tokenizer lock.".format(client_id))
+                sleep(poll_interval)
+        try:
+            if ready_file.exists() and tokenizer_file.exists():
+                with tokenizer_file.open("rb") as f:
+                    return pickle_load(f)
+            print("[Client {0}] Lock acquired; building shared tokenizer...".format(client_id))
+            all_texts = []
+            num_partitions = int(federated_dataset_settings["num_partitions"])
+            for cid in range(num_partitions):
+                partition = fds.load_partition(cid, "train")
+                partition.set_format("numpy")
+                for t in partition["text"]:
+                    if dataset_key == "Sentiment140":
+                        all_texts.append(_normalize_sentiment140_text(t))
+                    elif dataset_key == "Emotion":
+                        all_texts.append(_normalize_emotion_text(t))
+            tokenizer = Tokenizer(num_words=vocab_size, oov_token="<OOV>")
+            tokenizer.fit_on_texts(all_texts)
+            # Write to temporary file first, then atomically replace.
+            with tmp_file.open("wb") as ftmp:
+                pickle_dump(tokenizer, ftmp)
+                ftmp.flush()
+                try:
+                    fsync(ftmp.fileno())
+                except Exception:
+                    pass
+            # Atomic replace.
+            tmp_file.replace(tokenizer_file)
+            # Create ready file to signal completeness.
+            ready_file.write_text("ready")
+            print("[Client {0}] Shared tokenizer saved at {1}".format(client_id, tokenizer_file))
+            return tokenizer
+        finally:
+            # Release lock.
+            try:
+                flock(lock_f, LOCK_UN)
+            except Exception:
+                pass
+
+
+def _stopwords_available() -> bool:
+    try:
+        find("corpora/stopwords")
+        return True
+    except LookupError:
+        return False
+
+
+def _ensure_stopwords(timeout: int = 60) -> None:
+    # Check if already available (fast path).
+    try:
+        find("corpora/stopwords")
+        return
+    except LookupError:
+        pass  # Need to download.
+    nltk_data_dir = Path(path[0])
+    nltk_data_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = nltk_data_dir / "stopwords.lock"
+    # Try to acquire lock (exclusive creation).
+    try:
+        with lock_path.open("x") as lock_file:
+            lock_file.write("locked")
+        print("Lock acquired, downloading stopwords...")
+        download("stopwords", quiet=True)
+        print("Stopwords successfully downloaded.")
+    except FileExistsError:
+        # Another process is downloading...
+        print("Waiting for another process to finish download...")
+        waited = 0
+        while not _stopwords_available():
+            sleep(2)
+            waited += 2
+            if waited > timeout:
+                raise TimeoutError("Timeout: stopwords not available after {0} seconds.".format(timeout))
+        print("Stopwords detected after waiting.")
+    finally:
+        # Cleanup lock if it exists.
+        if lock_path.exists():
+            lock_path.unlink()
+
+
+def _normalize_sentiment140_text(text: str) -> str:
+    """Normalize a single tweet, based on the paper 'Federated Learning for Sentiment Analysis in Presence of Non-IID Data:
+    Sensitivity of Deep Learning Models' (Gholamiangonabadi & Grolinger, 2024)"""
+    # Replace emojis with descriptive words (e.g., ":)" → "smile").
+    text = demojize(text, delimiters=(" ", " "))
+    # Expand contractions (e.g., "don't" → "do not").
+    text = fix(text)
+    # Lowercase all characters.
+    text = text.lower()
+    # Remove URLs, mentions, and hashtags (keep hashtag words).
+    text = sub(r"http\S+|www\S+", "", text)
+    text = sub(r"@\w+", "", text)
+    text = sub(r"#", "", text)
+    # Remove punctuation, numbers, and non-alphabetic characters.
+    text = sub(r"[^a-z\s]", " ", text)
+    # Collapse multiple spaces.
+    text = sub(r"\s+", " ", text).strip()
+    # Remove stopwords except "no", "not", "none".
+    stopwords_list = set(stopwords.words("english")) - {"no", "not", "none"}
+    words = [w for w in text.split() if w not in stopwords_list]
+    return " ".join(words)
+
+
+def _normalize_emotion_text(text: str) -> str:
+    """Normalize text for the Emotion dataset (minimal normalization)."""
+    # Expand contractions (e.g., "I'm" → "I am").
+    text = fix(text)
+    # Lowercase all characters.
+    text = text.lower()
+    # Collapse multiple spaces.
+    text = sub(r"\s+", " ", text).strip()
+    # Return normalized text.
+    return text
+
+
+def _pre_process_text_dataset(dataset_key: str,
+                              texts: NDArray,
+                              labels: NDArray,
+                              vocab_size: int,
+                              max_length: int,
+                              tokenizer: Tokenizer | None = None) -> tuple:
+    # Ensure list input.
+    texts = list(texts) if not isinstance(texts, list) else texts
+    # Filter out None or empty strings.
+    valid_indices, valid_texts = [], []
+    for i, text in enumerate(texts):
+        if text is not None and str(text).strip():
+            valid_indices.append(i)
+            valid_texts.append(str(text).strip())
+    if not valid_texts:
+        print("Warning: No valid texts found after filtering")
+        empty = array([])
+        return (empty, empty if labels is not None else None, tokenizer)
+    # Normalization step.
+    normalized_texts = []
+    match dataset_key:
+        case "Sentiment140":
+            _ensure_stopwords()
+            normalized_texts = [_normalize_sentiment140_text(t) for t in valid_texts]
+        case "Emotion":
+            normalized_texts = [_normalize_emotion_text(t) for t in valid_texts]
+    # Tokenization step.
+    if tokenizer is None:
+        tokenizer = Tokenizer(num_words=vocab_size, oov_token="<OOV>")
+        tokenizer.fit_on_texts(normalized_texts)
+    # Convert texts to integer sequences.
+    sequences = tokenizer.texts_to_sequences(normalized_texts)
+    # Remove empty sequences.
+    non_empty_sequences, non_empty_indices = [], []
+    for i, seq in enumerate(sequences):
+        if len(seq) > 0:
+            non_empty_sequences.append(seq)
+            non_empty_indices.append(valid_indices[i])
+    if not non_empty_sequences:
+        print("Warning: All sequences empty after tokenization")
+        empty = array([])
+        return (empty, empty if labels is not None else None, tokenizer)
+    # Pad sequences.
+    padded_sequences = pad_sequences(non_empty_sequences, maxlen=max_length, padding="post")
+    # Get the labels.
+    binary_labels = None
+    if labels is not None:
+        labels_array = array(labels)
+        valid_labels = labels_array[non_empty_indices]
+        # Dataset already uses 0/1, no remapping needed
+        binary_labels = valid_labels.astype(int32)
+    return padded_sequences, binary_labels, tokenizer
+
+
+# Progress bar hook.
+class DownloadProgressBar(tqdm):
+
+    def update_to(self,
+                  b: int = 1,
+                  bsize: int = 1,
+                  tsize: int = None):
+        if tsize is not None:
+            self.total = tsize
+        self.update(b * bsize - self.n)
+
+
+def _ensure_glove_embeddings_are_available(embedding_dim: int = 100,
+                                           glove_source: str = "twitter",
+                                           glove_embeddings_folder: Path = "glove_embeddings") -> Path:
+    url = "https://nlp.stanford.edu/data/glove.{0}.27B.zip".format(glove_source)
+    glove_embeddings_folder.mkdir(parents=True, exist_ok=True)
+    glove_dir = glove_embeddings_folder / "glove.{0}.27B".format(glove_source)
+    zip_path = glove_embeddings_folder / "glove.{0}.27B.zip".format(glove_source)
+    txt_path = glove_dir / "glove.{0}.27B.{1}d.txt".format(glove_source, embedding_dim)
+    flag_path = glove_embeddings_folder / ".glove_download_in_progress.flag"
+    # If embeddings already available, just return.
+    if txt_path.exists():
+        return txt_path
+    # If another process is downloading, wait for it.
+    wait_time = 0
+    while flag_path.exists():
+        if wait_time % 5 == 0:
+            print("[PID: {0}] Another process is downloading embeddings, waiting...".format(getpid()))
+        sleep(2)
+        wait_time += 2
+        if wait_time > 1800:
+            raise TimeoutError("Waited too long for embedding download to finish! ({0} seconds)".format(wait_time))
+    # Start own download with exclusive flag.
+    try:
+        flag_path.touch(exist_ok=False)
+    except FileExistsError:
+        # Another process beat us to it, wait for completion.
+        return _ensure_glove_embeddings_are_available(embedding_dim, glove_source, glove_embeddings_folder)
+    try:
+        # Double-check if someone else already completed it.
+        if txt_path.exists():
+            flag_path.unlink(missing_ok=True)
+            return txt_path
+        # Download.
+        print("[PID: {0}] Downloading GloVe embeddings from {1} ...".format(getpid(), url))
+        with DownloadProgressBar(unit="B", unit_scale=True, miniters=1, desc="Downloading GloVe") as t:
+            urlretrieve(url, zip_path, reporthook=t.update_to)
+        # Extract.
+        print("PID: [{0}] Extracting {1} ...".format(getpid(), zip_path))
+        with ZipFile(zip_path, "r") as zf:
+            zf.extractall(glove_dir)
+        # Ready message.
+        print("[{0}] GloVe embeddings ready at {1}".format(getpid(), txt_path))
+    finally:
+        # Remove flag.
+        flag_path.unlink(missing_ok=True)
+    return txt_path
+
+
+def _load_glove_embeddings(tokenizer: Tokenizer,
+                           embedding_dim: int,
+                           glove_embedding_file: Path,
+                           global_vocab_size: int) -> ndarray:
+    if not glove_embedding_file.exists():
+        raise FileNotFoundError("GloVe file not found at {0}".format(glove_embedding_file))
+    # Fix the matrix size to the global vocabulary.
+    embedding_matrix = normal(scale=0.6, size=(global_vocab_size + 1, embedding_dim)).astype("float32")
+    print("Loading GloVe embeddings from: {0}".format(glove_embedding_file))
+    # Get tokenizer word index.
+    word_index = tokenizer.word_index
+    # Read GloVe file and map vectors directly into the embedding matrix.
+    with open(glove_embedding_file, encoding="utf8") as f:
+        for line in f:
+            values = line.split()
+            word = values[0]
+            # Get tokenizer index of word.
+            idx = word_index.get(word)
+            # Skip words that are not in the tokenizer vocabulary or exceed vocabulary size.
+            if idx is None or idx > global_vocab_size:
+                continue
+            vector = asarray(values[1:], dtype="float32")
+            # Map vector into embedding matrix.
+            embedding_matrix[idx] = vector
+    print("GloVe embedding matrix shape: {0}".format(embedding_matrix.shape))
+    return embedding_matrix
+
+
+def _pre_process_image_dataset(dataset: str,
+                               model_settings: dict,
+                               x_train: NDArray,
+                               x_test: NDArray) -> tuple:
     # Set the list of custom CNNs.
     custom_cnns = ["Custom_CNN_CIFAR-10", "Custom_CNN_CIFAR-100_Fine_Labels", "Custom_CNN_CIFAR-100_Coarse_Labels",
                    "Custom_CNN_MNIST", "Custom_CNN_FashionMNIST", "Custom_CNN_SVHN", "Custom_CNN_CINIC-10",
@@ -339,7 +684,15 @@ def load_dataset(client_id: int,
                  local_dataset_settings: dict,
                  federated_dataset_settings: dict,
                  model_settings: dict,
-                 fds: FederatedDataset) -> tuple:
+                 fds: FederatedDataset,
+                 root_output_folder: Path) -> dict:
+    # Initialize the dataset loading dict.
+    dataset_loading_dict = {}
+    # Get the model specific settings (can be necessary for pre-processing of dataset).
+    model_provider = model_settings["provider"]
+    model_provider_settings = model_settings[model_provider]
+    model_name = model_provider_settings["model_name"]
+    model_provider_specific_settings = model_settings[model_name]
     # Start the dataset loading duration timer.
     dataset_loading_duration_start = perf_counter()
     # Initialize x_train, y_train, x_test, and y_test.
@@ -353,46 +706,99 @@ def load_dataset(client_id: int,
         case "FederatedDataset":
             x_train, y_train, x_test, y_test = _load_federated_dataset(client_id, federated_dataset_settings, fds)
             dataset = federated_dataset_settings["dataset"]
-    # Pre-process the dataset.
-    x_train, x_test = _pre_process_dataset(dataset, model_settings, x_train, x_test)
+    # Handle dataset preprocessing separately.
+    if dataset in ["adilbekovich/Sentiment140Twitter", "dair-ai/emotion"]:
+        # Determine the dataset key.
+        dataset_key = None
+        match dataset:
+            case "adilbekovich/Sentiment140Twitter":
+                dataset_key = "Sentiment140"
+            case "dair-ai/emotion":
+                dataset_key = "Emotion"
+        # Pre-process the text dataset.
+        vocab_size = model_provider_specific_settings["vocab_size"]
+        max_length = model_provider_specific_settings["max_length"]
+        # Build or load the "shared" tokenizer.
+        tokenizer = _build_or_load_shared_tokenizer(client_id,
+                                                    fds,
+                                                    federated_dataset_settings,
+                                                    vocab_size,
+                                                    dataset_key,
+                                                    root_output_folder)
+        # Pre-process the training data (fits the tokenizer).
+        x_train, y_train, _ = _pre_process_text_dataset(dataset_key,
+                                                        x_train,
+                                                        y_train,
+                                                        vocab_size,
+                                                        max_length,
+                                                        tokenizer=tokenizer)
+        # Pre-process the test data (reuse the same tokenizer).
+        x_test, y_test, _ = _pre_process_text_dataset(dataset_key,
+                                                      x_test,
+                                                      y_test,
+                                                      vocab_size,
+                                                      max_length,
+                                                      tokenizer=tokenizer)
+        # Load GloVe embeddings (aligned with the tokenizer) if configured.
+        embedding_matrix = None
+        use_glove_embedding = model_provider_specific_settings["use_glove_embedding"]
+        if use_glove_embedding:
+            embedding_dim = model_provider_specific_settings["embedding_dim"]
+            glove_source = model_provider_specific_settings["glove_source"]
+            glove_embeddings_folder = Path(model_provider_specific_settings["glove_embeddings_folder"])
+            glove_embedding_file = _ensure_glove_embeddings_are_available(embedding_dim, glove_source, glove_embeddings_folder)
+            embedding_matrix = _load_glove_embeddings(tokenizer, embedding_dim, glove_embedding_file, vocab_size)
+        dataset_loading_dict.update({"embedding_matrix": embedding_matrix})
+    elif dataset in ["uoft-cs/cifar10", "uoft-cs/cifar100", "ylecun/mnist", "zalando-datasets/fashion_mnist",
+                     "zh-plus/tiny-imagenet", "benjamin-paine/imagenet-1k", "ufldl-stanford/svhn", "flwrlabs/cinic10"]:
+        # Pre-process the image dataset.
+        x_train, x_test = _pre_process_image_dataset(dataset, model_settings, x_train, x_test)
     # Get the dataset load duration.
     dataset_loading_duration = perf_counter() - dataset_loading_duration_start
-    # Return the loaded dataset (x_train, y_train, x_test, and y_test).
-    return x_train, y_train, x_test, y_test, dataset_loading_duration
+    # Return the dataset loading dict.
+    dataset_loading_dict.update({"x_train": x_train,
+                                 "y_train": y_train,
+                                 "x_test": x_test,
+                                 "y_test": y_test,
+                                 "dataset_loading_duration": dataset_loading_duration})
+    return dataset_loading_dict
 
 
 def get_task_assignment_capacities(x_train: NDArray,
                                    x_test: NDArray,
-                                   task_assignment_capacities_settings: dict) -> tuple:
+                                   task_assignment_capacities_settings: dict,
+                                   samples_per_task: int) -> tuple:
     # Get the necessary attributes.
     task_assignment_capacities_train = list(task_assignment_capacities_settings["task_assignment_capacities_train"])
     task_assignment_capacities_test = list(task_assignment_capacities_settings["task_assignment_capacities_test"])
+    lower_bound = task_assignment_capacities_settings["lower_bound"]
+    upper_bound = task_assignment_capacities_settings["upper_bound"]
+    step = task_assignment_capacities_settings["step"]
+    # Scale the bounds for training.
+    if upper_bound == "client_capacity":
+        upper_bound_train = len(x_train) // samples_per_task
+    else:
+        upper_bound_train = upper_bound // samples_per_task
+    lower_bound_train = lower_bound // samples_per_task
+    step_train = max(1, step // samples_per_task)
+    # Scale the bounds for testing.
+    if upper_bound == "client_capacity":
+        upper_bound_test = len(x_test) // samples_per_task
+    else:
+        upper_bound_test = upper_bound // samples_per_task
+    lower_bound_test = lower_bound // samples_per_task
+    step_test = max(1, step // samples_per_task)
+    # Compute train capacities.
     if not task_assignment_capacities_train:
-        lower_bound = task_assignment_capacities_settings["lower_bound"]
-        upper_bound = task_assignment_capacities_settings["upper_bound"]
-        if upper_bound == "client_capacity":
-            upper_bound = len(x_train)
-        task_assignment_capacities_train = [lower_bound, upper_bound]
-        step = task_assignment_capacities_settings["step"]
-        task_assignment_capacities_train.extend(list(range(lower_bound, upper_bound + 1, step)))
+        task_assignment_capacities_train = [lower_bound_train, upper_bound_train]
+        task_assignment_capacities_train.extend(list(range(lower_bound_train, upper_bound_train + 1, step_train)))
+    # Compute test capacities.
     if not task_assignment_capacities_test:
-        lower_bound = task_assignment_capacities_settings["lower_bound"]
-        upper_bound = task_assignment_capacities_settings["upper_bound"]
-        if upper_bound == "client_capacity":
-            upper_bound = len(x_test)
-        task_assignment_capacities_test = [lower_bound, upper_bound]
-        step = task_assignment_capacities_settings["step"]
-        task_assignment_capacities_test.extend(list(range(lower_bound, upper_bound + 1, step)))
-    task_assignment_capacities_train = sorted(list(set(task_assignment_capacities_train)))
-    task_assignment_capacities_train_extension = list(range(task_assignment_capacities_train[-2] + 1,
-                                                            task_assignment_capacities_train[-1]))
-    task_assignment_capacities_train.extend(task_assignment_capacities_train_extension)
-    task_assignment_capacities_train = sorted(list(set(task_assignment_capacities_train)))
-    task_assignment_capacities_test = sorted(list(set(task_assignment_capacities_test)))
-    task_assignment_capacities_test_extension = list(range(task_assignment_capacities_test[-2] + 1,
-                                                           task_assignment_capacities_test[-1]))
-    task_assignment_capacities_test.extend(task_assignment_capacities_test_extension)
-    task_assignment_capacities_test = sorted(list(set(task_assignment_capacities_test)))
+        task_assignment_capacities_test = [lower_bound_test, upper_bound_test]
+        task_assignment_capacities_test.extend(list(range(lower_bound_test, upper_bound_test + 1, step_test)))
+    # Remove duplicates and ensure sorted order.
+    task_assignment_capacities_train = sorted(set(task_assignment_capacities_train))
+    task_assignment_capacities_test = sorted(set(task_assignment_capacities_test))
     return task_assignment_capacities_train, task_assignment_capacities_test
 
 

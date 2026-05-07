@@ -1,0 +1,5 @@
+mode g5k
+
+server root@paradoxe-1.rennes.g5k paradoxe-1.rennes.grid5000.fr
+client root@paradoxe-2.rennes.g5k paradoxe-2.rennes.grid5000.fr
+client root@paradoxe-3.rennes.g5k paradoxe-3.rennes.grid5000.fr

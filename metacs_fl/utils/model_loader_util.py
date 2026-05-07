@@ -9,13 +9,30 @@ from flwr.common import Parameters
 from io import BytesIO
 from keras import layers, Model, Sequential
 from keras.applications import DenseNet121, EfficientNetB0, EfficientNetV2L, MobileNetV2, ResNet50, VGG16
-from keras.losses import Loss, SparseCategoricalCrossentropy
-from keras.metrics import Metric, SparseCategoricalAccuracy
+from keras.losses import BinaryCrossentropy, Loss, SparseCategoricalCrossentropy
+from keras.metrics import BinaryAccuracy, Metric, SparseCategoricalAccuracy
 from keras.optimizers import Adam, Optimizer, SGD
 from keras.optimizers.schedules import CosineDecay, ExponentialDecay
 from keras.saving import load_model as keras_load_model, save_model as keras_save_model
+from keras.src.saving import register_keras_serializable
 from numpy import load, save, savez
 from pathlib import Path
+from tensorflow import nn, reduce_sum
+
+
+# Additive (Bahdanau-style) attention layer.
+@register_keras_serializable(package="Custom")
+class AdditiveAttention(layers.Layer):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.score_dense = layers.Dense(1, activation="tanh")
+
+    def call(self, inputs):
+        # inputs: (batch, time, hidden)
+        scores = self.score_dense(inputs)
+        weights = nn.softmax(scores, axis=1)
+        context = reduce_sum(weights * inputs, axis=1)
+        return context
 
 
 def load_custom_cnn_cifar_10() -> Model:
@@ -241,6 +258,289 @@ def load_custom_cnn_cinic_10() -> Model:
     return model
 
 
+def load_custom_ffnn_sentiment140(model_provider_specific_settings: dict) -> Model:
+    """Feedforward Neural Network (FFNN) baseline for Sentiment140."""
+    # Get the model specific settings.
+    vocab_size = model_provider_specific_settings["vocab_size"]
+    max_length = model_provider_specific_settings["max_length"]
+    embedding_dim = model_provider_specific_settings["embedding_dim"]
+    embedding_matrix = model_provider_specific_settings["embedding_matrix"]
+    # Initialize the model architecture.
+    model = Sequential()
+    # Input Layer.
+    model.add(layers.Input(shape=(max_length,)))
+    # Embedding layer to learn word representations.
+    if embedding_matrix is not None:
+        # Use pre-trained GloVe embeddings.
+        print("Using pre-trained GloVe embeddings...")
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
+                                   output_dim=embedding_matrix.shape[1],
+                                   weights=[embedding_matrix],
+                                   input_length=max_length,
+                                   trainable=False))
+    else:
+        print("Using randomly initialized embeddings...")
+        model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
+    # Global average pooling to aggregate embeddings across the sequence.
+    model.add(layers.GlobalAveragePooling1D())
+    # Fully connected layer with ReLU activation.
+    model.add(layers.Dense(128, activation="relu"))
+    # Dropout layer to reduce overfitting.
+    model.add(layers.Dropout(0.5))
+    # Output layer for binary sentiment classification (sigmoid activation).
+    model.add(layers.Dense(1, activation="sigmoid"))
+    # Return the model architecture.
+    return model
+
+
+def load_custom_cnn_sentiment140(model_provider_specific_settings: dict) -> Model:
+    """Convolutional Neural Network (CNN) model for Sentiment140."""
+    # Get the model specific settings.
+    vocab_size = model_provider_specific_settings["vocab_size"]
+    max_length = model_provider_specific_settings["max_length"]
+    embedding_dim = model_provider_specific_settings["embedding_dim"]
+    embedding_matrix = model_provider_specific_settings["embedding_matrix"]
+    # Initialize the model architecture.
+    model = Sequential()
+    # Input Layer.
+    model.add(layers.Input(shape=(max_length,)))
+    # Embedding layer to learn distributed representations of words.
+    if embedding_matrix is not None:
+        # Use pre-trained GloVe embeddings.
+        print("Using pre-trained GloVe embeddings...")
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
+                                   output_dim=embedding_matrix.shape[1],
+                                   weights=[embedding_matrix],
+                                   input_length=max_length,
+                                   trainable=False))
+    else:
+        print("Using randomly initialized embeddings...")
+        model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
+    # First convolutional block to extract local n-gram features.
+    model.add(layers.Conv1D(filters=128, kernel_size=5, activation="relu", padding="same"))
+    model.add(layers.MaxPooling1D(pool_size=2))
+    # Second convolutional block to refine extracted features.
+    model.add(layers.Conv1D(filters=64, kernel_size=5, activation="relu", padding="same"))
+    model.add(layers.GlobalMaxPooling1D())
+    # Fully connected layer for higher-level feature combination.
+    model.add(layers.Dense(64, activation="relu"))
+    # Dropout layer to reduce overfitting.
+    model.add(layers.Dropout(0.5))
+    # Output layer for binary sentiment classification (sigmoid activation).
+    model.add(layers.Dense(1, activation="sigmoid"))
+    # Return the model architecture.
+    return model
+
+
+def load_custom_lstm_sentiment140(model_provider_specific_settings: dict) -> Model:
+    """LSTM2 model from the paper 'Federated Learning for Sentiment Analysis in Presence of Non-IID Data:
+    Sensitivity of Deep Learning Models' (Gholamiangonabadi & Grolinger, 2024)"""
+    # Get the model specific settings.
+    vocab_size = model_provider_specific_settings["vocab_size"]
+    max_length = model_provider_specific_settings["max_length"]
+    embedding_dim = model_provider_specific_settings["embedding_dim"]
+    embedding_matrix = model_provider_specific_settings["embedding_matrix"]
+    # Initialize the model architecture.
+    model = Sequential()
+    # Input layer (sequence of token indices).
+    model.add(layers.Input(shape=(max_length,)))
+    # Embedding layer to map tokens to low-dimensional dense vectors.
+    if embedding_matrix is not None:
+        # Use pre-trained embeddings (GloVe).
+        print("Using pre-trained GloVe embeddings...")
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
+                                   output_dim=embedding_matrix.shape[1],
+                                   weights=[embedding_matrix],
+                                   input_length=max_length,
+                                   trainable=False))
+    else:
+        print("Using randomly initialized embeddings...")
+        model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
+    # LSTM layer to capture sequential dependencies.
+    model.add(layers.LSTM(32, return_sequences=False))
+    # Fully connected layer for learned feature projection.
+    model.add(layers.Dense(64, activation="relu"))
+    # Output layer for binary sentiment classification (two classes with softmax activation).
+    model.add(layers.Dense(2, activation="softmax"))
+    # Return the model architecture.
+    return model
+
+
+def load_custom_cnn_emotion(model_provider_specific_settings: dict) -> Model:
+    """Word-embedding CNN baseline (CNNw2v) used for emotion classification (6 classes).
+       Referenced in Saravia et al., 2018 and originally proposed by Deriu et al., 2017.
+       https://aclanthology.org/D18-1404.pdf"""
+    # Get the model specific settings.
+    vocab_size = model_provider_specific_settings["vocab_size"]
+    max_length = model_provider_specific_settings["max_length"]
+    embedding_dim = model_provider_specific_settings["embedding_dim"]
+    embedding_matrix = model_provider_specific_settings["embedding_matrix"]
+    dropout_rate = model_provider_specific_settings.get("dropout_rate", 0.5)
+    num_classes = model_provider_specific_settings.get("num_classes", 6)
+    # Initialize the model architecture.
+    model = Sequential()
+    # Input layer (sequence of token indices).
+    model.add(layers.Input(shape=(max_length,)))
+    # Embedding layer to map tokens to low-dimensional dense vectors.
+    if embedding_matrix is not None:
+        # Use pre-trained embeddings.
+        print("Using pre-trained embeddings...")
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
+                                   output_dim=embedding_matrix.shape[1],
+                                   weights=[embedding_matrix],
+                                   input_length=max_length,
+                                   trainable=False))
+    else:
+        print("Using randomly initialized embeddings...")
+        model.add(layers.Embedding(input_dim=vocab_size,
+                                   output_dim=embedding_dim,
+                                   input_length=max_length))
+    # First convolutional layer to capture local contextual emotion patterns.
+    model.add(layers.Conv1D(filters=128,
+                            kernel_size=3,
+                            activation="relu",
+                            padding="same"))
+    # Second convolutional layer with larger receptive field.
+    model.add(layers.Conv1D(filters=128,
+                            kernel_size=16,
+                            activation="relu",
+                            padding="same"))
+    # 1-max pooling layer to aggregate the strongest pattern activations.
+    model.add(layers.MaxPooling1D(pool_size=3))
+    # Flatten layer to convert feature maps into a vector.
+    model.add(layers.Flatten())
+    # First dense projection layer for high-level feature learning.
+    model.add(layers.Dense(512, activation="relu"))
+    # Dropout layer to reduce overfitting.
+    model.add(layers.Dropout(dropout_rate))
+    # Second dense projection layer for further feature abstraction.
+    model.add(layers.Dense(128, activation="relu"))
+    # Dropout layer to reduce overfitting.
+    model.add(layers.Dropout(dropout_rate))
+    # Output layer for multi-class emotion classification with softmax activation.
+    model.add(layers.Dense(num_classes, activation="softmax"))
+    # Return the model architecture.
+    return model
+
+
+def load_custom_bi_lstm_attention_emotion(model_provider_specific_settings: dict) -> Model:
+    """Bidirectional LSTM with additive attention used for emotion classification (6 classes).
+       Referenced in Saravia et al., 2018 as the BiLSTM + Attention baseline for the Emotion dataset.
+       The attention mechanism follows a single-head additive formulation to compute a
+       sentence-level context vector from BiLSTM hidden states.
+       https://aclanthology.org/D18-1404.pdf"""
+    # Get the model specific settings.
+    vocab_size = model_provider_specific_settings["vocab_size"]
+    max_length = model_provider_specific_settings["max_length"]
+    embedding_dim = model_provider_specific_settings["embedding_dim"]
+    embedding_matrix = model_provider_specific_settings["embedding_matrix"]
+    # Initialize the model architecture.
+    model = Sequential()
+    # Input layer (sequence of token indices).
+    model.add(layers.Input(shape=(max_length,)))
+    # Embedding layer to map tokens to low-dimensional dense vectors.
+    if embedding_matrix is not None:
+        # Use pre-trained embeddings.
+        print("Using pre-trained embeddings...")
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
+                                   output_dim=embedding_matrix.shape[1],
+                                   weights=[embedding_matrix],
+                                   input_length=max_length,
+                                   trainable=False))
+    else:
+        print("Using randomly initialized embeddings...")
+        model.add(layers.Embedding(input_dim=vocab_size,
+                                   output_dim=embedding_dim,
+                                   input_length=max_length))
+    # Bidirectional LSTM layer.
+    model.add(layers.Bidirectional(layers.LSTM(64, return_sequences=True)))
+    # SelfAttention layer.
+    model.add(AdditiveAttention())
+    # Dense projection layer.
+    model.add(layers.Dense(64, activation="relu"))
+    # Dropout layer to reduce overfitting.
+    model.add(layers.Dropout(0.5))
+    # Output layer for multi-class (6) sentiment classification (Emotion dataset) with softmax activation.
+    model.add(layers.Dense(6, activation="softmax"))
+    # Return the model architecture.
+    return model
+
+
+@register_keras_serializable()
+class SelfAttention(layers.Layer):
+    """Wrapper for MultiHeadAttention that works inside a Sequential model."""
+    def __init__(self,
+                 num_heads,
+                 key_dim,
+                 dropout=0.1,
+                 **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.num_heads = num_heads
+        self.key_dim = key_dim
+        self.dropout_rate = dropout
+        self.mha = layers.MultiHeadAttention(num_heads=num_heads, key_dim=key_dim)
+        self.norm = layers.LayerNormalization()
+        self.dropout = layers.Dropout(dropout)
+
+    def call(self,
+             inputs,
+             training=False) -> layers.LayerNormalization:
+        attn_output = self.mha(inputs, inputs)  # query = value = inputs
+        attn_output = self.dropout(attn_output, training=training)
+        return self.norm(inputs + attn_output)
+
+    def get_config(self) -> dict:
+        config = super().get_config()
+        config.update({"num_heads": self.num_heads,
+                       "key_dim": self.key_dim,
+                       "dropout": self.dropout_rate})
+        return config
+
+    @classmethod
+    def from_config(cls,
+                    config):
+        return cls(**config)
+
+
+def load_custom_transformer_sentiment140(model_provider_specific_settings: dict) -> Model:
+    """Lightweight Transformer-based model for Sentiment140."""
+    # Get the model specific settings.
+    vocab_size = model_provider_specific_settings["vocab_size"]
+    max_length = model_provider_specific_settings["max_length"]
+    embedding_dim = model_provider_specific_settings["embedding_dim"]
+    embedding_matrix = model_provider_specific_settings["embedding_matrix"]
+    # Initialize the model architecture.
+    model = Sequential()
+    # Input Layer.
+    model.add(layers.Input(shape=(max_length,)))
+    # Embedding layer to represent input tokens.
+    if embedding_matrix is not None:
+        # Use pre-trained GloVe embeddings.
+        print("Using pre-trained GloVe embeddings...")
+        model.add(layers.Embedding(input_dim=embedding_matrix.shape[0],
+                                   output_dim=embedding_matrix.shape[1],
+                                   weights=[embedding_matrix],
+                                   input_length=max_length,
+                                   trainable=False))
+    else:
+        print("Using randomly initialized embeddings...")
+        model.add(layers.Embedding(input_dim=vocab_size, output_dim=embedding_dim, input_length=max_length))
+    # Layer normalization to stabilize and scale the embeddings.
+    model.add(layers.LayerNormalization())
+    # MultiHeadAttention layer.
+    model.add(SelfAttention(num_heads=4, key_dim=embedding_dim, dropout=0.5))
+    # Feed-forward projection layer.
+    model.add(layers.Dense(128, activation="relu"))
+    # Global average pooling to aggregate sequence representations.
+    model.add(layers.GlobalAveragePooling1D())
+    # Dropout layer to prevent overfitting.
+    model.add(layers.Dropout(0.5))
+    # Output layer for binary sentiment classification (sigmoid activation).
+    model.add(layers.Dense(1, activation="sigmoid"))
+    # Return the model architecture.
+    return model
+
+
 def load_efficientnet_b0(model_provider_specific_settings: dict) -> Model:
     # Instantiate the Kera's EfficientNetB0 model.
     model = EfficientNetB0(input_shape=model_provider_specific_settings["input_shape"],
@@ -402,6 +702,13 @@ def load_loss_function(model_settings: dict) -> Loss:
                                                      ignore_class=loss_settings["ignore_class"],
                                                      reduction=loss_settings["reduction"],
                                                      name=loss_settings["loss_name"])
+            case "BinaryCrossentropy":
+                # Instantiate the Kera's BinaryCrossentropy loss function.
+                loss = BinaryCrossentropy(from_logits=loss_settings["from_logits"],
+                                          label_smoothing=loss_settings["label_smoothing"],
+                                          axis=loss_settings["axis"],
+                                          reduction=loss_settings["reduction"],
+                                          name=loss_settings["loss_name"])
     # Return the loss function.
     return loss
 
@@ -417,12 +724,16 @@ def load_metrics(model_settings: dict) -> list[Metric]:
                 case "sparse_categorical_accuracy":
                     # Instantiate the Kera's SparseCategoricalAccuracy metric.
                     metrics[index] = SparseCategoricalAccuracy()
+                case "binary_accuracy":
+                    # Instantiate the Kera's BinaryAccuracy metric.
+                    metrics[index] = BinaryAccuracy()
     # Return the list of metrics.
     return metrics
 
 
 def load_model(model_settings: dict,
-               learning_rate_schedule_settings: dict) -> tuple:
+               learning_rate_schedule_settings: dict,
+               dataset_loading_dict: dict) -> tuple:
     model_provider = model_settings["provider"]
     model_provider_settings = model_settings[model_provider]
     model_name = model_provider_settings["model_name"]
@@ -450,6 +761,30 @@ def load_model(model_settings: dict,
                 model = load_custom_cnn_svhn()
             case "Custom_CNN_CINIC-10":
                 model = load_custom_cnn_cinic_10()
+            case "Custom_FFNN_Sentiment140":
+                embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
+                model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
+                model = load_custom_ffnn_sentiment140(model_provider_specific_settings)
+            case "Custom_CNN_Sentiment140":
+                embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
+                model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
+                model = load_custom_cnn_sentiment140(model_provider_specific_settings)
+            case "Custom_LSTM_Sentiment140":
+                embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
+                model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
+                model = load_custom_lstm_sentiment140(model_provider_specific_settings)
+            case "Custom_Transformer_Sentiment140":
+                embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
+                model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
+                model = load_custom_transformer_sentiment140(model_provider_specific_settings)
+            case "Custom_CNN_Emotion":
+                embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
+                model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
+                model = load_custom_cnn_emotion(model_provider_specific_settings)
+            case "Custom_BiLSTM_Attention_Emotion":
+                embedding_matrix = dataset_loading_dict.get("embedding_matrix", None)
+                model_provider_specific_settings.update({"embedding_matrix": embedding_matrix})
+                model = load_custom_bi_lstm_attention_emotion(model_provider_specific_settings)
             case "EfficientNetB0":
                 model = load_efficientnet_b0(model_provider_specific_settings)
             case "EfficientNetV2L":
@@ -463,21 +798,22 @@ def load_model(model_settings: dict,
             case "DenseNet121":
                 model = load_densenet_121(model_provider_specific_settings)
         # Compile the Kera's model.
-        loss_weights = model_provider_settings["loss_weights"]
-        weighted_metrics = model_provider_settings["weighted_metrics"]
-        run_eagerly = model_provider_settings["run_eagerly"]
-        steps_per_execution = model_provider_settings["steps_per_execution"]
-        jit_compile = model_provider_settings["jit_compile"]
-        auto_scale_loss = model_provider_settings["auto_scale_loss"]
-        model.compile(optimizer=optimizer,
-                      loss=loss_function,
-                      loss_weights=loss_weights,
-                      metrics=metrics,
-                      weighted_metrics=weighted_metrics,
-                      run_eagerly=run_eagerly,
-                      steps_per_execution=steps_per_execution,
-                      jit_compile=jit_compile,
-                      auto_scale_loss=auto_scale_loss)
+        if any(k in model_name for k in ["Sentiment140", "Emotion"]):
+            # Simpler compile for text-based models.
+            model.compile(optimizer=optimizer,  # "adam",
+                          loss=loss_function,  # "binary_crossentropy",
+                          metrics=metrics)
+        else:
+            # Full compile for image models.
+            model.compile(optimizer=optimizer,
+                          loss=loss_function,
+                          metrics=metrics,
+                          loss_weights=model_provider_settings.get("loss_weights", None),
+                          weighted_metrics=model_provider_settings.get("weighted_metrics", None),
+                          run_eagerly=model_provider_settings.get("run_eagerly", False),
+                          steps_per_execution=model_provider_settings.get("steps_per_execution", 1),
+                          jit_compile=model_provider_settings.get("jit_compile", False),
+                          auto_scale_loss=model_provider_settings.get("auto_scale_loss", False))
         # Get the model's metrics names.
         metrics_names = [metric.name for metric in vars(model)["_compile_metrics"]._user_metrics]
     return model, metrics_names

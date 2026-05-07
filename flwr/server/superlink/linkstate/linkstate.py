@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,139 +17,122 @@
 
 import abc
 from typing import Optional
-from uuid import UUID
 
-from flwr.common import Context
-from flwr.common.record import ConfigsRecord
+from flwr.common import Context, Message
+from flwr.common.record import ConfigRecord
 from flwr.common.typing import Run, RunStatus, UserConfig
-from flwr.proto.task_pb2 import TaskIns, TaskRes  # pylint: disable=E0611
+from flwr.supercore.corestate import CoreState
 
 
-class LinkState(abc.ABC):  # pylint: disable=R0904
+class LinkState(CoreState):  # pylint: disable=R0904
     """Abstract LinkState."""
 
     @abc.abstractmethod
-    def store_task_ins(self, task_ins: TaskIns) -> Optional[UUID]:
-        """Store one TaskIns.
+    def store_message_ins(self, message: Message) -> Optional[str]:
+        """Store one Message.
 
         Usually, the ServerAppIo API calls this to schedule instructions.
 
-        Stores the value of the `task_ins` in the link state and, if successful,
-        returns the `task_id` (UUID) of the `task_ins`. If, for any reason,
-        storing the `task_ins` fails, `None` is returned.
+        Stores the value of the `message` in the link state and, if successful,
+        returns the `message_id` (str) of the `message`. If, for any reason,
+        storing the `message` fails, `None` is returned.
 
         Constraints
         -----------
-        If `task_ins.task.consumer.anonymous` is `True`, then
-        `task_ins.task.consumer.node_id` MUST NOT be set (equal 0).
+        `message.metadata.dst_node_id` MUST be set (not constant.SUPERLINK_NODE_ID)
 
-        If `task_ins.task.consumer.anonymous` is `False`, then
-        `task_ins.task.consumer.node_id` MUST be set (not 0)
-
-        If `task_ins.run_id` is invalid, then
-        storing the `task_ins` MUST fail.
+        If `message.metadata.run_id` is invalid, then
+        storing the `message` MUST fail.
         """
 
     @abc.abstractmethod
-    def get_task_ins(
-        self, node_id: Optional[int], limit: Optional[int]
-    ) -> list[TaskIns]:
-        """Get TaskIns optionally filtered by node_id.
+    def get_message_ins(self, node_id: int, limit: Optional[int]) -> list[Message]:
+        """Get zero or more `Message` objects for the provided `node_id`.
 
         Usually, the Fleet API calls this for Nodes planning to work on one or more
-        TaskIns.
+        Message.
 
         Constraints
         -----------
-        If `node_id` is not `None`, retrieve all TaskIns where
+        Retrieve all Message where the `message.metadata.dst_node_id` equals `node_id`.
 
-            1. the `task_ins.task.consumer.node_id` equals `node_id` AND
-            2. the `task_ins.task.consumer.anonymous` equals `False` AND
-            3. the `task_ins.task.delivered_at` equals `""`.
-
-        If `node_id` is `None`, retrieve all TaskIns where the
-        `task_ins.task.consumer.node_id` equals `0` and
-        `task_ins.task.consumer.anonymous` is set to `True`.
-
-        If `delivered_at` MUST BE set (not `""`) otherwise the TaskIns MUST not be in
-        the result.
-
-        If `limit` is not `None`, return, at most, `limit` number of `task_ins`. If
+        If `limit` is not `None`, return, at most, `limit` number of `message`. If
         `limit` is set, it has to be greater zero.
         """
 
     @abc.abstractmethod
-    def store_task_res(self, task_res: TaskRes) -> Optional[UUID]:
-        """Store one TaskRes.
+    def store_message_res(self, message: Message) -> Optional[str]:
+        """Store one Message.
 
         Usually, the Fleet API calls this for Nodes returning results.
 
-        Stores the TaskRes and, if successful, returns the `task_id` (UUID) of
-        the `task_res`. If storing the `task_res` fails, `None` is returned.
+        Stores the Message and, if successful, returns the `message_id` (str) of
+        the `message`. If storing the `message` fails, `None` is returned.
 
         Constraints
         -----------
-        If `task_res.task.consumer.anonymous` is `True`, then
-        `task_res.task.consumer.node_id` MUST NOT be set (equal 0).
+        `message.metadata.dst_node_id` MUST be set (not constant.SUPERLINK_NODE_ID)
 
-        If `task_res.task.consumer.anonymous` is `False`, then
-        `task_res.task.consumer.node_id` MUST be set (not 0)
-
-        If `task_res.run_id` is invalid, then
-        storing the `task_res` MUST fail.
+        If `message.metadata.run_id` is invalid, then
+        storing the `message` MUST fail.
         """
 
     @abc.abstractmethod
-    def get_task_res(self, task_ids: set[UUID]) -> list[TaskRes]:
-        """Get TaskRes for the given TaskIns IDs.
+    def get_message_res(self, message_ids: set[str]) -> list[Message]:
+        """Get reply Messages for the given Message IDs.
 
         This method is typically called by the ServerAppIo API to obtain
-        results (TaskRes) for previously scheduled instructions (TaskIns).
-        For each task_id provided, this method returns one of the following responses:
+        results (type Message) for previously scheduled instructions (type Message).
+        For each message_id passed, this method returns one of the following responses:
 
-        - An error TaskRes if the corresponding TaskIns does not exist or has expired.
-        - An error TaskRes if the corresponding TaskRes exists but has expired.
-        - The valid TaskRes if the TaskIns has a corresponding valid TaskRes.
-        - Nothing if the TaskIns is still valid and waiting for a TaskRes.
+        - An error Message if there was no message registered with such message IDs
+        or has expired.
+        - An error Message if the reply Message exists but has expired.
+        - The reply Message.
+        - Nothing if the Message with the passed message_id is still valid and waiting
+        for a reply Message.
 
         Parameters
         ----------
-        task_ids : set[UUID]
-            A set of TaskIns IDs for which to retrieve results (TaskRes).
+        message_ids : set[str]
+            A set of Message IDs used to retrieve reply Messages responding to them.
 
         Returns
         -------
-        list[TaskRes]
-            A list of TaskRes corresponding to the given task IDs. If no
-            TaskRes could be found for any of the task IDs, an empty list is returned.
+        list[Message]
+            A list of reply Message responding to the given message IDs or Messages
+            carrying an Error.
         """
 
     @abc.abstractmethod
-    def num_task_ins(self) -> int:
-        """Calculate the number of task_ins in store.
+    def num_message_ins(self) -> int:
+        """Calculate the number of Messages awaiting a reply."""
 
-        This includes delivered but not yet deleted task_ins.
+    @abc.abstractmethod
+    def num_message_res(self) -> int:
+        """Calculate the number of reply Messages in store."""
+
+    @abc.abstractmethod
+    def delete_messages(self, message_ins_ids: set[str]) -> None:
+        """Delete a Message and its reply based on provided Message IDs.
+
+        Parameters
+        ----------
+        message_ins_ids : set[str]
+            A set of Message IDs. For each ID in the set, the corresponding
+            Message and its associated reply Message will be deleted.
         """
 
     @abc.abstractmethod
-    def num_task_res(self) -> int:
-        """Calculate the number of task_res in store.
-
-        This includes delivered but not yet deleted task_res.
-        """
+    def get_message_ids_from_run_id(self, run_id: int) -> set[str]:
+        """Get all instruction Message IDs for the given run_id."""
 
     @abc.abstractmethod
-    def delete_tasks(self, task_ids: set[UUID]) -> None:
-        """Delete all delivered TaskIns/TaskRes pairs."""
-
-    @abc.abstractmethod
-    def create_node(
-        self, ping_interval: float, public_key: Optional[bytes] = None
-    ) -> int:
+    def create_node(self, heartbeat_interval: float) -> int:
         """Create, store in the link state, and return `node_id`."""
 
     @abc.abstractmethod
-    def delete_node(self, node_id: int, public_key: Optional[bytes] = None) -> None:
+    def delete_node(self, node_id: int) -> None:
         """Remove `node_id` from the link state."""
 
     @abc.abstractmethod
@@ -163,6 +146,14 @@ class LinkState(abc.ABC):  # pylint: disable=R0904
         """
 
     @abc.abstractmethod
+    def set_node_public_key(self, node_id: int, public_key: bytes) -> None:
+        """Set `public_key` for the specified `node_id`."""
+
+    @abc.abstractmethod
+    def get_node_public_key(self, node_id: int) -> Optional[bytes]:
+        """Get `public_key` for the specified `node_id`."""
+
+    @abc.abstractmethod
     def get_node_id(self, node_public_key: bytes) -> Optional[int]:
         """Retrieve stored `node_id` filtered by `node_public_keys`."""
 
@@ -173,13 +164,17 @@ class LinkState(abc.ABC):  # pylint: disable=R0904
         fab_version: Optional[str],
         fab_hash: Optional[str],
         override_config: UserConfig,
-        federation_options: ConfigsRecord,
+        federation_options: ConfigRecord,
+        flwr_aid: Optional[str],
     ) -> int:
         """Create a new run for the specified `fab_hash`."""
 
     @abc.abstractmethod
-    def get_run_ids(self) -> set[int]:
-        """Retrieve all run IDs."""
+    def get_run_ids(self, flwr_aid: Optional[str]) -> set[int]:
+        """Retrieve all run IDs if `flwr_aid` is not specified.
+
+        Otherwise, retrieve all run IDs for the specified `flwr_aid`.
+        """
 
     @abc.abstractmethod
     def get_run(self, run_id: int) -> Optional[Run]:
@@ -245,7 +240,7 @@ class LinkState(abc.ABC):  # pylint: disable=R0904
         """
 
     @abc.abstractmethod
-    def get_federation_options(self, run_id: int) -> Optional[ConfigsRecord]:
+    def get_federation_options(self, run_id: int) -> Optional[ConfigRecord]:
         """Retrieve the federation options for the specified `run_id`.
 
         Parameters
@@ -255,23 +250,13 @@ class LinkState(abc.ABC):  # pylint: disable=R0904
 
         Returns
         -------
-        Optional[ConfigsRecord]
+        Optional[ConfigRecord]
             The federation options for the run if it exists; None otherwise.
         """
 
     @abc.abstractmethod
-    def store_server_private_public_key(
-        self, private_key: bytes, public_key: bytes
-    ) -> None:
-        """Store `server_private_key` and `server_public_key` in the link state."""
-
-    @abc.abstractmethod
-    def get_server_private_key(self) -> Optional[bytes]:
-        """Retrieve `server_private_key` in urlsafe bytes."""
-
-    @abc.abstractmethod
-    def get_server_public_key(self) -> Optional[bytes]:
-        """Retrieve `server_public_key` in urlsafe bytes."""
+    def clear_supernode_auth_keys(self) -> None:
+        """Clear stored `node_public_keys` in the link state if any."""
 
     @abc.abstractmethod
     def store_node_public_keys(self, public_keys: set[bytes]) -> None:
@@ -286,22 +271,52 @@ class LinkState(abc.ABC):  # pylint: disable=R0904
         """Retrieve all currently stored `node_public_keys` as a set."""
 
     @abc.abstractmethod
-    def acknowledge_ping(self, node_id: int, ping_interval: float) -> bool:
-        """Acknowledge a ping received from a node, serving as a heartbeat.
+    def acknowledge_node_heartbeat(
+        self, node_id: int, heartbeat_interval: float
+    ) -> bool:
+        """Acknowledge a heartbeat received from a node.
+
+        A node is considered online as long as it sends heartbeats within
+        the tolerated interval: HEARTBEAT_PATIENCE × heartbeat_interval.
+        HEARTBEAT_PATIENCE = N allows for N-1 missed heartbeat before
+        the node is marked as offline.
 
         Parameters
         ----------
         node_id : int
-            The `node_id` from which the ping was received.
-        ping_interval : float
+            The `node_id` from which the heartbeat was received.
+        heartbeat_interval : float
             The interval (in seconds) from the current timestamp within which the next
-            ping from this node must be received. This acts as a hard deadline to ensure
-            an accurate assessment of the node's availability.
+            heartbeat from this node must be received. This acts as a hard deadline to
+            ensure an accurate assessment of the node's availability.
 
         Returns
         -------
         is_acknowledged : bool
-            True if the ping is successfully acknowledged; otherwise, False.
+            True if the heartbeat is successfully acknowledged; otherwise, False.
+        """
+
+    @abc.abstractmethod
+    def acknowledge_app_heartbeat(self, run_id: int, heartbeat_interval: float) -> bool:
+        """Acknowledge a heartbeat received from a ServerApp for a given run.
+
+        A run with status `"running"` is considered alive as long as it sends heartbeats
+        within the tolerated interval: HEARTBEAT_PATIENCE × heartbeat_interval.
+        HEARTBEAT_PATIENCE = N allows for N-1 missed heartbeat before the run is
+        marked as `"completed:failed"`.
+
+        Parameters
+        ----------
+        run_id : int
+            The `run_id` from which the heartbeat was received.
+        heartbeat_interval : float
+            The interval (in seconds) from the current timestamp within which the next
+            heartbeat from the ServerApp for this run must be received.
+
+        Returns
+        -------
+        is_acknowledged : bool
+            True if the heartbeat is successfully acknowledged; otherwise, False.
         """
 
     @abc.abstractmethod

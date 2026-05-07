@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,10 +15,10 @@
 """Flower ServerApp compatibility package."""
 
 
-from .app import start_driver as start_driver
+from .app import start_grid as start_grid
 from .legacy_context import LegacyContext as LegacyContext
 
 __all__ = [
     "LegacyContext",
-    "start_driver",
+    "start_grid",
 ]

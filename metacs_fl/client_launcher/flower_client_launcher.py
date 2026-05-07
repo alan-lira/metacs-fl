@@ -9,13 +9,12 @@ from typing import Optional
 
 from flwr.client import Client, start_client
 
-from metacs_fl.client.flower_numpy_client import FlowerNumpyClient
+from metacs_fl.client.flower_client import FlowerClient
 from metacs_fl.energy_monitor.powerjoular_energy_monitor import PowerJoularEnergyMonitor
 from metacs_fl.energy_monitor.pyjoules_energy_monitor import PyJoulesEnergyMonitor
 from metacs_fl.flower_simulator.logger_actor import RemoteLoggerAdapter
 from metacs_fl.utils.config_parser_util import parse_config_section
-from metacs_fl.utils.dataset_loader_util import get_classes_distribution, get_task_assignment_capacities, \
-    instantiate_fds, load_dataset
+from metacs_fl.utils.dataset_loader_util import instantiate_fds, load_dataset
 from metacs_fl.utils.logger_util import load_logger, log_message
 from metacs_fl.utils.model_loader_util import load_model
 
@@ -77,6 +76,7 @@ class FlowerClientLauncher:
         # Load the logger.
         self._logger = self._load_logger()
         # Load the dataset.
+        dataset_loading_dict = {}
         loading_approach = self.get_attribute("_dataset_settings")["loading_approach"]
         local_dataset_settings = self.get_attribute("_local_dataset_settings")
         federated_dataset_settings = self.get_attribute("_federated_dataset_settings")
@@ -94,29 +94,25 @@ class FlowerClientLauncher:
                                                                local_dataset_settings,
                                                                federated_dataset_settings,
                                                                model_settings,
-                                                               self._logger))
+                                                               self._root_output_folder))
         else:
             self._fds = instantiate_fds(federated_dataset_settings)
-            self._x_train, self._y_train, self._x_test, self._y_test, dataset_loading_duration \
-                = load_dataset(self._client_id,
-                               loading_approach,
-                               local_dataset_settings,
-                               federated_dataset_settings,
-                               model_settings,
-                               self._fds)
-        # Log the dataset loading duration.
+            dataset_loading_dict = load_dataset(self._client_id,
+                                                loading_approach,
+                                                local_dataset_settings,
+                                                federated_dataset_settings,
+                                                model_settings,
+                                                self._fds,
+                                                Path(self._root_output_folder))
+            self._x_train = dataset_loading_dict["x_train"]
+            self._y_train = dataset_loading_dict["y_train"]
+            self._x_test = dataset_loading_dict["x_test"]
+            self._y_test = dataset_loading_dict["y_test"]
+            dataset_loading_duration = dataset_loading_dict["dataset_loading_duration"]
+                # Log the dataset loading duration.
         message = ("[Client {0}] The dataset loading took {1} seconds."
                    .format(self._client_id, dataset_loading_duration))
         log_message(self._logger, message, "DEBUG")
-        # Get the task assignment capacities.
-        task_assignment_capacities_settings = self.get_attribute("_task_assignment_capacities_settings")
-        self._train_task_capacities, self._test_task_capacities \
-            = get_task_assignment_capacities(self._x_train,
-                                             self._x_test,
-                                             task_assignment_capacities_settings)
-        # Get the tasks' occurrence per class.
-        self._tasks_per_class_train = get_classes_distribution(self._y_train)
-        self._tasks_per_class_test = get_classes_distribution(self._y_test)
         # Load the energy monitor.
         self._energy_monitor = None
         #self._energy_monitor = self._load_energy_monitor()
@@ -128,9 +124,12 @@ class FlowerClientLauncher:
             model_actor = self._ray_node_shared_actors["model_actor"]
             self._model, self._metrics_names \
                 = get(model_actor.load_model_for_client.remote(model_settings,
-                                                               learning_rate_schedule_settings))
+                                                               learning_rate_schedule_settings,
+                                                               dataset_loading_dict))
         else:
-            self._model, self._metrics_names = load_model(model_settings, learning_rate_schedule_settings)
+            self._model, self._metrics_names = load_model(model_settings,
+                                                          learning_rate_schedule_settings,
+                                                          dataset_loading_dict)
         # Get the client initialization duration.
         initialization_duration_in_seconds = perf_counter() - initialization_start
         # Log a 'client initialization duration' message.
@@ -314,8 +313,12 @@ class FlowerClientLauncher:
         logger = self.get_attribute("_logger")
         daemon_settings = self.get_attribute("_daemon_settings")
         affinity_settings = self.get_attribute("_affinity_settings")
+        task_assignment_capacities_settings = self.get_attribute("_task_assignment_capacities_settings")
+        model_settings = self.get_attribute("_model_settings")
         callbacks_settings = self.get_attribute("_callbacks_settings")
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
+        host_profile = self.get_attribute("_host_profile")
+        late_join_settings = self.get_attribute("_late_join_settings")
         simulation_resources_settings = self.get_attribute("_simulation_resources_settings")
         root_output_folder = self.get_attribute("_root_output_folder")
         all_cpu_cores_available = self.get_attribute("_all_cpu_cores_available")
@@ -326,10 +329,6 @@ class FlowerClientLauncher:
         y_train = self.get_attribute("_y_train")
         x_test = self.get_attribute("_x_test")
         y_test = self.get_attribute("_y_test")
-        train_task_capacities = self.get_attribute("_train_task_capacities")
-        test_task_capacities = self.get_attribute("_test_task_capacities")
-        tasks_per_class_train = self.get_attribute("_tasks_per_class_train")
-        tasks_per_class_test = self.get_attribute("_tasks_per_class_test")
         energy_monitor = self.get_attribute("_energy_monitor")
         # Verify if the energy consumptions monitor to be used is PowerJoular
         # and if only one monitoring process is allowed to run in the system.
@@ -340,28 +339,28 @@ class FlowerClientLauncher:
             powerjoular_unique_attributes = list(powerjoular_unique_attributes.items())
             energy_monitor = powerjoular_unique_attributes
         # Instantiate the flower client.
-        client = FlowerNumpyClient(id_=client_id,
-                                   model=model,
-                                   metrics_names=metrics_names,
-                                   x_train=x_train,
-                                   y_train=y_train,
-                                   x_test=x_test,
-                                   y_test=y_test,
-                                   task_assignment_capacities_train=train_task_capacities,
-                                   task_assignment_capacities_test=test_task_capacities,
-                                   tasks_per_class_train=tasks_per_class_train,
-                                   tasks_per_class_test=tasks_per_class_test,
-                                   energy_monitor=energy_monitor,
-                                   daemon_settings=daemon_settings,
-                                   affinity_settings=affinity_settings,
-                                   callbacks_settings=callbacks_settings,
-                                   device_emulation_settings=device_emulation_settings,
-                                   logger=logger,
-                                   initialization_duration_in_seconds=initialization_duration_in_seconds,
-                                   simulation_resources_settings = simulation_resources_settings,
-                                   root_output_folder=root_output_folder,
-                                   all_cpu_cores_available=all_cpu_cores_available,
-                                   client_acquired_cpu_cores=client_acquired_cpu_cores)
+        client = FlowerClient(id_=client_id,
+                              model=model,
+                              metrics_names=metrics_names,
+                              x_train=x_train,
+                              y_train=y_train,
+                              x_test=x_test,
+                              y_test=y_test,
+                              energy_monitor=energy_monitor,
+                              daemon_settings=daemon_settings,
+                              affinity_settings=affinity_settings,
+                              task_assignment_capacities_settings=task_assignment_capacities_settings,
+                              model_settings=model_settings,
+                              callbacks_settings=callbacks_settings,
+                              device_emulation_settings=device_emulation_settings,
+                              host_profile=host_profile,
+                              late_join_settings=late_join_settings,
+                              logger=logger,
+                              initialization_duration_in_seconds=initialization_duration_in_seconds,
+                              simulation_resources_settings = simulation_resources_settings,
+                              root_output_folder=root_output_folder,
+                              all_cpu_cores_available=all_cpu_cores_available,
+                              client_acquired_cpu_cores=client_acquired_cpu_cores)
         client = client.to_client()
         # Return the flower client.
         return client

@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,9 +19,9 @@ from typing import Callable
 
 from flwr.common import Context
 
-from .driver import Driver
+from .grid import Grid
 from .serverapp_components import ServerAppComponents
 
-ServerAppCallable = Callable[[Driver, Context], None]
-Workflow = Callable[[Driver, Context], None]
+ServerAppCallable = Callable[[Grid, Context], None]
+Workflow = Callable[[Grid, Context], None]
 ServerFn = Callable[[Context], ServerAppComponents]

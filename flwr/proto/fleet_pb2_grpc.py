@@ -4,6 +4,8 @@ import grpc
 
 from flwr.proto import fab_pb2 as flwr_dot_proto_dot_fab__pb2
 from flwr.proto import fleet_pb2 as flwr_dot_proto_dot_fleet__pb2
+from flwr.proto import heartbeat_pb2 as flwr_dot_proto_dot_heartbeat__pb2
+from flwr.proto import message_pb2 as flwr_dot_proto_dot_message__pb2
 from flwr.proto import run_pb2 as flwr_dot_proto_dot_run__pb2
 
 
@@ -26,20 +28,20 @@ class FleetStub(object):
                 request_serializer=flwr_dot_proto_dot_fleet__pb2.DeleteNodeRequest.SerializeToString,
                 response_deserializer=flwr_dot_proto_dot_fleet__pb2.DeleteNodeResponse.FromString,
                 )
-        self.Ping = channel.unary_unary(
-                '/flwr.proto.Fleet/Ping',
-                request_serializer=flwr_dot_proto_dot_fleet__pb2.PingRequest.SerializeToString,
-                response_deserializer=flwr_dot_proto_dot_fleet__pb2.PingResponse.FromString,
+        self.SendNodeHeartbeat = channel.unary_unary(
+                '/flwr.proto.Fleet/SendNodeHeartbeat',
+                request_serializer=flwr_dot_proto_dot_heartbeat__pb2.SendNodeHeartbeatRequest.SerializeToString,
+                response_deserializer=flwr_dot_proto_dot_heartbeat__pb2.SendNodeHeartbeatResponse.FromString,
                 )
-        self.PullTaskIns = channel.unary_unary(
-                '/flwr.proto.Fleet/PullTaskIns',
-                request_serializer=flwr_dot_proto_dot_fleet__pb2.PullTaskInsRequest.SerializeToString,
-                response_deserializer=flwr_dot_proto_dot_fleet__pb2.PullTaskInsResponse.FromString,
+        self.PullMessages = channel.unary_unary(
+                '/flwr.proto.Fleet/PullMessages',
+                request_serializer=flwr_dot_proto_dot_fleet__pb2.PullMessagesRequest.SerializeToString,
+                response_deserializer=flwr_dot_proto_dot_fleet__pb2.PullMessagesResponse.FromString,
                 )
-        self.PushTaskRes = channel.unary_unary(
-                '/flwr.proto.Fleet/PushTaskRes',
-                request_serializer=flwr_dot_proto_dot_fleet__pb2.PushTaskResRequest.SerializeToString,
-                response_deserializer=flwr_dot_proto_dot_fleet__pb2.PushTaskResResponse.FromString,
+        self.PushMessages = channel.unary_unary(
+                '/flwr.proto.Fleet/PushMessages',
+                request_serializer=flwr_dot_proto_dot_fleet__pb2.PushMessagesRequest.SerializeToString,
+                response_deserializer=flwr_dot_proto_dot_fleet__pb2.PushMessagesResponse.FromString,
                 )
         self.GetRun = channel.unary_unary(
                 '/flwr.proto.Fleet/GetRun',
@@ -50,6 +52,21 @@ class FleetStub(object):
                 '/flwr.proto.Fleet/GetFab',
                 request_serializer=flwr_dot_proto_dot_fab__pb2.GetFabRequest.SerializeToString,
                 response_deserializer=flwr_dot_proto_dot_fab__pb2.GetFabResponse.FromString,
+                )
+        self.PushObject = channel.unary_unary(
+                '/flwr.proto.Fleet/PushObject',
+                request_serializer=flwr_dot_proto_dot_message__pb2.PushObjectRequest.SerializeToString,
+                response_deserializer=flwr_dot_proto_dot_message__pb2.PushObjectResponse.FromString,
+                )
+        self.PullObject = channel.unary_unary(
+                '/flwr.proto.Fleet/PullObject',
+                request_serializer=flwr_dot_proto_dot_message__pb2.PullObjectRequest.SerializeToString,
+                response_deserializer=flwr_dot_proto_dot_message__pb2.PullObjectResponse.FromString,
+                )
+        self.ConfirmMessageReceived = channel.unary_unary(
+                '/flwr.proto.Fleet/ConfirmMessageReceived',
+                request_serializer=flwr_dot_proto_dot_message__pb2.ConfirmMessageReceivedRequest.SerializeToString,
+                response_deserializer=flwr_dot_proto_dot_message__pb2.ConfirmMessageReceivedResponse.FromString,
                 )
 
 
@@ -68,25 +85,25 @@ class FleetServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def Ping(self, request, context):
+    def SendNodeHeartbeat(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def PullTaskIns(self, request, context):
-        """Retrieve one or more tasks, if possible
+    def PullMessages(self, request, context):
+        """Retrieve one or more messages, if possible
 
-        HTTP API path: /api/v1/fleet/pull-task-ins
+        HTTP API path: /api/v1/fleet/pull-messages
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def PushTaskRes(self, request, context):
-        """Complete one or more tasks, if possible
+    def PushMessages(self, request, context):
+        """Complete one or more messages, if possible
 
-        HTTP API path: /api/v1/fleet/push-task-res
+        HTTP API path: /api/v1/fleet/push-messages
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -105,6 +122,27 @@ class FleetServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def PushObject(self, request, context):
+        """Push Object
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def PullObject(self, request, context):
+        """Pull Object
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def ConfirmMessageReceived(self, request, context):
+        """Confirm Message Received
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_FleetServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -118,20 +156,20 @@ def add_FleetServicer_to_server(servicer, server):
                     request_deserializer=flwr_dot_proto_dot_fleet__pb2.DeleteNodeRequest.FromString,
                     response_serializer=flwr_dot_proto_dot_fleet__pb2.DeleteNodeResponse.SerializeToString,
             ),
-            'Ping': grpc.unary_unary_rpc_method_handler(
-                    servicer.Ping,
-                    request_deserializer=flwr_dot_proto_dot_fleet__pb2.PingRequest.FromString,
-                    response_serializer=flwr_dot_proto_dot_fleet__pb2.PingResponse.SerializeToString,
+            'SendNodeHeartbeat': grpc.unary_unary_rpc_method_handler(
+                    servicer.SendNodeHeartbeat,
+                    request_deserializer=flwr_dot_proto_dot_heartbeat__pb2.SendNodeHeartbeatRequest.FromString,
+                    response_serializer=flwr_dot_proto_dot_heartbeat__pb2.SendNodeHeartbeatResponse.SerializeToString,
             ),
-            'PullTaskIns': grpc.unary_unary_rpc_method_handler(
-                    servicer.PullTaskIns,
-                    request_deserializer=flwr_dot_proto_dot_fleet__pb2.PullTaskInsRequest.FromString,
-                    response_serializer=flwr_dot_proto_dot_fleet__pb2.PullTaskInsResponse.SerializeToString,
+            'PullMessages': grpc.unary_unary_rpc_method_handler(
+                    servicer.PullMessages,
+                    request_deserializer=flwr_dot_proto_dot_fleet__pb2.PullMessagesRequest.FromString,
+                    response_serializer=flwr_dot_proto_dot_fleet__pb2.PullMessagesResponse.SerializeToString,
             ),
-            'PushTaskRes': grpc.unary_unary_rpc_method_handler(
-                    servicer.PushTaskRes,
-                    request_deserializer=flwr_dot_proto_dot_fleet__pb2.PushTaskResRequest.FromString,
-                    response_serializer=flwr_dot_proto_dot_fleet__pb2.PushTaskResResponse.SerializeToString,
+            'PushMessages': grpc.unary_unary_rpc_method_handler(
+                    servicer.PushMessages,
+                    request_deserializer=flwr_dot_proto_dot_fleet__pb2.PushMessagesRequest.FromString,
+                    response_serializer=flwr_dot_proto_dot_fleet__pb2.PushMessagesResponse.SerializeToString,
             ),
             'GetRun': grpc.unary_unary_rpc_method_handler(
                     servicer.GetRun,
@@ -142,6 +180,21 @@ def add_FleetServicer_to_server(servicer, server):
                     servicer.GetFab,
                     request_deserializer=flwr_dot_proto_dot_fab__pb2.GetFabRequest.FromString,
                     response_serializer=flwr_dot_proto_dot_fab__pb2.GetFabResponse.SerializeToString,
+            ),
+            'PushObject': grpc.unary_unary_rpc_method_handler(
+                    servicer.PushObject,
+                    request_deserializer=flwr_dot_proto_dot_message__pb2.PushObjectRequest.FromString,
+                    response_serializer=flwr_dot_proto_dot_message__pb2.PushObjectResponse.SerializeToString,
+            ),
+            'PullObject': grpc.unary_unary_rpc_method_handler(
+                    servicer.PullObject,
+                    request_deserializer=flwr_dot_proto_dot_message__pb2.PullObjectRequest.FromString,
+                    response_serializer=flwr_dot_proto_dot_message__pb2.PullObjectResponse.SerializeToString,
+            ),
+            'ConfirmMessageReceived': grpc.unary_unary_rpc_method_handler(
+                    servicer.ConfirmMessageReceived,
+                    request_deserializer=flwr_dot_proto_dot_message__pb2.ConfirmMessageReceivedRequest.FromString,
+                    response_serializer=flwr_dot_proto_dot_message__pb2.ConfirmMessageReceivedResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -188,7 +241,7 @@ class Fleet(object):
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
     @staticmethod
-    def Ping(request,
+    def SendNodeHeartbeat(request,
             target,
             options=(),
             channel_credentials=None,
@@ -198,14 +251,14 @@ class Fleet(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Fleet/Ping',
-            flwr_dot_proto_dot_fleet__pb2.PingRequest.SerializeToString,
-            flwr_dot_proto_dot_fleet__pb2.PingResponse.FromString,
+        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Fleet/SendNodeHeartbeat',
+            flwr_dot_proto_dot_heartbeat__pb2.SendNodeHeartbeatRequest.SerializeToString,
+            flwr_dot_proto_dot_heartbeat__pb2.SendNodeHeartbeatResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
     @staticmethod
-    def PullTaskIns(request,
+    def PullMessages(request,
             target,
             options=(),
             channel_credentials=None,
@@ -215,14 +268,14 @@ class Fleet(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Fleet/PullTaskIns',
-            flwr_dot_proto_dot_fleet__pb2.PullTaskInsRequest.SerializeToString,
-            flwr_dot_proto_dot_fleet__pb2.PullTaskInsResponse.FromString,
+        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Fleet/PullMessages',
+            flwr_dot_proto_dot_fleet__pb2.PullMessagesRequest.SerializeToString,
+            flwr_dot_proto_dot_fleet__pb2.PullMessagesResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
     @staticmethod
-    def PushTaskRes(request,
+    def PushMessages(request,
             target,
             options=(),
             channel_credentials=None,
@@ -232,9 +285,9 @@ class Fleet(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Fleet/PushTaskRes',
-            flwr_dot_proto_dot_fleet__pb2.PushTaskResRequest.SerializeToString,
-            flwr_dot_proto_dot_fleet__pb2.PushTaskResResponse.FromString,
+        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Fleet/PushMessages',
+            flwr_dot_proto_dot_fleet__pb2.PushMessagesRequest.SerializeToString,
+            flwr_dot_proto_dot_fleet__pb2.PushMessagesResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
@@ -269,5 +322,56 @@ class Fleet(object):
         return grpc.experimental.unary_unary(request, target, '/flwr.proto.Fleet/GetFab',
             flwr_dot_proto_dot_fab__pb2.GetFabRequest.SerializeToString,
             flwr_dot_proto_dot_fab__pb2.GetFabResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def PushObject(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Fleet/PushObject',
+            flwr_dot_proto_dot_message__pb2.PushObjectRequest.SerializeToString,
+            flwr_dot_proto_dot_message__pb2.PushObjectResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def PullObject(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Fleet/PullObject',
+            flwr_dot_proto_dot_message__pb2.PullObjectRequest.SerializeToString,
+            flwr_dot_proto_dot_message__pb2.PullObjectResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def ConfirmMessageReceived(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/flwr.proto.Fleet/ConfirmMessageReceived',
+            flwr_dot_proto_dot_message__pb2.ConfirmMessageReceivedRequest.SerializeToString,
+            flwr_dot_proto_dot_message__pb2.ConfirmMessageReceivedResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

@@ -13,10 +13,11 @@ class ModelActor:
 
     def load_model_for_client(self,
                               model_settings: dict,
-                              learning_rate_schedule_settings: dict) -> tuple:
+                              learning_rate_schedule_settings: dict,
+                              dataset_loading_dict: dict) -> tuple:
         if self._model is not None and self._metrics_names is not None:
             return deepcopy(self._model), self._metrics_names
-        self._model, self._metrics_names = load_model(model_settings, learning_rate_schedule_settings)
+        self._model, self._metrics_names = load_model(model_settings, learning_rate_schedule_settings, dataset_loading_dict)
         return deepcopy(self._model), self._metrics_names
 
     @staticmethod

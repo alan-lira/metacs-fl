@@ -11,7 +11,7 @@ environ["CUDA_VISIBLE_DEVICES"] = "-1"
 from csv import reader as csv_reader
 from datetime import datetime
 from flwr.common import NDArrays
-from keras import losses, Model, utils
+from keras import layers, losses, Model, utils
 from math import atan2, ceil, cos, inf, radians, sin, sqrt
 from numpy import dtype as np_dtype, ndarray, unique
 from os import kill, sched_setaffinity
@@ -23,7 +23,7 @@ from random import random
 from re import escape, findall, search
 from signal import SIGINT, SIGKILL, SIGTERM
 from socket import AF_INET, AF_INET6, create_connection, gaierror, SOCK_DGRAM, socket, timeout
-from subprocess import CalledProcessError, CompletedProcess, DEVNULL, PIPE, Popen, run
+from subprocess import CalledProcessError, CompletedProcess, check_output, DEVNULL, PIPE, Popen, run
 from tensorflow import int32, random as tf_random
 from time import time, sleep
 from typing import List
@@ -616,32 +616,30 @@ def scale_measure(measure: float,
 
 
 def get_cpu_peak_frequency(unit: str = "Hz") -> float:
-    unit_divisors = {"Hz": 1, "MHz": 1e6, "GHz": 1e9}
-    if unit not in unit_divisors:
-        raise ValueError("Unsupported unit '{0}'. Supported units: {1}".format(unit, ', '.join(unit_divisors.keys())))
-    # Get the peak frequency for all CPU cores using pathlib.
-    cpu_peak_frequencies_in_hertz = []
-    cpu_dir = Path("/sys/devices/system/cpu/")
-    for cpu in cpu_dir.iterdir():
-        if cpu.name.startswith("cpu") and (cpu / "cpufreq").is_dir():
-            max_freq_file = cpu / "cpufreq" / "cpuinfo_max_freq"
-            try:
-                with max_freq_file.open("r") as f:
-                    max_freq_khz = int(f.read().strip())
-                    max_freq_hz = max_freq_khz * 1000
-                    cpu_peak_frequencies_in_hertz.append(max_freq_hz)
-            except (FileNotFoundError, PermissionError, OSError):
-                # CPU might be offline, isolated, or resource busy...
-                continue
-    if not cpu_peak_frequencies_in_hertz:
-        raise RuntimeError("Could not retrieve peak CPU frequencies.")
-    # Get the highest frequency among all cores (max of the peak frequencies).
-    cpu_peak_frequency_in_hertz = max(cpu_peak_frequencies_in_hertz)
-    # Convert from Hz to the requested unit.
-    divisor = unit_divisors[unit]
-    cpu_peak_frequency = cpu_peak_frequency_in_hertz / divisor
-    # Return the CPU's peak frequency.
-    return cpu_peak_frequency
+    default_freq_ghz = 3.0  # Conservative default.
+    is_wsl = is_wsl2()
+    # Try 'lscpu' first.
+    output = safe_run_command(["lscpu"])
+    if output:
+        # Try parsing the "CPU max MHz" line.
+        match = search(r"CPU max MHz:\s+([\d.]+)", output)
+        if match:
+            freq_mhz = float(match.group(1))
+            freq_hz = freq_mhz * 1e6
+            return freq_hz if unit == "Hz" else freq_hz / 1e9
+        # Fallback: use "MHz" if only average is available.
+        match = search(r"CPU MHz:\s+([\d.]+)", output)
+        if match:
+            freq_mhz = float(match.group(1))
+            freq_hz = freq_mhz * 1e6
+            return freq_hz if unit == "Hz" else freq_hz / 1e9
+    # WSL2 or failure fallback.
+    if is_wsl:
+        print("[Warning] WSL2 detected — unable to get real CPU peak frequency. Using default 3.0 GHz.")
+    else:
+        print("[Warning] Could not retrieve CPU frequency via lscpu. Using default 3.0 GHz.")
+    freq_hz = default_freq_ghz * 1e9
+    return freq_hz if unit == "Hz" else default_freq_ghz
 
 
 def get_cpu_instructions_set() -> list:
@@ -739,15 +737,41 @@ def get_num_memory_channels_from_known_cpus_list(cpu_model: str) -> int:
     return default_num_memory_channels
 
 
+def is_wsl2() -> bool:
+    try:
+        return "microsoft" in Path("/proc/version").read_text().lower()
+    except Exception:
+        return False
+
+
+def safe_run_command(cmd: list[str]) -> str | None:
+    try:
+        return check_output(cmd, text=True).strip()
+    except CalledProcessError:
+        return None
+    except FileNotFoundError:
+        return None
+
+
 def get_memory_speed_in_mtps() -> int:
-    # Get the memory speed in MT/s using the 'dmidecode' command.
-    dmidecode_args = ["sudo", "dmidecode", "-t", "memory"]
-    dmidecode_out = run_command(command_args=dmidecode_args, check=True, capture_output=True, text=True).stdout
-    matches = findall(r"Configured Memory Speed:\s+(\d+)\s+MT/s", dmidecode_out)
-    speeds = list(map(int, matches))
-    default_memory_speed = 2133  # Fallback: 2133 (most common for DDR4).
-    memory_speed_in_MTps = max(speeds) if speeds else default_memory_speed
-    return memory_speed_in_MTps
+    default_memory_speed = 2133  # Common DDR4 baseline.
+    # Handle WSL2 limitation.
+    if is_wsl2():
+        print("[Warning] WSL2 detected — cannot access hardware info via dmidecode.")
+        return default_memory_speed
+    # Try running dmidecode safely.
+    output = safe_run_command(["sudo", "dmidecode", "-t", "memory"])
+    if not output:
+        print("[Warning] 'dmidecode' unavailable or failed — using default memory speed.")
+        return default_memory_speed
+    # Parse memory speed values.
+    matches = findall(r"Configured Memory Speed:\s+(\d+)\s+MT/s", output)
+    if matches:
+        speeds = list(map(int, matches))
+        memory_speed_in_MTps = max(speeds)
+        return memory_speed_in_MTps
+    print("[Warning] Could not parse memory speed from dmidecode output — using default value.")
+    return default_memory_speed
 
 
 def get_cpu_and_memory_info() -> dict:
@@ -812,11 +836,29 @@ def get_known_networks_info(network_bandwidth_unit: str = "mbps") -> dict:
 
 def generate_dummy_sample_batch(batch_size: int,
                                 input_shape: tuple,
-                                num_output_classes: int) -> tuple:
+                                num_output_classes: int,
+                                model: Model,
+                                model_settings: dict) -> tuple:
     # Generate a batch of dummy samples (size of batch_size).
-    x_dummy_batch = tf_random.normal((batch_size,) + input_shape)
-    y_dummy_batch = utils.to_categorical(tf_random.uniform((batch_size,), minval=0, maxval=num_output_classes, dtype=int32),
-                                         num_classes=num_output_classes)
+    if model and any(isinstance(layer, layers.LSTM) for layer in model.layers):
+        # Integer token sequences for LSTM (mask_zero=True).
+        model_provider = model_settings["provider"]
+        model_provider_settings = model_settings[model_provider]
+        model_name = model_provider_settings["model_name"]
+        model_provider_specific_settings = model_settings[model_name]
+        vocab_size = model_provider_specific_settings["vocab_size"]
+        x_dummy_batch = tf_random.uniform((batch_size, input_shape[0]), minval=1, maxval=vocab_size, dtype=int32)
+        # Output: one-hot if multi-class, else 0/1 float for binary.
+        if num_output_classes > 1:
+            y_dummy_batch = utils.to_categorical(tf_random.uniform((batch_size,), minval=0, maxval=num_output_classes, dtype=int32),
+                                                 num_classes=num_output_classes)
+        else:
+            y_dummy_batch = tf_random.uniform((batch_size, 1), minval=0, maxval=2, dtype=int32)
+    else:
+        # Float input for CNN or other models.
+        x_dummy_batch = tf_random.normal((batch_size,) + input_shape)
+        y_dummy_batch = utils.to_categorical(tf_random.uniform((batch_size,), minval=0, maxval=num_output_classes, dtype=int32),
+                                             num_classes=num_output_classes)
     # Return the generated batch of dummy samples.
     return x_dummy_batch, y_dummy_batch
 
@@ -1450,7 +1492,7 @@ def calculate_effective_flop_throughput_i_r(client_attributes: dict,
     # Calculate the effective floating-point operations throughput of the client when training/testing the model (in flops per second).
     etp_m_i = nc_cpu_i * fpocc_m_i * fq_cpu_i
     # Return the effective floating-point operations throughput.
-    return etp_m_i
+    return max(etp_m_i, 1.0)
 
 
 def estimate_mt_m_device(mt_m_node: float,
@@ -1461,7 +1503,10 @@ def estimate_mt_m_device(mt_m_node: float,
     # Assuming similar memory access patterns and no drastic changes in model architecture...
     mem_bw_ratio = mem_bw_device / mem_bw_node
     cpu_gflops_ratio = cpu_gflops_device / cpu_gflops_node
-    mt_m_device = mt_m_node * (mem_bw_ratio / cpu_gflops_ratio)
+    mt_m_device = mt_m_node * (cpu_gflops_ratio / mem_bw_ratio)
+    if mt_m_device <= 0:
+        mt_m_device = mt_m_node
+    mt_m_device = max(1e-3, min(mt_m_device, 1e4))
     return mt_m_device
 
 
@@ -1485,14 +1530,20 @@ def calculate_memory_slowdown_factor_i_r(client_attributes: dict,
 
 def calculate_computation_time(client_attributes: dict,
                                phase: str) -> float:
-    # Estimate the total number of floating-point operations required for the client to train/test the model.
+    # Estimate the total number of FLOPs for the current candidate assignment.
     tfpo_m_i = calculate_total_floating_point_operations_i_r(client_attributes, phase)
-    # Estimate the effective floating-point operations throughput of the client when training/testing the model.
-    etp_m_i = calculate_effective_flop_throughput_i_r(client_attributes, phase)
-    # Estimate the memory slowdown factor of the client when training/testing the model.
-    msd_m_i = calculate_memory_slowdown_factor_i_r(client_attributes, etp_m_i, phase)
-    # Estimate the time spent with computation by a client i on round r (in seconds).
-    computation_time_in_seconds = tfpo_m_i / (etp_m_i * msd_m_i)
+    # Scale the client-reported computation time according to the FLOP ratio.
+    if "computation_time_in_seconds" not in client_attributes:
+        raise KeyError("Missing 'computation_time_in_seconds' in client_attributes.")
+    if "total_float_ops" not in client_attributes:
+        raise KeyError("Missing 'total_float_ops' in client_attributes.")
+    reference_computation_time_in_seconds = float(client_attributes["computation_time_in_seconds"])
+    reference_total_float_ops = float(client_attributes["total_float_ops"])
+    if reference_computation_time_in_seconds <= 0:
+        raise ValueError("'computation_time_in_seconds' must be positive.")
+    if reference_total_float_ops <= 0:
+        raise ValueError("'total_float_ops' must be positive.")
+    computation_time_in_seconds = reference_computation_time_in_seconds * (tfpo_m_i / reference_total_float_ops)
     # Return the estimated computation time (in seconds).
     return computation_time_in_seconds
 

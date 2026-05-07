@@ -1,8 +1,13 @@
 from copy import deepcopy
+from csv import DictWriter
 from math import floor, inf
 from numpy import ndarray
-from numpy.random import default_rng, Generator
+from numpy.random import Generator
+from os import getpid
+from pathlib import Path
+from psutil import Process
 from time import perf_counter
+from traceback import format_exc
 
 from metacs_fl.utils.task_scheduler_util import calculate_percentage_change, estimate_costs, normalize_costs, \
     update_min_max_costs
@@ -56,57 +61,124 @@ def lns_destroy(rng: Generator,
     return X_dest, dest_idx
 
 
+def safe_index(A_i: list,
+               x_i: int) -> int | None:
+    for idx, v in enumerate(A_i):
+        if v == x_i:
+            return idx
+    return None
+
+
+def prev_capacity(A_i: list,
+                  x_i: int) -> int:
+    pos = safe_index(A_i, x_i)
+    if pos is None:
+        prevs = [v for v in A_i if v < x_i]
+        return max(prevs) if prevs else A_i[0]
+    if pos > 0:
+        return A_i[pos - 1]
+    return A_i[0]
+
+
+def next_capacity(A_i: list,
+                  x_i: int) -> int:
+    pos = safe_index(A_i, x_i)
+    if pos is None:
+        nexts = [v for v in A_i if v > x_i]
+        return min(nexts) if nexts else A_i[-1]
+    if pos < len(A_i) - 1:
+        return A_i[pos + 1]
+    return A_i[-1]
+
+
 def lns_repair(rng: Generator,
                t: int,
                A: ndarray,
                X_dest: list,
-               dest_indices: list) -> list:
-    # Initialize the repaired solution (copy of X_dest).
+               dest_indices: list,
+               max_inner_iters: int = 10000) -> list:
     X_rpr = deepcopy(X_dest)
     # Get all client indices.
-    I = [i for i in range(0, len(X_rpr))]
-    while True:
-        # Get the current number of scheduled tasks.
+    I = list(range(len(X_rpr)))
+    prev_sum = None
+    stalled = 0
+    stall_limit = 200
+    for _ in range(max_inner_iters):
         t_asg = sum(X_rpr)
         if t_asg == t:
-            # The solution was successfully repaired.
-            break
-        if t_asg > t:
-            # Get the clients' indices, that do not belong to the list of destroyed indices,
-            # with at least one task scheduled and removal capacity.
-            I_non_dest_with_tasks_and_removal_capacity = [i for i in I
-                                                          if i not in dest_indices and X_rpr[i] > 0 and
-                                                          list(A[i]).index(X_rpr[i]) != 0]
-            if I_non_dest_with_tasks_and_removal_capacity:
-                # Randomly sample a client index.
-                i = rng.choice(I_non_dest_with_tasks_and_removal_capacity, size=1, replace=False)[0]
-                # Set the assignment of client i to its previous valid capacity (remove tasks from i).
-                X_rpr[i] = A[i][list(A[i]).index(X_rpr[i]) - 1]
+            return X_rpr
+        # Detect stalling.
+        if prev_sum is not None and t_asg == prev_sum:
+            stalled += 1
         else:
-            # Get the clients' indices, that do not belong to the list of destroyed indices,
-            # with at least one task scheduled and addition capacity.
-            I_non_dest_with_tasks_and_addition_capacity = [i for i in I
-                                                           if i not in dest_indices and X_rpr[i] > 0 and
-                                                           list(A[i]).index(X_rpr[i]) != len(A[i]) - 1]
-            # Get the clients' indices, that do not belong to the list of destroyed indices,
-            # with no tasks scheduled and addition capacity.
-            I_non_dest_non_tasks_and_addition_capacity = [i for i in I
-                                                          if i not in dest_indices and X_rpr[i] == 0 and
-                                                          list(A[i]).index(X_rpr[i]) != len(A[i]) - 1]
-            # Get the clients' indices, that belong to the list of destroyed indices,
-            # with addition capacity.
-            I_dest_with_addition_capacity = [i for i in I
-                                             if i in dest_indices and
-                                             list(A[i]).index(X_rpr[i]) != len(A[i]) - 1]
-            # Randomly sample a client index.
-            if I_non_dest_with_tasks_and_addition_capacity:
-                i = rng.choice(I_non_dest_with_tasks_and_addition_capacity, size=1, replace=False)[0]
-            elif I_non_dest_non_tasks_and_addition_capacity:
-                i = rng.choice(I_non_dest_non_tasks_and_addition_capacity, size=1, replace=False)[0]
+            stalled = 0
+        prev_sum = t_asg
+        # Case 1: Too many tasks → remove.
+        if t_asg > t:
+            # Preferred: non-destroyed with removal capacity.
+            cand = [i for i in I
+                    if i not in dest_indices and
+                    safe_index(A[i], X_rpr[i]) not in (None, 0)]
+            # Fallback: any with removal capacity.
+            if not cand:
+                cand = [i for i in I
+                        if safe_index(A[i], X_rpr[i]) not in (None, 0)]
+            # Final fallback (stalled): any client with X>0.
+            if not cand and stalled > stall_limit:
+                cand = [i for i in I if X_rpr[i] > 0]
+            if cand:
+                i = rng.choice(cand, size=1, replace=False)[0]
+                X_rpr[i] = prev_capacity(A[i], X_rpr[i])
             else:
-                i = rng.choice(I_dest_with_addition_capacity, size=1, replace=False)[0]
-            # Set the assignment of client i to its next valid capacity (schedule tasks to i).
-            X_rpr[i] = A[i][list(A[i]).index(X_rpr[i]) + 1]
+                # No removal possible → break for best-effort return.
+                break
+        # Case 2: Too few tasks → add.
+        else:
+            # Preferred: non-destroyed with tasks and addition capacity.
+            cand = [i for i in I
+                    if i not in dest_indices and X_rpr[i] > 0 and
+                    safe_index(A[i], X_rpr[i]) not in (None, len(A[i]) - 1)]
+            # Fallback: non-destroyed with no tasks.
+            if not cand:
+                cand = [i for i in I
+                        if i not in dest_indices and X_rpr[i] == 0 and
+                        safe_index(A[i], X_rpr[i]) not in (None, len(A[i]) - 1)]
+            # Fallback: destroyed with addition capacity.
+            if not cand:
+                cand = [i for i in I
+                        if i in dest_indices and
+                        safe_index(A[i], X_rpr[i]) not in (None, len(A[i]) - 1)]
+            # Global fallback: any addition capacity.
+            if not cand:
+                cand = [i for i in I
+                        if safe_index(A[i], X_rpr[i]) not in (None, len(A[i]) - 1)]
+            # Final fallback if stalled: any client (may already be max, no-op).
+            if not cand and stalled > stall_limit:
+                cand = I[:]
+            if cand:
+                i = rng.choice(cand, size=1, replace=False)[0]
+                X_rpr[i] = next_capacity(A[i], X_rpr[i])
+            else:
+                break
+    # Exact repair failed... Return the best-effort solution (closest sum).
+    t_asg = sum(X_rpr)
+    diff = t_asg - t
+    if diff > 0:
+        # Remove diff tasks if possible.
+        for _ in range(abs(diff)):
+            removable = [i for i in I if safe_index(A[i], X_rpr[i]) not in (None, 0)]
+            if not removable:
+                break
+            i = rng.choice(removable, size=1, replace=False)[0]
+            X_rpr[i] = prev_capacity(A[i], X_rpr[i])
+    elif diff < 0:
+        # Add -diff tasks if possible.
+        for _ in range(abs(diff)):
+            addable = [i for i in I if safe_index(A[i], X_rpr[i]) not in (None, len(A[i]) - 1)]
+            if not addable:
+                break
+            i = rng.choice(addable, size=1, replace=False)[0]
+            X_rpr[i] = next_capacity(A[i], X_rpr[i])
     return X_rpr
 
 
@@ -143,8 +215,8 @@ def lns_accept(sol_costs: dict,
     # Validate the 'maximum makespan allowed' constraint.
     acpt_res.append(M_X_rpr <= tau)
     # Validate the 'remaining battery energy per client' constraint.
-    B_X_rpr = sol_costs["X_rpr"]["B_X"]
-    acpt_res.append(all(i >= accept_criteria["bl_min"] for i in B_X_rpr))
+    BL_X_rpr = sol_costs["X_rpr"]["BL_X"]
+    acpt_res.append(all(i >= accept_criteria["bl_min"] for i in BL_X_rpr))
     # Validate the 'total number of tasks scheduled' constraint.
     X_rpr = sol_costs["X_rpr"]["X"]
     t_X_rpr = sum(X_rpr[i] for i in range(0, len(X_rpr)))
@@ -161,9 +233,39 @@ def lns_F(obj_func_costs: dict,
     F_X = (obj_func_weights["M_weight"] * obj_func_costs["M_X"]) \
           + (obj_func_weights["E_weight"] * obj_func_costs["E_X"]) \
           - (obj_func_weights["D_weight"] * obj_func_costs["D_X"]) \
-          - (obj_func_weights["KCov_weight"] * obj_func_costs["KCov_X"]) \
-          + (obj_func_weights["KStd_weight"] * obj_func_costs["KStd_X"])
+          - (obj_func_weights["K_weight"] * obj_func_costs["K_X"]) \
+          - (obj_func_weights["U_weight"] * obj_func_costs["U_X"])
     return F_X
+
+
+def _write_lns_trace_rows_to_csv_file(lns_trace_rows: list,
+                                      lns_traces_output_file: Path) -> None:
+    if not lns_trace_rows:
+        return
+    lns_traces_output_file.parent.mkdir(parents=True, exist_ok=True)
+    with lns_traces_output_file.open("w", newline="") as f:
+        writer = DictWriter(f, fieldnames=lns_trace_rows[0].keys())
+        writer.writeheader()
+        writer.writerows(lns_trace_rows)
+
+
+def _write_lns_summary_to_csv_file(lns_statistics: dict,
+                                   lns_summary_output_file: Path) -> None:
+    lns_summary_output_file.parent.mkdir(parents=True, exist_ok=True)
+    summary_row = {"time_lapsed": lns_statistics["time_lapsed"],
+                   "num_iterations": lns_statistics["num_iterations"],
+                   "iterations_per_second": lns_statistics["iterations_per_second"],
+                   "cpu_time_seconds": lns_statistics["cpu_time_seconds"],
+                   "rss_start_mb": lns_statistics["rss_start_mb"],
+                   "rss_peak_mb": lns_statistics["rss_peak_mb"],
+                   "rss_avg_mb": lns_statistics["rss_avg_mb"],
+                   "rss_delta_mb": lns_statistics["rss_delta_mb"],
+                   "num_accepted_moves": lns_statistics["num_accepted_moves"],
+                   "num_improving_moves": lns_statistics["num_improving_moves"]}
+    with lns_summary_output_file.open("w", newline="") as f:
+        writer = DictWriter(f, fieldnames=summary_row.keys())
+        writer.writeheader()
+        writer.writerow(summary_row)
 
 
 def run_lns(X_init: list,
@@ -178,11 +280,24 @@ def run_lns(X_init: list,
             B: list,
             G: list,
             E: list,
+            phi_list: list,
+            psi_list: list,
+            alpha: float,
+            beta: float,
+            candidate_client_ids: list,
+            current_round: int,
+            client_diversity_last_q_rounds: int,
+            candidate_clients_history_ids: dict,
+            selected_clients_history_ids: dict,
             stop_criteria: dict,
             accept_criteria: dict,
             obj_func_weights: dict,
-            X_dist_approaches: dict)-> tuple:
-    # Initialize the dict of min-max costs.
+            X_dist_approaches: dict,
+            normalization_mode: str = "fixed",
+            normalization_bounds: dict | None = None,
+            lns_traces_output_file: Path | None = None,
+            lns_summary_output_file: Path | None = None) -> tuple:
+    # Initialize the dict of min-max costs (used by the online normalization).
     min_max_costs = {"min_M_X": inf,
                      "max_M_X": 0,
                      "min_E_X": inf,
@@ -192,49 +307,159 @@ def run_lns(X_init: list,
     X_best = deepcopy(X_init)
     # Initialize the best solution costs.
     X_best_costs = {}
+    # Initialize the lightweight diagnostics list.
+    lns_trace_rows = []
     # Initialize the iteration counter.
     it = 1
+    # Initialize the LNS execution statistics auxiliary counters.
+    num_accepted_moves = 0
+    num_improving_moves = 0
+    memory_sampling_interval = 10
+    process = Process(getpid())
+    cpu_times = process.cpu_times()
+    cpu_time_start = cpu_times.user + cpu_times.system
+    rss_start_bytes = process.memory_info().rss
+    rss_peak_bytes = rss_start_bytes
+    rss_samples_sum_bytes = rss_start_bytes
+    rss_samples_count = 1
     # Get the start time.
     t_0 = perf_counter()
     # Initialize the elapsed time.
     t_it = 0
     while True:
-        # Check the stopping criteria for the metaheuristic.
-        to_stop_lns_execution = to_stop_lns(it, t_it, stop_criteria)
-        if to_stop_lns_execution:
-            # Stop the metaheuristic execution.
-            break
-        # LNS Block (Begin).
-        # Destroy the current solution.
-        X_dest, dest_indices = lns_destroy(rng, A, X_curr, destroy_approach)
-        # Repair the destroyed solution.
-        X_rpr = lns_repair(rng, t, A, X_dest, dest_indices)
-        # Estimate costs.
-        sol_costs = estimate_costs(n, t, A, Y, I, B, G, E, X_init, X_best, X_rpr, X_dist_approaches)
-        # Update the min-max costs.
-        min_max_costs = update_min_max_costs(sol_costs, min_max_costs)
-        # Check if the repaired solution is acceptable.
-        to_accept = lns_accept(sol_costs, accept_criteria, tau, t, A)
-        if to_accept:
-            # Update the current solution.
-            X_curr = deepcopy(X_rpr)
-            # Normalize the solution costs (particularly, M and E).
-            norm_sol_costs = normalize_costs(sol_costs, min_max_costs)
-            # Calculate the objective function value for X_rpr.
-            F_X_rpr = lns_F(norm_sol_costs["X_rpr"], obj_func_weights)
-            # Calculate the objective function value for X_best.
-            F_X_best = lns_F(norm_sol_costs["X_best"], obj_func_weights)
-            # Verify if the repaired solution is better than the best solution.
-            if F_X_rpr < F_X_best:
-                # Update the best solution.
-                X_best = deepcopy(X_rpr)
-                X_best_costs = deepcopy(sol_costs["X_rpr"])
-        # LNS Block (End).
-        # Update the iteration counter.
-        it = it + 1
-        # Update the elapsed time.
-        t_it = perf_counter() - t_0
-    # Set the LNS execution statistics.
-    lns_statistics = {"time_lapsed": t_it, "num_iterations": it}
+        trace_stage = "loop_start"
+        try:
+            # Check the stopping criteria for the metaheuristic.
+            trace_stage = "to_stop_lns"
+            to_stop_lns_execution = to_stop_lns(it, t_it, stop_criteria)
+            if to_stop_lns_execution:
+                # Stop the metaheuristic execution.
+                break
+            # LNS Block (Begin).
+            # Destroy the current solution.
+            trace_stage = "lns_destroy"
+            X_dest, dest_indices = lns_destroy(rng, A, X_curr, destroy_approach)
+            # Repair the destroyed solution.
+            trace_stage = "lns_repair"
+            X_rpr = lns_repair(rng, t, A, X_dest, dest_indices)
+            changed_vs_curr = int(list(X_rpr) != list(X_curr))
+            # Estimate costs.
+            trace_stage = "estimate_costs"
+            sol_costs = estimate_costs(n, t, A, Y, I, B, G, E, phi_list, psi_list, alpha,
+                                       X_init, X_best, X_rpr, X_dist_approaches,
+                                       candidate_client_ids,
+                                       current_round,
+                                       client_diversity_last_q_rounds,
+                                       candidate_clients_history_ids,
+                                       selected_clients_history_ids,
+                                       beta)
+            # Update min/max costs (only for the online normalization).
+            if normalization_mode == "online":
+                trace_stage = "update_min_max_costs"
+                min_max_costs = update_min_max_costs(sol_costs, min_max_costs)
+            # Check if the repaired solution is acceptable.
+            trace_stage = "lns_accept"
+            to_accept = lns_accept(sol_costs, accept_criteria, tau, t, A)
+            improved_best = 0
+            F_X_rpr = float("nan")
+            F_X_best = float("nan")
+            if to_accept:
+                num_accepted_moves += 1
+                # Update the current solution.
+                X_curr = deepcopy(X_rpr)
+                # Normalize the solution costs according to the selected mode.
+                trace_stage = "normalize_costs"
+                if normalization_mode == "online":
+                    norm_sol_costs = normalize_costs(sol_costs, min_max_costs)
+                elif normalization_mode == "fixed":
+                    if normalization_bounds is None:
+                        raise ValueError("normalization_bounds must be provided when normalization_mode='fixed'")
+                    norm_sol_costs = normalize_costs(sol_costs, normalization_bounds)
+                else:
+                    raise ValueError("Unsupported normalization_mode: {0}".format(normalization_mode))
+                # Calculate the objective function values.
+                trace_stage = "lns_F"
+                F_X_rpr = lns_F(norm_sol_costs["X_rpr"], obj_func_weights)
+                F_X_best = lns_F(norm_sol_costs["X_best"], obj_func_weights)
+                # Verify if the repaired solution is better than the best solution.
+                if F_X_rpr < F_X_best:
+                    improved_best = 1
+                    num_improving_moves += 1
+                    X_best = deepcopy(X_rpr)
+                    X_best_costs = deepcopy(sol_costs["X_rpr"])
+            # Append the lns diagnostic collection trace row.
+            trace_stage = "collect_trace_row"
+            lns_trace_row = {"iteration": it,
+                             "elapsed_time": t_it,
+                             "stage": trace_stage,
+                             "accepted": int(to_accept),
+                             "changed_vs_curr": changed_vs_curr,
+                             "improved_best": improved_best,
+                             "F_X_rpr": F_X_rpr,
+                             "F_X_best": F_X_best,
+                             "M_X_rpr": sol_costs["X_rpr"]["M_X"],
+                             "E_X_rpr": sol_costs["X_rpr"]["E_X"],
+                             "D_X_rpr": sol_costs["X_rpr"]["D_X"],
+                             "K_X_rpr": sol_costs["X_rpr"]["K_X"],
+                             "U_X_rpr": sol_costs["X_rpr"]["U_X"]}
+            lns_trace_rows.append(lns_trace_row)
+            # LNS Block (End).
+            # Update the iteration counter.
+            it = it + 1
+            # Update the elapsed time.
+            t_it = perf_counter() - t_0
+            # Sample memory statistics periodically.
+            if it % memory_sampling_interval == 0:
+                rss_current_bytes = process.memory_info().rss
+                rss_samples_sum_bytes += rss_current_bytes
+                rss_samples_count += 1
+                if rss_current_bytes > rss_peak_bytes:
+                    rss_peak_bytes = rss_current_bytes
+        except Exception as e:
+            print("\n[LNS ERROR]")
+            print("iteration: {0}".format(it))
+            print("elapsed_time: {0}".format(t_it))
+            print("trace_stage: {0}".format(trace_stage))
+            print("exception: {0}".format(repr(e)))
+            print(format_exc())
+            raise
+    # Final process stats.
+    cpu_times = process.cpu_times()
+    cpu_time_end = cpu_times.user + cpu_times.system
+    cpu_time_seconds = cpu_time_end - cpu_time_start
+    rss_end_bytes = process.memory_info().rss
+    if rss_end_bytes > rss_peak_bytes:
+        rss_peak_bytes = rss_end_bytes
+    rss_avg_bytes = rss_samples_sum_bytes / rss_samples_count if rss_samples_count > 0 else rss_end_bytes
+    time_lapsed = t_it
+    num_iterations = it
+    iterations_per_second = (num_iterations / time_lapsed) if time_lapsed > 0 else 0
+    lns_statistics = {"time_lapsed": time_lapsed,
+                      "num_iterations": num_iterations,
+                      "iterations_per_second": iterations_per_second,
+                      "cpu_time_seconds": cpu_time_seconds,
+                      "rss_start_mb": rss_start_bytes / (1024 * 1024),
+                      "rss_peak_mb": rss_peak_bytes / (1024 * 1024),
+                      "rss_avg_mb": rss_avg_bytes / (1024 * 1024),
+                      "rss_delta_mb": (rss_peak_bytes - rss_start_bytes) / (1024 * 1024),
+                      "num_accepted_moves": num_accepted_moves,
+                      "num_improving_moves": num_improving_moves,
+                      "lns_trace_rows": lns_trace_rows}
+    # Write trace to output CSV file if requested.
+    if lns_traces_output_file is not None:
+        try:
+            _write_lns_trace_rows_to_csv_file(lns_trace_rows, lns_traces_output_file)
+        except Exception as e:
+            print("\n[LNS TRACE WRITE ERROR]")
+            print("Exception: {0}".format(repr(e)))
+            print(format_exc())
+    # Write LNS summary to output CSV file if requested.
+    if lns_summary_output_file is not None:
+        try:
+            _write_lns_summary_to_csv_file(lns_statistics, lns_summary_output_file)
+        except Exception as e:
+            print("\n[LNS SUMMARY WRITE ERROR]")
+            print("Exception: {0}".format(repr(e)))
+            print(format_exc())
     # Return the best solution, the best solution costs, and the LNS execution statistics.
     return X_best, X_best_costs, lns_statistics

@@ -1,9 +1,8 @@
 import sys
-from os import devnull, environ
+from os import environ
 
-# Suppress TensorFlow C++ log messages (redirecting stderr to null).
+# Suppress TensorFlow C++ log messages without silencing Python tracebacks.
 environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-sys.stderr = open(devnull, "w")
 
 from argparse import ArgumentParser, RawTextHelpFormatter, SUPPRESS
 from logging import Logger
@@ -106,6 +105,17 @@ def _verify_if_config_file_is_valid(config_file: Path) -> None:
         raise FileNotFoundError(error_message)
 
 
+def _str_to_bool_or_none(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    value = str(value).strip().lower()
+    if value in {"true", "1", "yes", "y", "on"}:
+        return True
+    if value in {"false", "0", "no", "n", "off"}:
+        return False
+    raise ValueError("Invalid boolean value: {0}".format(value))
+
+
 def main() -> None:
     # Begin.
     # Start the performance counter.
@@ -127,47 +137,80 @@ def main() -> None:
     ap.add_argument("action",
                     type=str,
                     help="action to perform with MetaCS-FL tool")
+    default_config_file = None
     if "launch_server" in argv:
-        ap.add_argument("--implementation",
-                        type=str,
-                        required=True,
-                        help=SUPPRESS)
+        default_config_file = __FLOWER_SERVER_CONFIG_FILE
         ap.add_argument("--id",
                         type=int,
-                        required=True,
-                        help=SUPPRESS)
-        ap.add_argument("--config-file",
-                        type=Path,
                         required=True,
                         help=SUPPRESS)
     elif "launch_client" in argv:
-        ap.add_argument("--implementation",
-                        type=str,
-                        required=True,
-                        help=SUPPRESS)
+        default_config_file = __FLOWER_CLIENT_CONFIG_FILE
         ap.add_argument("--id",
                         type=int,
                         required=True,
                         help=SUPPRESS)
-        ap.add_argument("--config-file",
-                        type=Path,
-                        required=True,
-                        help=SUPPRESS)
     elif "execute_fl_with_flower" in argv:
-        ap.add_argument("--config-file",
+        default_config_file = __FLOWER_EXECUTOR_CONFIG_FILE
+        ap.add_argument("--repetitions",
+                        type=int,
+                        required=False,
+                        default=1,
+                        help=SUPPRESS)
+        ap.add_argument("--hostfile",
                         type=Path,
-                        required=True,
+                        required=False,
+                        default=None,
+                        help=SUPPRESS)
+        ap.add_argument("--gather-outputs",
+                        type=str,
+                        required=False,
+                        default=None,
+                        help=SUPPRESS)
+        ap.add_argument("--output-collector-ip",
+                        type=str,
+                        required=False,
+                        default=None,
+                        help=SUPPRESS)
+        ap.add_argument("--output-collector-user",
+                        type=str,
+                        required=False,
+                        default=None,
+                        help=SUPPRESS)
+        ap.add_argument("--output-collector-folder",
+                        type=Path,
+                        required=False,
+                        default=None,
+                        help=SUPPRESS)
+        ap.add_argument("--output-collection-method",
+                        type=str,
+                        required=False,
+                        default=None,
+                        help=SUPPRESS)
+        ap.add_argument("--fail-on-output-collection-error",
+                        type=str,
+                        required=False,
+                        default=None,
+                        help=SUPPRESS)
+        ap.add_argument("--gather-single-node-execution",
+                        type=str,
+                        required=False,
+                        default=None,
+                        help=SUPPRESS)
+        ap.add_argument("--output-node-identifier",
+                        type=str,
+                        required=False,
+                        default=None,
                         help=SUPPRESS)
     elif "execute_fl_with_flower_simulation_engine" in argv:
-        ap.add_argument("--config-file",
-                        type=Path,
-                        required=True,
-                        help=SUPPRESS)
+        default_config_file = __FLOWER_SIMULATOR_CONFIG_FILE
     elif "analyze_results" in argv:
-        ap.add_argument("--config-file",
-                        type=Path,
-                        required=True,
-                        help=SUPPRESS)
+        default_config_file = __RESULT_ANALYZER_CONFIG_FILE
+    ap.add_argument("--config-file",
+                    type=Path,
+                    required=False,
+                    default=default_config_file,
+                    help=SUPPRESS)
     parsed_args = ap.parse_args()
     # Get the user-provided arguments.
     action = str(parsed_args.action)
@@ -180,24 +223,40 @@ def main() -> None:
         config_file = Path(parsed_args.config_file)
         # Verify if the user-provided config file is valid.
         _verify_if_config_file_is_valid(config_file)
-        implementation = str(parsed_args.implementation)
-        if implementation == "flower":
-            fs = FlowerServerLauncher(id_, config_file)
-            fs.launch_server()
+        fs = FlowerServerLauncher(id_, config_file)
+        fs.launch_server()
     elif action == "launch_client":
         id_ = int(parsed_args.id)
         config_file = Path(parsed_args.config_file)
         # Verify if the user-provided config file is valid.
         _verify_if_config_file_is_valid(config_file)
-        implementation = str(parsed_args.implementation)
-        if implementation == "flower":
-            fc = FlowerClientLauncher(id_, config_file)
-            fc.launch_client()
+        fc = FlowerClientLauncher(id_, config_file)
+        fc.launch_client()
     elif action == "execute_fl_with_flower":
         config_file = Path(parsed_args.config_file)
-        # Verify if the user-provided config file is valid.
+        repetitions = int(parsed_args.repetitions)
+        hostfile = parsed_args.hostfile
+        if hostfile is not None:
+            hostfile = Path(hostfile)
+        output_collector_folder = parsed_args.output_collector_folder
+        if output_collector_folder is not None:
+            output_collector_folder = Path(output_collector_folder)
+        output_gathering_settings = {"gather_outputs": _str_to_bool_or_none(parsed_args.gather_outputs),
+                                     "output_collector_ip": parsed_args.output_collector_ip,
+                                     "output_collector_user": parsed_args.output_collector_user,
+                                     "output_collector_folder": output_collector_folder,
+                                     "output_collection_method": parsed_args.output_collection_method,
+                                     "fail_on_output_collection_error": _str_to_bool_or_none(parsed_args.fail_on_output_collection_error),
+                                     "gather_single_node_execution": _str_to_bool_or_none(parsed_args.gather_single_node_execution),
+                                     "output_node_identifier": parsed_args.output_node_identifier}
+        output_gathering_settings = {k: v for k, v in output_gathering_settings.items() if v is not None}
         _verify_if_config_file_is_valid(config_file)
-        fe = FlowerExecutor(config_file)
+        if hostfile is not None:
+            _verify_if_config_file_is_valid(hostfile)
+        fe = FlowerExecutor(config_file,
+                            repetitions,
+                            hostfile=hostfile,
+                            output_gathering_settings=output_gathering_settings)
         fe.execute_fl_with_flower()
     elif action == "execute_fl_with_flower_simulation_engine":
         config_file = Path(parsed_args.config_file)
@@ -223,4 +282,12 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BaseException as e:
+        from traceback import format_exc
+        print("[FATAL] main.py failed: {0}".format(e), file=sys.stdout, flush=True)
+        print(format_exc(), file=sys.stdout, flush=True)
+        print("[FATAL] main.py failed: {0}".format(e), file=sys.stderr, flush=True)
+        print(format_exc(), file=sys.stderr, flush=True)
+        raise

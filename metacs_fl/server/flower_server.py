@@ -1,14 +1,14 @@
-from concurrent.futures import as_completed
+from collections import defaultdict
+from concurrent.futures import as_completed, ThreadPoolExecutor, Future
 from copy import deepcopy
-from dateutil import parser
 from logging import Logger
-from numpy import array, inf, ndarray, std, sum as numpy_sum
+from numpy import array, concatenate, inf, sum as numpy_sum, mean, clip, int32, ndarray
 from numpy.random import default_rng
-from pandas import DataFrame
+from os import cpu_count
 from pathlib import Path
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
-from threading import Thread
+from threading import Lock, Thread
 from time import process_time, sleep
+from traceback import format_exc, print_exc
 from typing import Dict, List, Optional, Tuple, Union
 
 from flwr.common import EvaluateIns, EvaluateRes, FitIns, FitRes, GetPropertiesIns, Metrics, NDArrays, Parameters, \
@@ -16,8 +16,13 @@ from flwr.common import EvaluateIns, EvaluateRes, FitIns, FitRes, GetPropertiesI
 from flwr.server.client_manager import ClientManager
 from flwr.server.client_proxy import ClientProxy
 from flwr.server.strategy.strategy import Strategy
+from flwr.server.superlink.fleet.grpc_bidi.grpc_client_proxy import GrpcClientProxy
 
 from metacs_fl.client_selector.metacsfl import MetaCSFL
+from metacs_fl.client_selector.ecsm import ECSM
+from metacs_fl.client_selector.divfl import DivFL
+from metacs_fl.client_selector.oort import Oort
+from metacs_fl.client_selector.random import Random
 from metacs_fl.client_selector.sbacpad_2024 import SBACPAD2024
 from metacs_fl.metrics_aggregator.flower_weighted_average import aggregate_loss_by_weighted_average, \
     aggregate_metrics_by_weighted_average
@@ -37,6 +42,7 @@ class FlowerServer(Strategy):
                  fit_config: dict,
                  evaluate_config: dict,
                  output_settings: dict,
+                 root_output_folder: Path = None,
                  initial_parameters: Optional[NDArrays],
                  logger: Logger) -> None:
         # Initialize the attributes.
@@ -47,6 +53,7 @@ class FlowerServer(Strategy):
         self._fit_config = fit_config
         self._evaluate_config = evaluate_config
         self._output_settings = output_settings
+        self._root_output_folder = root_output_folder
         self._initial_parameters = initial_parameters
         self._global_parameters = initial_parameters
         self._logger = logger
@@ -56,29 +63,43 @@ class FlowerServer(Strategy):
         self._selected_clients_history = {}
         self._client_selection_duration_history = {}
         self._selected_clients_metrics_history = {}
+        self._clients_histograms = {}
+        self._client_gradients_history = {}
+        self._clients_reliability_score_history = {}
+        self._clients_consecutive_failures_history = {}
+        self._clients_profiles = {}
+        self._clients_being_profiled = set()
+        self._profiling_executor = ThreadPoolExecutor(max_workers=cpu_count())
+        self._profiling_futures = set()
+        self._profile_lock = Lock()
+        self._available_clients = None
         # Initialize the random number generator with a fixed seed to allow replicable results.
         seed = None
         if "seed" in self._server_strategy_settings:
             seed = self._server_strategy_settings["seed"]
         self._rng = default_rng(seed=seed)
-        # Initialize the list of profiling rounds.
-        profiling_rounds = []
         # Initialize the client selector.
         client_selector = None
         strategy = server_strategy_settings["strategy"]
         match strategy:
+            case "Random":
+                # Instantiate the Random's client selector.
+                client_selector = Random(server_strategy_settings, seed)
             case "SBAC-PAD_2024":
                 # Instantiate the SBAC-PAD_2024's client selector.
                 client_selector = SBACPAD2024(server_strategy_settings, seed)
+            case "Oort":
+                # Instantiate the Oort's client selector.
+                client_selector = Oort(server_strategy_settings, seed)
+            case "DivFL":
+                # Instantiate the DivFL's client selector.
+                client_selector = DivFL(server_strategy_settings, seed)
+            case "ECSM":
+                # Instantiate the ECSM's client selector.
+                client_selector = ECSM(server_strategy_settings, seed)
             case "MetaCS-FL":
-                # Set the list of profiling rounds (starting at the first round).
-                num_profiling_rounds = server_strategy_settings["num_profiling_rounds"]
-                if num_profiling_rounds > 0:
-                    profiling_rounds = list(range(1, num_profiling_rounds + 1))
-                    self._profiling_rounds = profiling_rounds
                 # Instantiate the MetaCS-FL's client selector.
                 client_selector = MetaCSFL(server_strategy_settings, seed)
-        self._profiling_rounds = profiling_rounds
         self._client_selector = client_selector
 
     def _set_attribute(self,
@@ -95,57 +116,71 @@ class FlowerServer(Strategy):
                                       current_round: int,
                                       phase_of_interest: str,
                                       x: int) -> dict:
-        # Get the necessary attributes.
-        last_round_on_history = list(selected_clients_metrics_history.items())[-1][0]
+        # Sort rounds in history.
+        history_rounds = sorted(selected_clients_metrics_history.keys())
+        last_round_on_history = history_rounds[-1]
+        # Clip current_round if it is beyond the last round in history.
         if current_round > last_round_on_history:
             current_round = last_round_on_history + 1
-        # Get the keys of the past x rounds.
-        past_rounds_keys = [r_idx for r_idx in list(range(current_round - x, current_round)) if r_idx > 0]
-        # Filter the selected clients metrics history, preserving only the past x rounds.
-        selected_clients_metrics_history_filtered = dict((past_round, v) for past_round, v in selected_clients_metrics_history.items()
-                                                         if past_round in past_rounds_keys)
-        # Initialize the metrics lists.
+        # Search backward for up to x valid past rounds.
+        valid_past_rounds = []
+        r = min(current_round - 1, last_round_on_history)
+        if r <= 0:
+            r = last_round_on_history
+        while r > 0 and len(valid_past_rounds) < x:
+            if r in selected_clients_metrics_history:
+                round_data = selected_clients_metrics_history[r]
+                # Check if phase is present AND has non-empty metrics.
+                if (phase_of_interest in round_data and
+                        "clients_metrics_dicts" in round_data[phase_of_interest] and
+                        len(round_data[phase_of_interest]["clients_metrics_dicts"]) > 0):
+                    valid_past_rounds.append(r)
+            r -= 1
+        # Sort chronologically.
+        valid_past_rounds = sorted(valid_past_rounds)
+        # Filter history to only valid rounds.
+        selected_clients_metrics_history_filtered = {r: selected_clients_metrics_history[r]
+                                                     for r in valid_past_rounds}
+        # Initialize metric lists.
         makespans = []
         energy_consumptions = []
         weighted_mean_accuracies = []
-        # Get the clients' metrics of the past x rounds.
-        for past_round, _ in selected_clients_metrics_history_filtered.items():
-            clients_metrics_dicts = {}
-            if phase_of_interest in selected_clients_metrics_history_filtered[past_round]:
-                clients_metrics_dicts = selected_clients_metrics_history_filtered[past_round][phase_of_interest]["clients_metrics_dicts"]
+        # Compute metrics for each valid round.
+        for past_round in valid_past_rounds:
+            # Extract client metric dicts.
+            clients_metrics_dicts = selected_clients_metrics_history_filtered[past_round][phase_of_interest]["clients_metrics_dicts"]
+            # Initialize per-round accumulators.
             makespan = 0
             energy_consumption = 0
             sum_accuracy_product = 0
             sum_num_examples_used = 0
+            # Loop through each client's metrics.
             for client_metrics_dict in clients_metrics_dicts:
                 client_id = next(iter(client_metrics_dict))
                 client_metrics = client_metrics_dict[client_id]
                 # Get the number of tasks executed by the client i on round r.
-                num_examples_key = "num_examples"
-                x_i = client_metrics[num_examples_key]
+                x_i = client_metrics.get("num_examples", 0)
                 # Get the time cost of the client i on round r (if available).
                 time_key = "{0}ing_time_in_seconds".format(phase_of_interest)
-                time_i = client_metrics[time_key] if time_key in client_metrics else 0
+                time_i = client_metrics.get(time_key, 0)
                 # Update the makespan of round r.
-                if time_i > makespan:
-                    makespan = time_i
+                makespan = max(makespan, time_i)
                 # Get the energy cost of the client i on round r (if available).
                 energy_key = "{0}ing_energy_in_joules".format(phase_of_interest)
-                energy_i = client_metrics[energy_key] if energy_key in client_metrics else 0
-                # Update the energy consumption of round r.
+                energy_i = client_metrics.get(energy_key, 0)
                 energy_consumption += energy_i
                 # Get the accuracy "cost" of the client i on round r (if available).
-                accuracy_key = "accuracy"
                 accuracy_i = 0
-                for metric_key, _ in client_metrics.items():
-                    if accuracy_key in metric_key:
-                        accuracy_i = client_metrics[metric_key]
-                # Accumulate auxiliary values for the weighted mean accuracy calculation.
+                for metric_key, val in client_metrics.items():
+                    if "accuracy" in metric_key:
+                        accuracy_i = val
+                # Weighted accuracy accumulators.
                 sum_accuracy_product += x_i * accuracy_i
                 sum_num_examples_used += x_i
             # Update the weighted mean accuracy of round r.
-            weighted_mean_accuracy = sum_accuracy_product / sum_num_examples_used if sum_num_examples_used > 0 else 0
-            # Update the metrics lists.
+            weighted_mean_accuracy = (sum_accuracy_product / sum_num_examples_used
+                                      if sum_num_examples_used > 0 else 0)
+            # Store metrics.
             makespans.append(makespan)
             energy_consumptions.append(energy_consumption)
             weighted_mean_accuracies.append(weighted_mean_accuracy)
@@ -160,9 +195,7 @@ class FlowerServer(Strategy):
                                   current_round: int) -> bool:
         # Get the necessary attributes.
         fl_settings = self.get_attribute("_fl_settings")
-        server_strategy_settings = self.get_attribute("_server_strategy_settings")
         stopping_crit = fl_settings["stopping_crit"]
-        profiling_rounds = self.get_attribute("_profiling_rounds")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
         # Initialize the list of FL stopping criteria results.
         fl_stopping_criteria_results = []
@@ -174,12 +207,6 @@ class FlowerServer(Strategy):
                     case "Max_Rounds":
                         max_rounds = v["max_rounds"]
                         all_rounds_executed = (current_round > max_rounds)
-                        restore_initial_parameters_after_profiling = False
-                        if "restore_initial_parameters_after_profiling" in server_strategy_settings:
-                            restore_initial_parameters_after_profiling \
-                                = server_strategy_settings["restore_initial_parameters_after_profiling"]
-                        if restore_initial_parameters_after_profiling:
-                            all_rounds_executed = (current_round > max_rounds + len(profiling_rounds))
                         fl_stopping_criteria_results.append({crit_name: all_rounds_executed})
                     case "Min_Test_Accuracy":
                         min_test_accuracy = v["min_test_accuracy"]
@@ -204,9 +231,19 @@ class FlowerServer(Strategy):
                                            for criterion_result in fl_stopping_criteria_results)
         return fl_execution_should_stop
 
-    def _map_available_clients(self,
-                               current_round: int,
-                               client_manager: ClientManager | None) -> dict:
+    @staticmethod
+    def _estimate_global_class_presence(bits: list,
+                                        true_presence_probability: float) -> float:
+        # Unbiased estimate for true presence probability from randomized response bits.
+        if not bits:
+            return 0.0
+        mean_bits = float(mean(bits))
+        estimate = (mean_bits - 0.5 * (1 - true_presence_probability)) / (true_presence_probability - 0.5)
+        estimate = float(clip(estimate, 0.0, 1.0))
+        return estimate
+
+    def _generate_idle_events_data(self,
+                                   current_round: int) -> dict:
         # Get the necessary attributes.
         candidate_clients_history = self.get_attribute("_candidate_clients_history")
         selected_clients_history = self.get_attribute("_selected_clients_history")
@@ -285,74 +322,371 @@ class FlowerServer(Strategy):
                     if makespan_key in metrics:
                         var_name = "{0}_comm_round_{1}".format(makespan_key, r)
                         idle_events_data_dict[var_name] = metrics[makespan_key]
-        available_clients_map = {}
-        if client_manager is not None:
-            available_clients = client_manager.all()
+        return idle_events_data_dict
+
+    def _profile_request(self,
+                         current_round: int,
+                         client_id: int,
+                         client_proxy: GrpcClientProxy) -> None:
+        # Get the necessary attributes.
+        server_id = self.get_attribute("_server_id")
+        logger = self.get_attribute("_logger")
+        server_strategy_settings = self.get_attribute("_server_strategy_settings")
+        samples_per_task = server_strategy_settings["samples_per_task"]
+        num_tasks_profile_training = server_strategy_settings["num_tasks_profile_training"]
+        num_tasks_profile_testing = server_strategy_settings["num_tasks_profile_testing"]
+        num_samples_profile_training_list = [x * samples_per_task for x in num_tasks_profile_training]
+        num_samples_profile_testing_list = [x * samples_per_task for x in num_tasks_profile_testing]
+        num_samples_profile_training_list_str = "|".join(str(x) for x in num_samples_profile_training_list)
+        num_samples_profile_testing_list_str = "|".join(str(x) for x in num_samples_profile_testing_list)
+        # Log a 'starting profiling for client' message.
+        message = "[Server {0} | Round {1}] Starting profiling for client {2} ({3} training | {4} testing samples)..." \
+                   .format(server_id, current_round, client_id, num_samples_profile_training_list, num_samples_profile_testing_list)
+        log_message(logger, message, "INFO")
+        # Request profiling for the client.
+        gpi_dict = {"client_id": "?", "profile_performance": "?", "is_profiling_round": True, "comm_round": current_round}
+        fit_config = self._update_config(0, "train")
+        evaluate_config = self._update_config(0, "test")
+        fit_config.update({"is_profiling_round": True, "num_training_examples_to_use_list": num_samples_profile_training_list_str})
+        evaluate_config.update({"is_profiling_round": True, "num_testing_examples_to_use_list": num_samples_profile_testing_list_str})
+        for k, v in fit_config.items():
+            gpi_dict["fit_config_{0}".format(k)] = v
+        for k, v in evaluate_config.items():
+            gpi_dict["evaluate_config_{0}".format(k)] = v
+        gpi = GetPropertiesIns(gpi_dict)
+        # Get the profiling results.
+        client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+        profile_train = {}
+        profile_test = {}
+        for key, value in client_reply.properties.items():
+            if key.startswith("profile_train_"):
+                # profile_train_<n_samples>_<metric>
+                _, _, n_samples, metric = key.split("_", 3)
+                profile_train.setdefault(n_samples, {})[metric] = value
+            elif key.startswith("profile_test_"):
+                # profile_test_<n_samples>_<metric>
+                _, _, n_samples, metric = key.split("_", 3)
+                profile_test.setdefault(n_samples, {})[metric] = value
+        profile_train = {int(k): profile_train[k] for k in sorted(profile_train.keys(), key=int)}
+        profile_test = {int(k): profile_test[k] for k in sorted(profile_test.keys(), key=int)}
+        with self._profile_lock:
+            client_profile_dict = {"profiled_at_round": current_round, "train": profile_train, "test": profile_test}
+            self._clients_profiles["client_{0}".format(client_id)] = client_profile_dict
+        # Log a 'finished profiling for client' message.
+        message = "[Server {0} | Round {1}] Finished profiling for client {2}..." \
+                   .format(server_id, current_round, client_id)
+        log_message(logger, message, "INFO")
+
+    def _done_profiling_callback(self,
+                                 profiling_future: Future) -> None:
+        logger = self.get_attribute("_logger")
+        try:
+            profiling_future.result()
+        except Exception as e:
+            message = "Async profiling failed: {0}".format(e)
+            log_message(logger, message, "INFO")
+            log_message(logger, format_exc(), "INFO")
+        finally:
+            client_id_str = getattr(profiling_future, "client_id_str", None)
+            with self._profile_lock:
+                if client_id_str:
+                    self._clients_being_profiled.discard(client_id_str)
+                self._profiling_futures.discard(profiling_future)
+
+    def _profile_new_clients(self,
+                             current_round: int,
+                             available_clients: dict) -> None:
+        # Get the necessary attributes.
+        server_id = self.get_attribute("_server_id")
+        logger = self.get_attribute("_logger")
+        clients_being_profiled = self.get_attribute("_clients_being_profiled")
+        # Determine unprofiled clients.
+        unprofiled_clients = []
+        for _, client_proxy in available_clients.items():
+            gpi = GetPropertiesIns({"client_id": "?",
+                                    "comm_round": current_round})
+            try:
+                client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                client_id = client_reply.properties["client_id"]
+                client_id_str = "client_{0}".format(client_id)
+                client_available = client_reply.properties["client_available"]
+                with self._profile_lock:
+                    clients_profiles = self.get_attribute("_clients_profiles")
+                    client_not_profiled = client_id_str not in clients_profiles
+                    client_not_being_profiled = client_id_str not in clients_being_profiled
+                    if client_available and client_not_profiled and client_not_being_profiled:
+                        unprofiled_clients.append((client_id, client_proxy))
+                        self._clients_being_profiled.add(client_id_str)
+            except Exception as _:
+                pass
+        if not unprofiled_clients:
+            # Log a 'no new clients to profile' message.
+            message = "[Server {0} | Round {1}] No new clients to profile...".format(server_id, current_round)
+            log_message(logger, message, "INFO")
+            return
+        # Log a 'found new clients to profile' message.
+        message = "[Server {0} | Round {1}] Found {2} new clients to profile: {3}" \
+                   .format(server_id, current_round, len(unprofiled_clients), ["client_{0}".format(cid) for cid, _ in unprofiled_clients])
+        log_message(logger, message, "INFO")
+        # Initial profiling -> Blocking.
+        if len(self._clients_profiles) == 0:
+            # Log a 'blocking profile' message.
+            message = "[Server {0} | Round {1}] Initial profiling: blocking until all clients finish..." \
+                       .format(server_id, current_round)
+            log_message(logger, message, "INFO")
+            # Profile (blocking).
+            with ThreadPoolExecutor(max_workers=cpu_count()) as ex:
+                futures = [ex.submit(self._profile_request, current_round, client_id, client_proxy)
+                           for client_id, client_proxy in unprofiled_clients]
+                for f in as_completed(futures):
+                    try:
+                        f.result()
+                    except Exception as e:
+                        message = "Profiling failed: {0}".format(e)
+                        log_message(logger, message, "INFO")
+            # Log an 'initial profiling completed' message.
+            message = "[Server {0} | Round {1}] Initial profiling completed for all available clients ({2})!" \
+                       .format(server_id, current_round, len(unprofiled_clients))
+            log_message(logger, message, "INFO")
+            return
+        # Subsequent profiling -> Non-blocking.
+        # Log a 'non-blocking profile' message.
+        message = "[Server {0} | Round {1}] {2} new available clients will profile asynchronously (non-blocking)!" \
+                   .format(server_id, current_round, len(unprofiled_clients))
+        log_message(logger, message, "INFO")
+        # Profile (non-blocking).
+        for client_id, client_proxy in unprofiled_clients:
+            client_id_str = "client_{0}".format(client_id)
+            # Log a 'submitting async profiling' message.
+            message = "[Server {0} | Round {1}] Submitting async profiling request for client {2}..." \
+                      .format(server_id, current_round, client_id)
+            log_message(logger, message, "INFO")
+            profiling_future = self._profiling_executor.submit(self._profile_request, current_round, client_id, client_proxy)
+            profiling_future.client_id_str = client_id_str
+            self._profiling_futures.add(profiling_future)
+            profiling_future.add_done_callback(self._done_profiling_callback)
+
+    def _write_non_private_client_data_distribution_file(self,
+                                                         current_round: int,
+                                                         client_id: str,
+                                                         client_tasks_per_class_train: dict,
+                                                         client_tasks_per_class_test: dict) -> None:
+        root_output_folder = self._root_output_folder
+        client_data_distribution_file = (Path(root_output_folder)
+                                         .joinpath("data_distribution/client_{0}.csv".format(client_id)).absolute())
+        client_data_distribution_file.parent.mkdir(parents=True, exist_ok=True)
+        with client_data_distribution_file.open(mode="w", encoding="utf-8") as of:
+            header_line = "comm_round,data_privacy_approach,split,class,count\n"
+            of.write(header_line)
+            for split, dist in [("train", client_tasks_per_class_train), ("test", client_tasks_per_class_test)]:
+                for cls, count in dist.items():
+                    data_line = "{0},Non_Private,{1},{2},{3}\n".format(current_round, split, cls, count)
+                    of.write(data_line)
+
+    def _write_dp_client_data_distribution_file(self,
+                                                current_round: int,
+                                                client_id: str,
+                                                client_dp_histogram_train: ndarray,
+                                                client_dp_histogram_test: ndarray,
+                                                class_index_map: dict) -> None:
+        root_output_folder = self._root_output_folder
+        client_data_distribution_file = (Path(root_output_folder)
+                                         .joinpath("data_distribution/client_{0}.csv".format(client_id)).absolute())
+        client_data_distribution_file.parent.mkdir(parents=True, exist_ok=True)
+        inverse_map = {v: k for k, v in class_index_map.items()}
+        with client_data_distribution_file.open("w", encoding="utf-8") as of:
+            header_line = "comm_round,data_privacy_approach,split,class_index,class,noisy_count\n"
+            of.write(header_line)
+            for split, histogram in [("train", client_dp_histogram_train), ("test", client_dp_histogram_test)]:
+                for idx, val in enumerate(histogram):
+                    cls = inverse_map.get(idx, "UNKNOWN")
+                    data_line = "{0},Differentially_Private,{1},{2},{3},{4}\n".format(current_round, split, idx, cls, val)
+                    of.write(data_line)
+
+    def _get_available_clients_data_distribution(self,
+                                                 current_round: int,
+                                                 available_clients: dict) -> None:
+        server_strategy_settings = self.get_attribute("_server_strategy_settings")
+        data_privacy_approach_settings = server_strategy_settings.get("data_privacy_approach", {})
+        data_privacy_approach_name = data_privacy_approach_settings.get("name", "Non_Private")
+        query_clients_data_distribution = server_strategy_settings.get("query_clients_data_distribution", False)
+        if query_clients_data_distribution:
+            # Keep only active clients in the clients histograms cache.
+            active_client_proxies = set(available_clients.values())
+            self._clients_histograms = {client_proxy: client_info_cached
+                                        for client_proxy, client_info_cached in self._clients_histograms.items()
+                                        if client_proxy in active_client_proxies}
+            # Query client info, if not cached.
             for _, client_proxy in available_clients.items():
-                client_id_property = "client_id"
-                client_hostname_property = "client_hostname"
-                client_num_cpus_property = "client_num_cpus"
-                client_cpu_cores_list_property = "client_cpu_cores_list"
-                client_num_training_examples_available_property = "client_num_training_examples_available"
-                client_num_testing_examples_available_property = "client_num_testing_examples_available"
-                client_task_assignment_capacities_train_property = "client_task_assignment_capacities_train"
-                client_task_assignment_capacities_test_property = "client_task_assignment_capacities_test"
-                client_tasks_per_class_train_property = "client_tasks_per_class_train"
-                client_tasks_per_class_test_property = "client_tasks_per_class_test"
-                client_remaining_battery_energy_property = "client_remaining_battery_energy"
-                client_mean_power_consumption_idle_mode_property = "client_mean_power_consumption_idle_mode"
-                client_current_download_bandwidth_in_bytes_per_second_property = "client_current_download_bandwidth_in_bytes_per_second"
-                client_current_upload_bandwidth_in_bytes_per_second_property = "client_current_upload_bandwidth_in_bytes_per_second"
-                client_current_latency_in_milliseconds_property = "client_current_latency_in_milliseconds"
-                gpi_dict = {client_id_property: "?",
-                            client_hostname_property: "?",
-                            client_num_cpus_property: "?",
-                            client_cpu_cores_list_property: "?",
-                            client_num_training_examples_available_property: "?",
-                            client_num_testing_examples_available_property: "?",
-                            client_task_assignment_capacities_train_property: "?",
-                            client_task_assignment_capacities_test_property: "?",
-                            client_tasks_per_class_train_property: "?",
-                            client_tasks_per_class_test_property: "?",
-                            client_remaining_battery_energy_property: "?",
-                            client_mean_power_consumption_idle_mode_property: "?",
-                            client_current_download_bandwidth_in_bytes_per_second_property: "?",
-                            client_current_upload_bandwidth_in_bytes_per_second_property: "?",
-                            client_current_latency_in_milliseconds_property: "?"}
-                gpi_dict.update(idle_events_data_dict)
-                gpi = GetPropertiesIns(gpi_dict)
-                client_prompted = client_proxy.get_properties(gpi, timeout=None, group_id=None)
-                client_id = client_prompted.properties[client_id_property]
-                client_hostname = client_prompted.properties[client_hostname_property]
-                client_num_cpus = client_prompted.properties[client_num_cpus_property]
-                client_cpu_cores_list = client_prompted.properties[client_cpu_cores_list_property]
+                client_info_cached = self._clients_histograms.get(client_proxy, {})
+                match data_privacy_approach_name:
+                    case "Non_Private":
+                        # Non-private: actual query counts per class.
+                        if "client_tasks_per_class_train" not in client_info_cached:
+                            client_id_property = "client_id"
+                            client_tasks_per_class_train_property = "client_tasks_per_class_train"
+                            client_tasks_per_class_test_property = "client_tasks_per_class_test"
+                            gpi_dict = {client_id_property: "?",
+                                        client_tasks_per_class_train_property: "?",
+                                        client_tasks_per_class_test_property: "?",
+                                        "samples_per_task": server_strategy_settings.get("samples_per_task", 1),
+                                        "comm_round": current_round}
+                            gpi = GetPropertiesIns(gpi_dict)
+                            client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                            client_id = client_reply.properties[client_id_property]
+                            client_tasks_per_class_train_str = client_reply.properties[client_tasks_per_class_train_property]
+                            client_tasks_per_class_train = {s.split("=")[0]: int(s.split("=")[1])
+                                                            for s in client_tasks_per_class_train_str.split("|") if s}
+                            client_tasks_per_class_test_str = client_reply.properties[client_tasks_per_class_test_property]
+                            client_tasks_per_class_test = {s.split("=")[0]: int(s.split("=")[1])
+                                                           for s in client_tasks_per_class_test_str.split("|") if s}
+                            self._clients_histograms[client_proxy] = {"client_id": client_id,
+                                                                      "client_tasks_per_class_train": client_tasks_per_class_train,
+                                                                      "client_tasks_per_class_test": client_tasks_per_class_test}
+                            self._write_non_private_client_data_distribution_file(current_round,
+                                                                                  client_id,
+                                                                                  client_tasks_per_class_train,
+                                                                                  client_tasks_per_class_test)
+                    case "Differentially_Private":
+                        # Query presence and local classes claims, if not cached.
+                        true_presence_probability = data_privacy_approach_settings["true_presence_probability"]
+                        if "client_dp_presence" not in client_info_cached:
+                            client_id_property = "client_id"
+                            client_dp_presence_property = "client_dp_presence"
+                            client_local_classes_claimed_property = "client_local_classes_claimed"
+                            gpi_dict = {client_id_property: "?",
+                                        client_dp_presence_property: "?",
+                                        client_local_classes_claimed_property: "?",
+                                        "true_presence_probability": true_presence_probability,
+                                        "comm_round": current_round}
+                            gpi = GetPropertiesIns(gpi_dict)
+                            client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                            client_id = client_reply.properties[client_id_property]
+                            client_dp_presence_str = client_reply.properties[client_dp_presence_property]
+                            client_dp_presence = list(map(int, client_dp_presence_str.split("|")))
+                            client_local_classes_claimed_str = client_reply.properties[client_local_classes_claimed_property]
+                            client_local_classes_claimed = list(map(int, client_local_classes_claimed_str.split("|")))
+                            self._clients_histograms[client_proxy] = {"client_id": client_id,
+                                                                      "client_dp_presence": client_dp_presence,
+                                                                      "client_local_classes_claimed": client_local_classes_claimed}
+            if data_privacy_approach_name == "Differentially_Private":
+                # Estimate the global classes and build the class-index mapping.
+                true_presence_probability = data_privacy_approach_settings["true_presence_probability"]
+                presence_cutoff = data_privacy_approach_settings["presence_cutoff"]
+                epsilon = data_privacy_approach_settings["epsilon"]
+                global_presence = defaultdict(list)
+                for client_proxy, _ in self._clients_histograms.items():
+                    client_dp_presence = self._clients_histograms[client_proxy]["client_dp_presence"]
+                    client_local_classes_claimed = self._clients_histograms[client_proxy]["client_local_classes_claimed"]
+                    for cls, bit in zip(client_local_classes_claimed, client_dp_presence):
+                        global_presence[cls].append(bit)
+                estimates = {cls: self._estimate_global_class_presence(bits, true_presence_probability)
+                             for cls, bits in global_presence.items()}
+                global_classes = [cls for cls, est in estimates.items() if est > presence_cutoff]
+                num_global_classes = len(global_classes)
+                class_index_map = {int(lbl): idx for idx, lbl in enumerate(global_classes)}
+                # Set the class-index mapping.
+                self._clients_histograms["class_index_map"] = class_index_map
+                # Query DP histograms, if not cached.
+                class_index_map_str = "|".join("{0}={1}".format(k, v) for k, v in class_index_map.items())
+                for _, client_proxy in available_clients.items():
+                    client_info_cached = self._clients_histograms[client_proxy]
+                    if "client_dp_histogram_train" not in client_info_cached and "client_dp_histogram_test" not in client_info_cached:
+                        dp_histogram_train_property = "client_dp_histogram_train"
+                        dp_histogram_test_property = "client_dp_histogram_test"
+                        gpi_dict = {dp_histogram_train_property: "?",
+                                    dp_histogram_test_property: "?",
+                                    "num_global_classes": num_global_classes,
+                                    "class_index_map": class_index_map_str,
+                                    "epsilon": epsilon,
+                                    "comm_round": current_round}
+                        gpi = GetPropertiesIns(gpi_dict)
+                        client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                        client_dp_histogram_train = array(list(map(int, client_reply.properties[dp_histogram_train_property].split("|"))),
+                                                          dtype=int32)
+                        client_dp_histogram_test = array(list(map(int, client_reply.properties[dp_histogram_test_property].split("|"))),
+                                                         dtype=int32)
+                        self._clients_histograms[client_proxy].update({"client_dp_histogram_train": client_dp_histogram_train,
+                                                                       "client_dp_histogram_test": client_dp_histogram_test})
+                        client_id = self._clients_histograms[client_proxy]["client_id"]
+                        self._write_dp_client_data_distribution_file(current_round,
+                                                                     client_id,
+                                                                     client_dp_histogram_train,
+                                                                     client_dp_histogram_test,
+                                                                     class_index_map)
+
+    def _generate_available_clients_map(self,
+                                        current_round: int,
+                                        available_clients: dict,
+                                        idle_events_data_dict: dict) -> dict:
+        server_strategy_settings = self.get_attribute("_server_strategy_settings")
+        data_privacy_approach_name = server_strategy_settings.get("data_privacy_approach", {}).get("name", "Non_Private")
+        query_clients_data_distribution = server_strategy_settings.get("query_clients_data_distribution", False)
+        available_clients_map = {}
+        for _, client_proxy in available_clients.items():
+            client_id_property = "client_id"
+            client_hostname_property = "client_hostname"
+            client_num_cpus_property = "client_num_cpus"
+            client_cpu_cores_list_property = "client_cpu_cores_list"
+            client_num_training_examples_available_property = "client_num_training_examples_available"
+            client_num_testing_examples_available_property = "client_num_testing_examples_available"
+            client_task_assignment_capacities_train_property = "client_task_assignment_capacities_train"
+            client_task_assignment_capacities_test_property = "client_task_assignment_capacities_test"
+            client_remaining_battery_energy_property = "client_remaining_battery_energy"
+            client_mean_power_consumption_idle_mode_property = "client_mean_power_consumption_idle_mode"
+            client_current_download_bandwidth_in_bytes_per_second_property = "client_current_download_bandwidth_in_bytes_per_second"
+            client_current_upload_bandwidth_in_bytes_per_second_property = "client_current_upload_bandwidth_in_bytes_per_second"
+            client_current_latency_in_milliseconds_property = "client_current_latency_in_milliseconds"
+            gpi_dict = {client_id_property: "?",
+                        client_hostname_property: "?",
+                        client_num_cpus_property: "?",
+                        client_cpu_cores_list_property: "?",
+                        client_num_training_examples_available_property: "?",
+                        client_num_testing_examples_available_property: "?",
+                        client_task_assignment_capacities_train_property: "?",
+                        client_task_assignment_capacities_test_property: "?",
+                        client_remaining_battery_energy_property: "?",
+                        client_mean_power_consumption_idle_mode_property: "?",
+                        client_current_download_bandwidth_in_bytes_per_second_property: "?",
+                        client_current_upload_bandwidth_in_bytes_per_second_property: "?",
+                        client_current_latency_in_milliseconds_property: "?",
+                        "samples_per_task": server_strategy_settings.get("samples_per_task", 1),
+                        "comm_round": current_round}
+            gpi_dict.update(idle_events_data_dict)
+            gpi = GetPropertiesIns(gpi_dict)
+            try:
+                client_reply = client_proxy.get_properties(gpi, timeout=None, group_id=None)
+                client_id = client_reply.properties[client_id_property]
+                client_hostname = client_reply.properties[client_hostname_property]
+                client_num_cpus = client_reply.properties[client_num_cpus_property]
+                client_cpu_cores_list = client_reply.properties[client_cpu_cores_list_property]
                 client_num_training_examples_available = \
-                    client_prompted.properties[client_num_training_examples_available_property]
+                    client_reply.properties[client_num_training_examples_available_property]
                 client_num_testing_examples_available = \
-                    client_prompted.properties[client_num_testing_examples_available_property]
+                    client_reply.properties[client_num_testing_examples_available_property]
                 client_task_assignment_capacities_train = \
-                    client_prompted.properties[client_task_assignment_capacities_train_property]
+                    client_reply.properties[client_task_assignment_capacities_train_property]
                 client_task_assignment_capacities_train = client_task_assignment_capacities_train.split("|")
                 client_task_assignment_capacities_train = [int(i) for i in client_task_assignment_capacities_train]
                 client_task_assignment_capacities_test = \
-                    client_prompted.properties[client_task_assignment_capacities_test_property]
+                    client_reply.properties[client_task_assignment_capacities_test_property]
                 client_task_assignment_capacities_test = client_task_assignment_capacities_test.split("|")
                 client_task_assignment_capacities_test = [int(i) for i in client_task_assignment_capacities_test]
-                client_tasks_per_class_train = client_prompted.properties[client_tasks_per_class_train_property]
-                client_tasks_per_class_train = client_tasks_per_class_train.split("|")
-                client_tasks_per_class_train = {str(elem).split("=")[0]: int(str(elem).split("=")[1])
-                                                for elem in client_tasks_per_class_train}
-                client_tasks_per_class_test = client_prompted.properties[client_tasks_per_class_test_property]
-                client_tasks_per_class_test = client_tasks_per_class_test.split("|")
-                client_tasks_per_class_test = {str(elem).split("=")[0]: int(str(elem).split("=")[1])
-                                               for elem in client_tasks_per_class_test}
-                client_remaining_battery_energy = client_prompted.properties[client_remaining_battery_energy_property]
-                client_mean_power_consumption_idle_mode = client_prompted.properties[client_mean_power_consumption_idle_mode_property]
-                client_current_download_bandwidth_in_bytes_per_second = client_prompted.properties[client_current_download_bandwidth_in_bytes_per_second_property]
-                client_current_upload_bandwidth_in_bytes_per_second = client_prompted.properties[client_current_upload_bandwidth_in_bytes_per_second_property]
-                client_current_latency_in_milliseconds = client_prompted.properties[client_current_latency_in_milliseconds_property]
-                if client_remaining_battery_energy > 0:
-                    client_id_str = "client_{0}".format(client_id)
+                client_remaining_battery_energy = client_reply.properties[client_remaining_battery_energy_property]
+                client_mean_power_consumption_idle_mode = client_reply.properties[client_mean_power_consumption_idle_mode_property]
+                client_current_download_bandwidth_in_bytes_per_second = client_reply.properties[client_current_download_bandwidth_in_bytes_per_second_property]
+                client_current_upload_bandwidth_in_bytes_per_second = client_reply.properties[client_current_upload_bandwidth_in_bytes_per_second_property]
+                client_current_latency_in_milliseconds = client_reply.properties[client_current_latency_in_milliseconds_property]
+                client_id_str = "client_{0}".format(client_id)
+                client_available = client_reply.properties["client_available"]
+                clients_profiles = {}
+                with self._profile_lock:
+                    clients_profiles = self.get_attribute("_clients_profiles")
+                profiled_this_round = False
+                if client_id_str in clients_profiles:
+                    profiled_this_round = clients_profiles[client_id_str]["profiled_at_round"] == current_round
+                block_due_to_profiling = current_round > 1 and profiled_this_round
+                if client_available and not block_due_to_profiling:
                     client_map = {"client_proxy": client_proxy,
                                   "client_hostname": client_hostname,
                                   "client_num_cpus": client_num_cpus,
@@ -361,16 +695,50 @@ class FlowerServer(Strategy):
                                   "client_num_testing_examples_available": client_num_testing_examples_available,
                                   "client_task_assignment_capacities_train": client_task_assignment_capacities_train,
                                   "client_task_assignment_capacities_test": client_task_assignment_capacities_test,
-                                  "client_tasks_per_class_train": client_tasks_per_class_train,
-                                  "client_tasks_per_class_test": client_tasks_per_class_test,
                                   "client_remaining_battery_energy": client_remaining_battery_energy,
                                   "client_mean_power_consumption_idle_mode": client_mean_power_consumption_idle_mode,
                                   "client_current_download_bandwidth_in_bytes_per_second": client_current_download_bandwidth_in_bytes_per_second,
                                   "client_current_upload_bandwidth_in_bytes_per_second": client_current_upload_bandwidth_in_bytes_per_second,
                                   "client_current_latency_in_milliseconds": client_current_latency_in_milliseconds}
+                    # Attach the data distribution info (histogram), if allowed.
+                    if query_clients_data_distribution:
+                        if client_proxy in self._clients_histograms:
+                            client_info = self._clients_histograms[client_proxy]
+                            match data_privacy_approach_name:
+                                case "Non_Private":
+                                    if "client_tasks_per_class_train" in client_info:
+                                        client_map.update({"client_tasks_per_class_train": client_info["client_tasks_per_class_train"]})
+                                    if "client_tasks_per_class_test" in client_info:
+                                        client_map.update({"client_tasks_per_class_test": client_info["client_tasks_per_class_test"]})
+                                case "Differentially_Private":
+                                    if "client_dp_histogram_train" in client_info:
+                                        client_map.update({"client_dp_histogram_train": client_info["client_dp_histogram_train"]})
+                                    if "client_dp_histogram_test" in client_info:
+                                        client_map.update({"client_dp_histogram_test": client_info["client_dp_histogram_test"]})
+                                    if "class_index_map" in self._clients_histograms:
+                                        client_map.update({"class_index_map": self._clients_histograms["class_index_map"]})
                     available_clients_map.update({client_id_str: client_map})
-            sorted_keys = sorted(list(available_clients_map.keys()), key=lambda x: (len(x), x))
-            available_clients_map = {k: available_clients_map[k] for k in sorted_keys}
+            except Exception as _:
+                pass
+        sorted_keys = sorted(list(available_clients_map.keys()), key=lambda x: (len(x), x))
+        available_clients_map = {k: available_clients_map[k] for k in sorted_keys}
+        return available_clients_map
+
+    def _map_available_clients(self,
+                               current_round: int,
+                               client_manager: ClientManager | None) -> dict:
+        # Generate the idle events' data.
+        idle_events_data_dict = self._generate_idle_events_data(current_round)
+        if client_manager is not None:
+            # Get the available clients.
+            available_clients = client_manager.all()
+            self._set_attribute("_available_clients", available_clients)
+            # Profile "new" (first-appearance) clients, if any.
+            self._profile_new_clients(current_round, available_clients)
+            # Get the available clients data distribution, if allowed.
+            self._get_available_clients_data_distribution(current_round, available_clients)
+            # Generate the available clients map.
+            available_clients_map = self._generate_available_clients_map(current_round, available_clients, idle_events_data_dict)
         else:
             available_clients_map = self.get_attribute("_available_clients_map_replay")
         return available_clients_map
@@ -385,12 +753,9 @@ class FlowerServer(Strategy):
         # Get the necessary attributes.
         server_id = self.get_attribute("_server_id")
         logger = self.get_attribute("_logger")
-        server_strategy_settings = self.get_attribute("_server_strategy_settings")
         candidate_clients_history = self.get_attribute("_candidate_clients_history")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         client_selection_duration_history = self.get_attribute("_client_selection_duration_history")
-        # Get the list of profiling rounds, if any.
-        profiling_rounds = self.get_attribute("_profiling_rounds")
         # Set the base configuration.
         phase_config = self._update_config(current_round, current_phase)
         # Update the candidate clients' history.
@@ -414,14 +779,12 @@ class FlowerServer(Strategy):
             selected_client_proxy = client_info["client_proxy"]
             selected_client_config = deepcopy(phase_config)
             selected_client_config.update({"client_selection_time_in_seconds": selection_duration_in_seconds})
-            if current_round in profiling_rounds:
-                selected_client_config.update({"profiling_round": True})
-            if "client_num_tasks_scheduled" in client_info:
+            if "client_num_samples_scheduled" in client_info:
                 selected_client_config.update({"num_{0}ing_examples_to_use".format(current_phase):
-                                                   client_info["client_num_tasks_scheduled"]})
-            if "client_num_tasks_per_class_scheduled" in client_info:
+                                                   client_info["client_num_samples_scheduled"]})
+            if "client_num_samples_per_class_scheduled" in client_info:
                 selected_client_config.update({"num_{0}ing_examples_per_class_to_use".format(current_phase):
-                                                   client_info["client_num_tasks_per_class_scheduled"]})
+                                                   client_info["client_num_samples_per_class_scheduled"]})
             if "client_learning_rate" in client_info:
                 selected_client_config.update({"learning_rate": client_info["client_learning_rate"]})
             if "client_batch_size" in client_info:
@@ -434,18 +797,6 @@ class FlowerServer(Strategy):
                     selected_client_instructions = FitIns(parameters, selected_client_config)
                 case "test":
                     selected_client_instructions = EvaluateIns(parameters, selected_client_config)
-            # Restore the initial parameters after the profiling rounds, if needed.
-            restore_initial_parameters_after_profiling = False
-            if "restore_initial_parameters_after_profiling" in server_strategy_settings:
-                restore_initial_parameters_after_profiling = server_strategy_settings[
-                    "restore_initial_parameters_after_profiling"]
-            if profiling_rounds and current_round <= profiling_rounds[-1] + 1 and restore_initial_parameters_after_profiling:
-                initial_parameters = self.get_attribute("_initial_parameters")
-                match current_phase:
-                    case "train":
-                        selected_client_instructions = FitIns(initial_parameters, selected_client_config)
-                    case "test":
-                        selected_client_instructions = EvaluateIns(initial_parameters, selected_client_config)
             phase_pairs.append((selected_client_proxy, selected_client_instructions))
         # Update the repository of phase pairs.
         self._update_phase_pairs_history(current_round, current_phase, phase_pairs)
@@ -520,6 +871,32 @@ class FlowerServer(Strategy):
             phase_pairs_history.update(current_round_phase_pairs)
             self._set_attribute(phase_pairs_history_attribute, phase_pairs_history)
 
+    def _update_client_gradients_history(self,
+                                         current_round: int,
+                                         results: List[Tuple[ClientProxy, FitRes]]) -> None:
+        global_parameters = self.get_attribute("_global_parameters")
+        global_ndarrays = parameters_to_ndarrays(global_parameters)
+        client_gradients_history = self.get_attribute("_client_gradients_history")
+        round_updates = {}
+        for _, result in results:
+            client_id = result.metrics["client_id"]
+            client_id_str = "client_{0}".format(client_id)
+            client_ndarrays = parameters_to_ndarrays(result.parameters)
+            update_layers = [client_layer - global_layer
+                             for client_layer, global_layer in zip(client_ndarrays, global_ndarrays)]
+            flattened_parts = [layer.ravel() for layer in update_layers]
+            if flattened_parts:
+                update_vector = flattened_parts[0]
+                for part in flattened_parts[1:]:
+                    update_vector = concatenate((update_vector, part))
+            else:
+                update_vector = array([], dtype=float)
+            round_updates[client_id_str] = update_vector
+        if current_round not in client_gradients_history:
+            client_gradients_history[current_round] = {}
+        client_gradients_history[current_round].update(round_updates)
+        self._set_attribute("_client_gradients_history", client_gradients_history)
+
     def _update_individual_metrics_history(self,
                                            current_round: int,
                                            current_phase: str,
@@ -527,8 +904,8 @@ class FlowerServer(Strategy):
         candidate_clients_history = self.get_attribute("_candidate_clients_history")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
-        num_tasks = sum([client_info["client_num_tasks_scheduled"]
-                         for _, client_info in selected_clients_history[current_round][current_phase].items()])
+        is_task_based_selection = all("client_num_tasks_scheduled" in client_info
+                                      for client_info in selected_clients_history[current_round][current_phase].values())
         num_available_clients = len(candidate_clients_history[current_round][current_phase])
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         client_selector = server_strategy_settings["strategy"]
@@ -541,9 +918,13 @@ class FlowerServer(Strategy):
             client_metrics_copy.pop("client_id")
             clients_metrics_dicts.append({client_id_str: client_metrics_copy})
         current_round_values = {"client_selector": client_selector,
-                                "num_tasks": num_tasks,
                                 "num_available_clients": num_available_clients,
                                 "clients_metrics_dicts": clients_metrics_dicts}
+        if is_task_based_selection:
+            # Conditionally insert "num_tasks".
+            num_tasks = sum([client_info["client_num_tasks_scheduled"]
+                             for _, client_info in selected_clients_history[current_round][current_phase].items()])
+            current_round_values.update({"num_tasks": num_tasks})
         if current_round not in selected_clients_metrics_history:
             selected_clients_metrics_history.update({current_round: {current_phase: current_round_values}})
         else:
@@ -607,14 +988,18 @@ class FlowerServer(Strategy):
     def _initialize_history_output_files(self,
                                          phase: str) -> None:
         # Get the necessary attributes.
+        server_strategy_settings = self.get_attribute("_server_strategy_settings")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
         output_settings = self.get_attribute("_output_settings")
         remove_output_files = output_settings["remove_output_files"]
         phase_substrings = []
+        is_task_based_selection = False
         if phase == "train":
             phase_substrings = ["fit", "train"]
+            is_task_based_selection = "num_tasks_training" in server_strategy_settings
         elif phase == "test":
             phase_substrings = ["evaluate", "test"]
+            is_task_based_selection = "num_tasks_testing" in server_strategy_settings
         output_files_phase = [{k: v} for k, v in output_settings.items()
                               if any(substring in k for substring in phase_substrings)]
         # Remove the history output files, if removing is enabled.
@@ -632,15 +1017,14 @@ class FlowerServer(Strategy):
             header_line = None
             match history_output_file_key:
                 case "selected_fit_clients_history_file":
-                    header_line = ("{0},{1},{2},{3},{4},{5},{6},{7}\n"
-                                   .format("comm_round",
-                                           "client_selector",
-                                           "selection_duration",
-                                           "num_tasks",
-                                           "num_available_clients",
-                                           "available_clients",
-                                           "num_selected_clients",
-                                           "selected_clients"))
+                    # Base header columns.
+                    header_columns = ["comm_round", "client_selector", "selection_duration", "num_available_clients",
+                                      "available_clients", "num_selected_clients", "selected_clients"]
+                    # Conditionally insert "num_tasks".
+                    if is_task_based_selection:
+                        header_columns.insert(3, "num_tasks")
+                    # Build header line.
+                    header_line = ",".join(header_columns) + "\n"
                 case "individual_fit_metrics_history_file":
                     # Get the ordered set of fit metrics names.
                     fit_metrics_names = []
@@ -650,13 +1034,15 @@ class FlowerServer(Strategy):
                         client_metrics = list(client_metrics_dict.values())[0]
                         fit_metrics_names.extend(client_metrics.keys())
                     fit_metrics_names = sorted(set(fit_metrics_names))
-                    header_line = ("{0},{1},{2},{3},{4},{5}\n"
-                                   .format("comm_round",
-                                           "client_selector",
-                                           "num_tasks",
-                                           "num_available_clients",
-                                           "client_id",
-                                           ",".join(fit_metrics_names)))
+                    # Base header columns.
+                    header_columns = ["comm_round", "client_selector", "num_available_clients", "client_id"]
+                    # Conditionally insert "num_tasks".
+                    if is_task_based_selection:
+                        header_columns.insert(2, "num_tasks")
+                    # Append metric names at the end.
+                    header_columns.extend(fit_metrics_names)
+                    # Build header line.
+                    header_line = ",".join(header_columns) + "\n"
                 case "metaheuristic_summary_fit_history_file":
                     header_line = ("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10}\n"
                                    .format("comm_round",
@@ -671,15 +1057,14 @@ class FlowerServer(Strategy):
                                            "best_solution_costs",
                                            "diff_solutions_costs"))
                 case "selected_evaluate_clients_history_file":
-                    header_line = ("{0},{1},{2},{3},{4},{5},{6},{7}\n"
-                                   .format("comm_round",
-                                           "client_selector",
-                                           "selection_duration",
-                                           "num_tasks",
-                                           "num_available_clients",
-                                           "available_clients",
-                                           "num_selected_clients",
-                                           "selected_clients"))
+                    # Base header columns.
+                    header_columns = ["comm_round", "client_selector", "selection_duration", "num_available_clients",
+                                      "available_clients", "num_selected_clients", "selected_clients"]
+                    # Conditionally insert "num_tasks".
+                    if is_task_based_selection:
+                        header_columns.insert(3, "num_tasks")
+                    # Build header line.
+                    header_line = ",".join(header_columns) + "\n"
                 case "individual_evaluate_metrics_history_file":
                     # Get the ordered set of evaluate metrics names.
                     evaluate_metrics_names = []
@@ -689,13 +1074,15 @@ class FlowerServer(Strategy):
                         client_metrics = list(client_metrics_dict.values())[0]
                         evaluate_metrics_names.extend(client_metrics.keys())
                     evaluate_metrics_names = sorted(set(evaluate_metrics_names))
-                    header_line = ("{0},{1},{2},{3},{4},{5}\n"
-                                   .format("comm_round",
-                                           "client_selector",
-                                           "num_tasks",
-                                           "num_available_clients",
-                                           "client_id",
-                                           ",".join(evaluate_metrics_names)))
+                    # Base header columns.
+                    header_columns = ["comm_round", "client_selector", "num_available_clients", "client_id"]
+                    # Conditionally insert "num_tasks".
+                    if is_task_based_selection:
+                        header_columns.insert(2, "num_tasks")
+                    # Append evaluation metric names at the end.
+                    header_columns.extend(evaluate_metrics_names)
+                    # Build header line.
+                    header_line = ",".join(header_columns) + "\n"
                 case "metaheuristic_summary_evaluate_history_file":
                     header_line = ("{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10}\n"
                                    .format("comm_round",
@@ -741,10 +1128,13 @@ class FlowerServer(Strategy):
         if round_timeout_in_seconds != "infinity":
             client_selector = client_selector + "_D{0}".format(round_timeout_in_seconds)
         phase_substrings = []
+        is_task_based_selection = False
         if current_phase == "train":
             phase_substrings = ["fit", "train"]
+            is_task_based_selection = "num_tasks_training" in server_strategy_settings
         elif current_phase == "test":
             phase_substrings = ["evaluate", "test"]
+            is_task_based_selection = "num_tasks_testing" in server_strategy_settings
         output_files_phase = [{k: v} for k, v in output_settings.items()
                               if any(substring in k for substring in phase_substrings)]
         # Write the data line to the history output files.
@@ -755,22 +1145,23 @@ class FlowerServer(Strategy):
             match history_output_file_key:
                 case "selected_fit_clients_history_file":
                     selection_duration = client_selection_duration_history[current_round][current_phase]
-                    num_tasks = sum([client_info["client_num_tasks_scheduled"]
-                                     for _, client_info in selected_clients_history[current_round][current_phase].items()])
                     num_available_clients = len(candidate_clients_history[current_round][current_phase])
                     available_clients = "|".join(list(candidate_clients_history[current_round][current_phase].keys()))
                     num_selected_clients = len(selected_clients_history[current_round][current_phase])
                     selected_clients = "|".join([client_id
                                                  for client_id, _ in selected_clients_history[current_round][current_phase].items()])
-                    data_line = ("{0},{1},{2},{3},{4},{5},{6},{7}\n"
-                                 .format(current_round,
-                                         client_selector,
-                                         selection_duration,
-                                         num_tasks,
-                                         num_available_clients,
-                                         available_clients if available_clients else None,
-                                         num_selected_clients,
-                                         selected_clients if selected_clients else None))
+                    # Base data columns.
+                    data_values = [str(current_round), str(client_selector), str(selection_duration),
+                                   str(num_available_clients), str(available_clients if available_clients else None),
+                                   str(num_selected_clients), str(selected_clients if selected_clients else None)]
+                    # Conditionally insert "num_tasks".
+                    if is_task_based_selection:
+                        num_tasks = sum([client_info["client_num_tasks_scheduled"]
+                                         for _, client_info in
+                                         selected_clients_history[current_round][current_phase].items()])
+                        data_values.insert(3, str(num_tasks))
+                    # Build data line.
+                    data_line = ",".join(data_values) + "\n"
                     data_lines.append(data_line)
                 case "individual_fit_metrics_history_file":
                     current_round_values = selected_clients_metrics_history[current_round][current_phase]
@@ -780,7 +1171,6 @@ class FlowerServer(Strategy):
                         client_metrics = list(client_metrics_dict.values())[0]
                         fit_metrics_names.extend(client_metrics.keys())
                     fit_metrics_names = sorted(set(fit_metrics_names))
-                    num_tasks = current_round_values["num_tasks"]
                     num_available_clients = current_round_values["num_available_clients"]
                     clients_metrics_dicts = current_round_values["clients_metrics_dicts"]
                     clients_metrics_dicts = sorted(clients_metrics_dicts, key=lambda x: list(x.keys()))
@@ -793,13 +1183,17 @@ class FlowerServer(Strategy):
                             if fit_metric_name in client_metrics:
                                 fit_metric_value = str(client_metrics[fit_metric_name])
                             fit_metrics_values.append(fit_metric_value)
-                        data_line = ("{0},{1},{2},{3},{4},{5}\n"
-                                     .format(current_round,
-                                             client_selector,
-                                             num_tasks,
-                                             num_available_clients,
-                                             client_id_str,
-                                             ",".join(fit_metrics_values)))
+                        # Base data columns.
+                        data_values = [str(current_round), str(client_selector), str(num_available_clients),
+                                       str(client_id_str)]
+                        # Conditionally insert "num_tasks".
+                        if is_task_based_selection:
+                            num_tasks = current_round_values["num_tasks"]
+                            data_values.insert(2, str(num_tasks))
+                        # Append metrics at the end.
+                        data_values.extend(map(str, fit_metrics_values))
+                        # Build the data line.
+                        data_line = ",".join(data_values) + "\n"
                         data_lines.append(data_line)
                 case "metaheuristic_summary_fit_history_file":
                     metaheuristic_summary_fit_history = {}  # TODO
@@ -830,22 +1224,23 @@ class FlowerServer(Strategy):
                         data_lines.append(data_line)
                 case "selected_evaluate_clients_history_file":
                     selection_duration = client_selection_duration_history[current_round][current_phase]
-                    num_tasks = sum([client_info["client_num_tasks_scheduled"]
-                                     for _, client_info in selected_clients_history[current_round][current_phase].items()])
                     num_available_clients = len(candidate_clients_history[current_round][current_phase])
                     available_clients = "|".join(list(candidate_clients_history[current_round][current_phase].keys()))
                     num_selected_clients = len(selected_clients_history[current_round][current_phase])
                     selected_clients = "|".join([client_id
                                                  for client_id, _ in selected_clients_history[current_round][current_phase].items()])
-                    data_line = ("{0},{1},{2},{3},{4},{5},{6},{7}\n"
-                                 .format(current_round,
-                                         client_selector,
-                                         selection_duration,
-                                         num_tasks,
-                                         num_available_clients,
-                                         available_clients if available_clients else None,
-                                         num_selected_clients,
-                                         selected_clients if selected_clients else None))
+                    # Base data columns.
+                    data_values = [str(current_round), str(client_selector), str(selection_duration),
+                                   str(num_available_clients), str(available_clients if available_clients else None),
+                                   str(num_selected_clients), str(selected_clients if selected_clients else None)]
+                    # Conditionally insert "num_tasks".
+                    if is_task_based_selection:
+                        num_tasks = sum([client_info["client_num_tasks_scheduled"]
+                                         for _, client_info in
+                                         selected_clients_history[current_round][current_phase].items()])
+                        data_values.insert(3, str(num_tasks))
+                    # Build data line.
+                    data_line = ",".join(data_values) + "\n"
                     data_lines.append(data_line)
                 case "individual_evaluate_metrics_history_file":
                     current_round_values = selected_clients_metrics_history[current_round][current_phase]
@@ -855,7 +1250,6 @@ class FlowerServer(Strategy):
                         client_metrics = list(client_metrics_dict.values())[0]
                         evaluate_metrics_names.extend(client_metrics.keys())
                     evaluate_metrics_names = sorted(set(evaluate_metrics_names))
-                    num_tasks = current_round_values["num_tasks"]
                     num_available_clients = current_round_values["num_available_clients"]
                     clients_metrics_dicts = current_round_values["clients_metrics_dicts"]
                     clients_metrics_dicts = sorted(clients_metrics_dicts, key=lambda x: list(x.keys()))
@@ -868,13 +1262,17 @@ class FlowerServer(Strategy):
                             if evaluate_metric_name in client_metrics:
                                 evaluate_metric_value = str(client_metrics[evaluate_metric_name])
                             evaluate_metrics_values.append(evaluate_metric_value)
-                        data_line = ("{0},{1},{2},{3},{4},{5}\n"
-                                     .format(current_round,
-                                             client_selector,
-                                             num_tasks,
-                                             num_available_clients,
-                                             client_id_str,
-                                             ",".join(evaluate_metrics_values)))
+                        # Base data columns.
+                        data_values = [str(current_round), str(client_selector), str(num_available_clients),
+                                       str(client_id_str)]
+                        # Conditionally insert "num_tasks".
+                        if is_task_based_selection:
+                            num_tasks = current_round_values["num_tasks"]
+                            data_values.insert(2, str(num_tasks))
+                        # Append evaluation metric values at the end.
+                        data_values.extend(map(str, evaluate_metrics_values))
+                        # Build data line.
+                        data_line = ",".join(data_values) + "\n"
                         data_lines.append(data_line)
                 case "metaheuristic_summary_evaluate_history_file":
                     metaheuristic_summary_evaluate_history = {}  # TODO
@@ -906,6 +1304,79 @@ class FlowerServer(Strategy):
             if history_output_file.exists() and data_lines:
                 with open(file=history_output_file, mode="a", encoding="utf-8") as file:
                     file.writelines(data_lines)
+
+    def _update_clients_reliability_score_history(self,
+                                                  current_round: int,
+                                                  current_phase: str,
+                                                  completed_clients: dict | None = None,
+                                                  failure_threshold: int = 3) -> None:
+        # Get the necessary attributes.
+        candidate_clients_history = self.get_attribute("_candidate_clients_history")
+        selected_clients_history = self.get_attribute("_selected_clients_history")
+        clients_reliability_score_history = self.get_attribute("_clients_reliability_score_history")
+        clients_consecutive_failures_history = self.get_attribute("_clients_consecutive_failures_history")
+        server_strategy_settings = self.get_attribute("_server_strategy_settings")
+        clients_reliability_score = server_strategy_settings["clients_reliability_score"]
+        non_availability_penalty = clients_reliability_score["non_availability_penalty"]
+        non_completion_penalty = clients_reliability_score["non_completion_penalty"]
+        recency_weight = clients_reliability_score["recency_weight"]
+        # Ensure completed_clients is a dict.
+        if completed_clients is None:
+            completed_clients = {}
+        available_clients = candidate_clients_history.get(current_round, {}).get(current_phase, {})
+        selected_clients = selected_clients_history.get(current_round, {}).get(current_phase, {})
+        # Create round entry.
+        if current_round not in clients_reliability_score_history:
+            clients_reliability_score_history[current_round] = {}
+        current_scores = clients_reliability_score_history[current_round]
+        # Get the previous round reliability scores.
+        prev_scores = clients_reliability_score_history.get(current_round - 1, {})
+        # All clients that we may need to compute scores for.
+        all_client_ids = (set(prev_scores.keys())
+                        | set(available_clients.keys())
+                        | set(selected_clients.keys())
+                        | set(completed_clients.keys()))
+        all_client_ids = {cid for cid in all_client_ids if cid.startswith("client_")}
+        # Update each client.
+        for client_id in all_client_ids:
+            # Previous reliability score (default 1.0 for new clients).
+            prev_score = prev_scores.get(client_id, 1.0)
+            # Case 1 — Client was available this round.
+            if client_id in available_clients:
+                # (A) Available but NOT selected => cannot fail → no penalty.
+                if client_id not in selected_clients:
+                    clients_consecutive_failures_history[client_id] = 0
+                    penalty = 0.0
+                else:
+                    # (B) Available AND selected.
+                    completed = completed_clients.get(client_id, False)
+                    if completed:
+                        # SUCCESS => reset failure counter.
+                        clients_consecutive_failures_history[client_id] = 0
+                        penalty = 0.0
+                    else:
+                        # FAILURE => increment counter.
+                        clients_consecutive_failures_history[client_id] += 1
+                        # Apply penalty ONLY if persistent failures.
+                        if clients_consecutive_failures_history[client_id] >= failure_threshold:
+                            penalty = non_completion_penalty
+                        else:
+                            penalty = 0.0  # ignore random failure
+            else:
+                # Case 2 — Client NOT available at all this round.
+                clients_consecutive_failures_history[client_id] += 1
+                # Apply penalty ONLY if persistent unavailability.
+                if clients_consecutive_failures_history[client_id] >= failure_threshold:
+                    penalty = non_availability_penalty
+                else:
+                    penalty = 0.0
+            # Exponential moving average (EMA) update.
+            new_score = prev_score * (1 - recency_weight) + (1 - penalty) * recency_weight
+            current_scores[client_id] = new_score
+        # Store the updated client reliability scores.
+        self._set_attribute("_clients_reliability_score_history", clients_reliability_score_history)
+        # Store the updated client consecutive failures.
+        self._set_attribute("_clients_consecutive_failures_history", clients_consecutive_failures_history)
 
     def _aggregate_evaluate_metrics(self,
                                     current_round: int,
@@ -977,6 +1448,7 @@ class FlowerServer(Strategy):
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
+        client_gradients_history = self.get_attribute("_client_gradients_history")
         client_selector = self.get_attribute("_client_selector")
         # Log a 'start of the configure_fit call' debug message.
         message = "[Server {0} | Round {1}] Start of the 'configure_fit' call!".format(server_id, server_round)
@@ -1004,14 +1476,10 @@ class FlowerServer(Strategy):
             # Verify if the federated training configuration should not proceed.
             if not enable_training or (enable_training and fl_execution_should_stop):
                 return []
-        # Get the list of profiling rounds, if any.
-        profiling_rounds = self.get_attribute("_profiling_rounds")
         # Set the phase value.
         phase = "train"
         # Get the set of active (candidate) clients.
         candidate_clients = self._map_available_clients(server_round, client_manager)
-        # Get the number of tasks to be scheduled to the selected clients.
-        num_tasks = server_strategy_settings["num_tasks_training"]
         # Get the base training instructions to be used by the selected clients.
         fit_config = self.get_attribute("_fit_config")
         base_learning_rate = fit_config["learning_rate"]
@@ -1021,23 +1489,61 @@ class FlowerServer(Strategy):
         round_timeout_in_seconds = fl_settings["round_timeout_in_seconds"]
         if round_timeout_in_seconds == "infinity":
             round_timeout_in_seconds = inf
+        # Get the clients profiles.
+        clients_profiles = {}
+        with self._profile_lock:
+            clients_profiles = self.get_attribute("_clients_profiles")
         # Start the clients' selection duration timer.
         selection_duration_start = process_time()
-        # Run the client selection procedure.
+        # Set the client selection procedure kwargs.
         kwargs = {"current_round": server_round,
                   "current_phase": phase,
                   "candidate_clients": candidate_clients,
                   "num_rounds": num_rounds,
-                  "num_tasks": num_tasks,
                   "base_learning_rate": base_learning_rate,
                   "base_batch_size": base_batch_size,
                   "base_num_epochs": base_num_epochs,
                   "selected_clients_history": selected_clients_history,
                   "selected_clients_metrics_history": selected_clients_metrics_history,
-                  "profiling_rounds": profiling_rounds,
+                  "client_gradients_history": client_gradients_history,
+                  "clients_profiles": clients_profiles,
                   "time_limit": round_timeout_in_seconds,
+                  "root_output_folder": self._root_output_folder,
                   "logger": logger}
-        selected_clients = client_selector.run_client_selection_procedure(**kwargs)
+        if server_strategy_settings.get("monitor_clients_reliability_score", False):
+            # Get the clients' reliability score history.
+            clients_reliability_score_history = self.get_attribute("_clients_reliability_score_history")
+            kwargs.update({"clients_reliability_score_history": clients_reliability_score_history})
+            apply_clients_reliability_filter = server_strategy_settings.get("apply_clients_reliability_filter", False)
+            kwargs.update({"apply_clients_reliability_filter": apply_clients_reliability_filter})
+        if "num_tasks_training" in server_strategy_settings:
+            # Get the number of tasks to be scheduled to the selected clients.
+            num_tasks = server_strategy_settings["num_tasks_training"]
+            kwargs.update({"num_tasks": num_tasks})
+        if "samples_per_task" in server_strategy_settings:
+            # Get the number of samples per task.
+            samples_per_task = server_strategy_settings["samples_per_task"]
+            kwargs.update({"samples_per_task": samples_per_task})
+        if "data_privacy_approach" in server_strategy_settings:
+            # Get the privacy approach.
+            data_privacy_approach = server_strategy_settings["data_privacy_approach"]["name"]
+            kwargs.update({"data_privacy_approach": data_privacy_approach})
+        if "use_async" in server_strategy_settings:
+            # Whether asynchronous selection is enabled or not.
+            use_async = server_strategy_settings["use_async"]
+            kwargs.update({"use_async": use_async})
+        # Run the client selection procedure.
+        try:
+            selected_clients = client_selector.run_client_selection_procedure(**kwargs)
+        except Exception as e:
+            message = "Exception happened during client selection:\n" \
+                      "Type: {0}\n" \
+                      "Message: {1}\n" \
+                      "Traceback:\n{2}" \
+                      .format(type(e).__name__, e, format_exc())
+            log_message(logger, message, "INFO")
+            print_exc()
+            raise
         if isinstance(selected_clients, list):
             # Monitor the future objects in a daemon thread (non-blocking).
             monitor_future_objects_thread = Thread(target=self._monitor_future_objects,
@@ -1069,8 +1575,9 @@ class FlowerServer(Strategy):
         message = "[Server {0} | Round {1}] End of the 'configure_fit' call!".format(server_id, server_round)
         log_message(logger, message, "DEBUG")
         # Log the start of the current communication round.
-        message = "[Server {0} | Round {1}] Starting the {2}ing phase...".format(server_id, server_round, phase)
-        log_message(logger, message, "INFO")
+        if fit_pairs:
+            message = "[Server {0} | Round {1}] Starting the {2}ing phase...".format(server_id, server_round, phase)
+            log_message(logger, message, "INFO")
         # Return the list of (fit_client_proxy, fit_client_instructions) pairs.
         return fit_pairs
 
@@ -1085,7 +1592,9 @@ class FlowerServer(Strategy):
         # Get the necessary attributes.
         server_id = self.get_attribute("_server_id")
         fl_settings = self.get_attribute("_fl_settings")
+        enable_testing = fl_settings["enable_testing"]
         accept_clients_failures = fl_settings["accept_clients_failures"]
+        remove_clients_models_on_finish = fl_settings["remove_clients_models_on_finish"]
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         model_aggregator = server_strategy_settings["model_aggregator"]
         model_aggregator_name = model_aggregator["name"]
@@ -1103,6 +1612,8 @@ class FlowerServer(Strategy):
         # Do not aggregate if there are no results or if there are clients' failures and failures are not accepted.
         if not results or (failures and not accept_clients_failures):
             return None, {}
+        # Save client updates BEFORE overwriting the global model.
+        self._update_client_gradients_history(server_round, results)
         # Log the global model weights' sum (before aggregation).
         global_parameters = self.get_attribute("_global_parameters")
         message = ("[Server {0} | Round {1}] Global model weight's sum (before aggregation): {2}"
@@ -1139,6 +1650,21 @@ class FlowerServer(Strategy):
         self._append_round_data_to_history_files(server_round, phase)
         # Store the improved global parameters.
         self._set_attribute("_global_parameters", aggregated_model_parameters)
+        # Update the clients reliability score, if being monitored.
+        if server_strategy_settings.get("monitor_clients_reliability_score", False):
+            completed_clients = {"client_{0}".format(result.metrics["client_id"]): True for _, result in results}
+            self._update_clients_reliability_score_history(server_round, phase, completed_clients)
+        # If the FL execution should stop on the next round, remove local model on clients (if requested).
+        try:
+            fl_execution_should_stop = self._fl_execution_should_stop(server_round + 1)
+        except Exception:
+            fl_execution_should_stop = False
+        if fl_execution_should_stop and remove_clients_models_on_finish and not enable_testing:
+            available_clients = self.get_attribute("_available_clients")
+            for _, client_proxy in available_clients.items():
+                gpi_dict = {"client_remove_local_model": "?"}
+                gpi = GetPropertiesIns(gpi_dict)
+                _ = client_proxy.get_properties(gpi, timeout=None, group_id=None)
         # Log an 'end of the aggregate_fit call' debug message.
         message = "[Server {0} | Round {1}] End of the 'aggregate_fit' call!".format(server_id, server_round)
         log_message(logger, message, "DEBUG")
@@ -1161,6 +1687,7 @@ class FlowerServer(Strategy):
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         selected_clients_metrics_history = self.get_attribute("_selected_clients_metrics_history")
+        client_gradients_history = self.get_attribute("_client_gradients_history")
         client_selector = self.get_attribute("_client_selector")
         # Log a 'start of the configure_evaluate call' debug message.
         message = "[Server {0} | Round {1}] Start of the 'configure_evaluate' call!".format(server_id, server_round)
@@ -1171,14 +1698,10 @@ class FlowerServer(Strategy):
             # Verify if the federated testing configuration should not proceed.
             if not enable_testing or (enable_testing and fl_execution_should_stop):
                 return []
-        # Get the list of profiling rounds, if any.
-        profiling_rounds = self.get_attribute("_profiling_rounds")
         # Set the phase value.
         phase = "test"
         # Get the set of active (candidate) clients.
         candidate_clients = self._map_available_clients(server_round, client_manager)
-        # Get the number of tasks to be scheduled to the selected clients.
-        num_tasks = server_strategy_settings["num_tasks_testing"]
         # Get the base testing instructions to be used by the selected clients.
         evaluate_config = self.get_attribute("_evaluate_config")
         base_batch_size = evaluate_config["batch_size"]
@@ -1186,21 +1709,59 @@ class FlowerServer(Strategy):
         round_timeout_in_seconds = fl_settings["round_timeout_in_seconds"]
         if round_timeout_in_seconds == "infinity":
             round_timeout_in_seconds = inf
+        # Get the clients profiles.
+        clients_profiles = {}
+        with self._profile_lock:
+            clients_profiles = self.get_attribute("_clients_profiles")
         # Start the clients' selection duration timer.
         selection_duration_start = process_time()
-        # Run the client selection procedure.
+        # Set the client selection procedure kwargs.
         kwargs = {"current_round": server_round,
                   "current_phase": phase,
                   "candidate_clients": candidate_clients,
                   "num_rounds": num_rounds,
-                  "num_tasks": num_tasks,
                   "base_batch_size": base_batch_size,
                   "selected_clients_history": selected_clients_history,
                   "selected_clients_metrics_history": selected_clients_metrics_history,
-                  "profiling_rounds": profiling_rounds,
+                  "client_gradients_history": client_gradients_history,
+                  "clients_profiles": clients_profiles,
                   "time_limit": round_timeout_in_seconds,
+                  "root_output_folder": self._root_output_folder,
                   "logger": logger}
-        selected_clients = client_selector.run_client_selection_procedure(**kwargs)
+        if server_strategy_settings.get("monitor_clients_reliability_score", False):
+            # Get the clients' reliability score history.
+            clients_reliability_score_history = self.get_attribute("_clients_reliability_score_history")
+            kwargs.update({"clients_reliability_score_history": clients_reliability_score_history})
+            apply_clients_reliability_filter = server_strategy_settings.get("apply_clients_reliability_filter", False)
+            kwargs.update({"apply_clients_reliability_filter": apply_clients_reliability_filter})
+        if "num_tasks_testing" in server_strategy_settings:
+            # Get the number of tasks to be scheduled to the selected clients.
+            num_tasks = server_strategy_settings["num_tasks_testing"]
+            kwargs.update({"num_tasks": num_tasks})
+        if "samples_per_task" in server_strategy_settings:
+            # Get the number of samples per task.
+            samples_per_task = server_strategy_settings["samples_per_task"]
+            kwargs.update({"samples_per_task": samples_per_task})
+        if "data_privacy_approach" in server_strategy_settings:
+            # Get the privacy approach.
+            data_privacy_approach = server_strategy_settings["data_privacy_approach"]["name"]
+            kwargs.update({"data_privacy_approach": data_privacy_approach})
+        if "use_async" in server_strategy_settings:
+            # Whether asynchronous selection is enabled or not.
+            use_async = server_strategy_settings["use_async"]
+            kwargs.update({"use_async": use_async})
+        # Run the client selection procedure.
+        try:
+            selected_clients = client_selector.run_client_selection_procedure(**kwargs)
+        except Exception as e:
+            message = "Exception happened during client selection:\n" \
+                      "Type: {0}\n" \
+                      "Message: {1}\n" \
+                      "Traceback:\n{2}" \
+                      .format(type(e).__name__, e, format_exc())
+            log_message(logger, message, "INFO")
+            print_exc()
+            raise
         if isinstance(selected_clients, list):
             # Monitor the future objects in a daemon thread (non-blocking).
             monitor_future_objects_thread = Thread(target=self._monitor_future_objects,
@@ -1232,8 +1793,9 @@ class FlowerServer(Strategy):
         message = "[Server {0} | Round {1}] End of the 'configure_evaluate' call!".format(server_id, server_round)
         log_message(logger, message, "DEBUG")
         # Log the start of the current communication round.
-        message = "[Server {0} | Round {1}] Starting the {2}ing phase...".format(server_id, server_round, phase)
-        log_message(logger, message, "INFO")
+        if evaluate_pairs:
+            message = "[Server {0} | Round {1}] Starting the {2}ing phase...".format(server_id, server_round, phase)
+            log_message(logger, message, "INFO")
         # Return the list of (evaluate_client_proxy, evaluate_client_instructions) pairs.
         return evaluate_pairs
 
@@ -1249,6 +1811,8 @@ class FlowerServer(Strategy):
         server_id = self.get_attribute("_server_id")
         fl_settings = self.get_attribute("_fl_settings")
         accept_clients_failures = fl_settings["accept_clients_failures"]
+        remove_clients_models_on_finish = fl_settings["remove_clients_models_on_finish"]
+        server_strategy_settings = self.get_attribute("_server_strategy_settings")
         logger = self.get_attribute("_logger")
         # Log a 'start of the aggregate_evaluate call' debug message.
         message = "[Server {0} | Round {1}] Start of the 'aggregate_evaluate' call!".format(server_id, server_round)
@@ -1275,6 +1839,21 @@ class FlowerServer(Strategy):
             self._initialize_history_output_files(phase)
         # Append the communication round data to the testing history files.
         self._append_round_data_to_history_files(server_round, phase)
+        # Update the clients reliability score, if being monitored.
+        if server_strategy_settings.get("monitor_clients_reliability_score", False):
+            completed_clients = {"client_{0}".format(result.metrics["client_id"]): True for _, result in results}
+            self._update_clients_reliability_score_history(server_round, phase, completed_clients)
+        # If the FL execution should stop on the next round, remove local model on clients (if requested).
+        try:
+            fl_execution_should_stop = self._fl_execution_should_stop(server_round + 1)
+        except Exception:
+            fl_execution_should_stop = False
+        if fl_execution_should_stop and remove_clients_models_on_finish:
+            available_clients = self.get_attribute("_available_clients")
+            for _, client_proxy in available_clients.items():
+                gpi_dict = {"client_remove_local_model": "?"}
+                gpi = GetPropertiesIns(gpi_dict)
+                _ = client_proxy.get_properties(gpi, timeout=None, group_id=None)
         # Log an 'end of the aggregate_evaluate call' debug message.
         message = "[Server {0} | Round {1}] End of the 'aggregate_evaluate' call!".format(server_id, server_round)
         log_message(logger, message, "DEBUG")

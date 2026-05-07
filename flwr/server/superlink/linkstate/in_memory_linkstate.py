@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,33 +15,40 @@
 """In-memory LinkState implementation."""
 
 
+import secrets
 import threading
 import time
 from bisect import bisect_right
+from collections import defaultdict
 from dataclasses import dataclass, field
 from logging import ERROR, WARNING
 from typing import Optional
-from uuid import UUID, uuid4
 
-from flwr.common import Context, log, now
+from flwr.common import Context, Message, log, now
 from flwr.common.constant import (
+    FLWR_APP_TOKEN_LENGTH,
+    HEARTBEAT_MAX_INTERVAL,
+    HEARTBEAT_PATIENCE,
     MESSAGE_TTL_TOLERANCE,
     NODE_ID_NUM_BYTES,
+    RUN_FAILURE_DETAILS_NO_HEARTBEAT,
     RUN_ID_NUM_BYTES,
+    SUPERLINK_NODE_ID,
     Status,
+    SubStatus,
 )
-from flwr.common.record import ConfigsRecord
+from flwr.common.record import ConfigRecord
 from flwr.common.typing import Run, RunStatus, UserConfig
-from flwr.proto.task_pb2 import TaskIns, TaskRes  # pylint: disable=E0611
 from flwr.server.superlink.linkstate.linkstate import LinkState
-from flwr.server.utils import validate_task_ins_or_res
+from flwr.server.utils import validate_message
 
 from .utils import (
+    check_node_availability_for_in_message,
     generate_rand_int_from_bytes,
     has_valid_sub_status,
     is_valid_transition,
-    verify_found_taskres,
-    verify_taskins_ids,
+    verify_found_message_replies,
+    verify_message_ids,
 )
 
 
@@ -50,8 +57,11 @@ class RunRecord:  # pylint: disable=R0902
     """The record of a specific run, including its status and timestamps."""
 
     run: Run
+    active_until: float = 0.0
+    heartbeat_interval: float = 0.0
     logs: list[tuple[float, str]] = field(default_factory=list)
     log_lock: threading.Lock = field(default_factory=threading.Lock)
+    lock: threading.RLock = field(default_factory=threading.RLock)
 
 
 class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
@@ -59,308 +69,295 @@ class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
 
     def __init__(self) -> None:
 
-        # Map node_id to (online_until, ping_interval)
+        # Map node_id to (online_until, heartbeat_interval)
         self.node_ids: dict[int, tuple[float, float]] = {}
         self.public_key_to_node_id: dict[bytes, int] = {}
+        self.node_id_to_public_key: dict[int, bytes] = {}
 
         # Map run_id to RunRecord
         self.run_ids: dict[int, RunRecord] = {}
         self.contexts: dict[int, Context] = {}
-        self.federation_options: dict[int, ConfigsRecord] = {}
-        self.task_ins_store: dict[UUID, TaskIns] = {}
-        self.task_res_store: dict[UUID, TaskRes] = {}
-        self.task_ins_id_to_task_res_id: dict[UUID, UUID] = {}
+        self.federation_options: dict[int, ConfigRecord] = {}
+        self.message_ins_store: dict[str, Message] = {}
+        self.message_res_store: dict[str, Message] = {}
+        self.message_ins_id_to_message_res_id: dict[str, str] = {}
+
+        # Store run ID to token mapping and token to run ID mapping
+        self.token_store: dict[int, str] = {}
+        self.token_to_run_id: dict[str, int] = {}
+        self.lock_token_store = threading.Lock()
+
+        # Map flwr_aid to run_ids for O(1) reverse index lookup
+        self.flwr_aid_to_run_ids: dict[str, set[int]] = defaultdict(set)
 
         self.node_public_keys: set[bytes] = set()
-        self.server_public_key: Optional[bytes] = None
-        self.server_private_key: Optional[bytes] = None
 
         self.lock = threading.RLock()
 
-    def store_task_ins(self, task_ins: TaskIns) -> Optional[UUID]:
-        """Store one TaskIns."""
-        # Validate task
-        errors = validate_task_ins_or_res(task_ins)
+    def store_message_ins(self, message: Message) -> Optional[str]:
+        """Store one Message."""
+        # Validate message
+        errors = validate_message(message, is_reply_message=False)
         if any(errors):
             log(ERROR, errors)
             return None
         # Validate run_id
-        if task_ins.run_id not in self.run_ids:
-            log(ERROR, "Invalid run ID for TaskIns: %s", task_ins.run_id)
+        if message.metadata.run_id not in self.run_ids:
+            log(ERROR, "Invalid run ID for Message: %s", message.metadata.run_id)
             return None
         # Validate source node ID
-        if task_ins.task.producer.node_id != 0:
+        if message.metadata.src_node_id != SUPERLINK_NODE_ID:
             log(
                 ERROR,
-                "Invalid source node ID for TaskIns: %s",
-                task_ins.task.producer.node_id,
+                "Invalid source node ID for Message: %s",
+                message.metadata.src_node_id,
             )
             return None
         # Validate destination node ID
-        if not task_ins.task.consumer.anonymous:
-            if task_ins.task.consumer.node_id not in self.node_ids:
-                log(
-                    ERROR,
-                    "Invalid destination node ID for TaskIns: %s",
-                    task_ins.task.consumer.node_id,
-                )
-                return None
+        if message.metadata.dst_node_id not in self.node_ids:
+            log(
+                ERROR,
+                "Invalid destination node ID for Message: %s",
+                message.metadata.dst_node_id,
+            )
+            return None
 
-        # Create task_id
-        task_id = uuid4()
-
-        # Store TaskIns
-        task_ins.task_id = str(task_id)
+        message_id = message.metadata.message_id
         with self.lock:
-            self.task_ins_store[task_id] = task_ins
+            self.message_ins_store[message_id] = message
 
-        # Return the new task_id
-        return task_id
+        # Return the new message_id
+        return message_id
 
-    def get_task_ins(
-        self, node_id: Optional[int], limit: Optional[int]
-    ) -> list[TaskIns]:
-        """Get all TaskIns that have not been delivered yet."""
+    def get_message_ins(self, node_id: int, limit: Optional[int]) -> list[Message]:
+        """Get all Messages that have not been delivered yet."""
         if limit is not None and limit < 1:
             raise AssertionError("`limit` must be >= 1")
 
-        # Find TaskIns for node_id that were not delivered yet
-        task_ins_list: list[TaskIns] = []
+        # Find Message for node_id that were not delivered yet
+        message_ins_list: list[Message] = []
         current_time = time.time()
         with self.lock:
-            for _, task_ins in self.task_ins_store.items():
-                # pylint: disable=too-many-boolean-expressions
+            for _, msg_ins in self.message_ins_store.items():
                 if (
-                    node_id is not None  # Not anonymous
-                    and task_ins.task.consumer.anonymous is False
-                    and task_ins.task.consumer.node_id == node_id
-                    and task_ins.task.delivered_at == ""
-                    and task_ins.task.created_at + task_ins.task.ttl > current_time
-                ) or (
-                    node_id is None  # Anonymous
-                    and task_ins.task.consumer.anonymous is True
-                    and task_ins.task.consumer.node_id == 0
-                    and task_ins.task.delivered_at == ""
-                    and task_ins.task.created_at + task_ins.task.ttl > current_time
+                    msg_ins.metadata.dst_node_id == node_id
+                    and msg_ins.metadata.delivered_at == ""
+                    and msg_ins.metadata.created_at + msg_ins.metadata.ttl
+                    > current_time
                 ):
-                    task_ins_list.append(task_ins)
-                if limit and len(task_ins_list) == limit:
+                    message_ins_list.append(msg_ins)
+                if limit and len(message_ins_list) == limit:
                     break
 
         # Mark all of them as delivered
         delivered_at = now().isoformat()
-        for task_ins in task_ins_list:
-            task_ins.task.delivered_at = delivered_at
+        for msg_ins in message_ins_list:
+            msg_ins.metadata.delivered_at = delivered_at
 
-        # Return TaskIns
-        return task_ins_list
+        # Return list of messages
+        return message_ins_list
 
     # pylint: disable=R0911
-    def store_task_res(self, task_res: TaskRes) -> Optional[UUID]:
-        """Store one TaskRes."""
-        # Validate task
-        errors = validate_task_ins_or_res(task_res)
+    def store_message_res(self, message: Message) -> Optional[str]:
+        """Store one Message."""
+        # Validate message
+        errors = validate_message(message, is_reply_message=True)
         if any(errors):
             log(ERROR, errors)
             return None
 
+        res_metadata = message.metadata
         with self.lock:
-            # Check if the TaskIns it is replying to exists and is valid
-            task_ins_id = task_res.task.ancestry[0]
-            task_ins = self.task_ins_store.get(UUID(task_ins_id))
+            # Check if the Message it is replying to exists and is valid
+            msg_ins_id = res_metadata.reply_to_message_id
+            msg_ins = self.message_ins_store.get(msg_ins_id)
 
-            # Ensure that the consumer_id of taskIns matches the producer_id of taskRes.
+            # Ensure that dst_node_id of original Message matches the src_node_id of
+            # reply Message.
             if (
-                task_ins
-                and task_res
-                and not (
-                    task_ins.task.consumer.anonymous or task_res.task.producer.anonymous
-                )
-                and task_ins.task.consumer.node_id != task_res.task.producer.node_id
+                msg_ins
+                and message
+                and msg_ins.metadata.dst_node_id != res_metadata.src_node_id
             ):
                 return None
 
-            if task_ins is None:
-                log(ERROR, "TaskIns with task_id %s does not exist.", task_ins_id)
-                return None
-
-            if task_ins.task.created_at + task_ins.task.ttl <= time.time():
+            if msg_ins is None:
                 log(
                     ERROR,
-                    "Failed to store TaskRes: TaskIns with task_id %s has expired.",
-                    task_ins_id,
+                    "Message with ID %s does not exist.",
+                    msg_ins_id,
                 )
                 return None
 
-            # Fail if the TaskRes TTL exceeds the
-            # expiration time of the TaskIns it replies to.
-            # Condition: TaskIns.created_at + TaskIns.ttl ≥
-            #            TaskRes.created_at + TaskRes.ttl
+            ins_metadata = msg_ins.metadata
+            if ins_metadata.created_at + ins_metadata.ttl <= time.time():
+                log(
+                    ERROR,
+                    "Failed to store Message: the message it is replying to "
+                    "(with ID %s) has expired",
+                    msg_ins_id,
+                )
+                return None
+
+            # Fail if the Message TTL exceeds the
+            # expiration time of the Message it replies to.
+            # Condition: ins_metadata.created_at + ins_metadata.ttl ≥
+            #            res_metadata.created_at + res_metadata.ttl
             # A small tolerance is introduced to account
             # for floating-point precision issues.
             max_allowed_ttl = (
-                task_ins.task.created_at + task_ins.task.ttl - task_res.task.created_at
+                ins_metadata.created_at + ins_metadata.ttl - res_metadata.created_at
             )
-            if task_res.task.ttl and (
-                task_res.task.ttl - max_allowed_ttl > MESSAGE_TTL_TOLERANCE
+            if res_metadata.ttl and (
+                res_metadata.ttl - max_allowed_ttl > MESSAGE_TTL_TOLERANCE
             ):
                 log(
                     WARNING,
-                    "Received TaskRes with TTL %.2f "
-                    "exceeding the allowed maximum TTL %.2f.",
-                    task_res.task.ttl,
+                    "Received Message with TTL %.2f exceeding the allowed maximum "
+                    "TTL %.2f.",
+                    res_metadata.ttl,
                     max_allowed_ttl,
                 )
                 return None
 
         # Validate run_id
-        if task_res.run_id not in self.run_ids:
-            log(ERROR, "`run_id` is invalid")
+        if res_metadata.run_id != ins_metadata.run_id:
+            log(ERROR, "`metadata.run_id` is invalid")
             return None
 
-        # Create task_id
-        task_id = uuid4()
-
-        # Store TaskRes
-        task_res.task_id = str(task_id)
+        message_id = message.metadata.message_id
         with self.lock:
-            self.task_res_store[task_id] = task_res
-            self.task_ins_id_to_task_res_id[UUID(task_ins_id)] = task_id
+            self.message_res_store[message_id] = message
+            self.message_ins_id_to_message_res_id[msg_ins_id] = message_id
 
-        # Return the new task_id
-        return task_id
+        # Return the new message_id
+        return message_id
 
-    def get_task_res(self, task_ids: set[UUID]) -> list[TaskRes]:
-        """Get TaskRes for the given TaskIns IDs."""
-        ret: dict[UUID, TaskRes] = {}
+    def get_message_res(self, message_ids: set[str]) -> list[Message]:
+        """Get reply Messages for the given Message IDs."""
+        ret: dict[str, Message] = {}
 
         with self.lock:
             current = time.time()
 
-            # Verify TaskIns IDs
-            ret = verify_taskins_ids(
-                inquired_taskins_ids=task_ids,
-                found_taskins_dict=self.task_ins_store,
+            # Verify Message IDs
+            ret = verify_message_ids(
+                inquired_message_ids=message_ids,
+                found_message_ins_dict=self.message_ins_store,
                 current_time=current,
             )
 
-            # Find all TaskRes
-            task_res_found: list[TaskRes] = []
-            for task_id in task_ids:
-                # If TaskRes exists and is not delivered, add it to the list
-                if task_res_id := self.task_ins_id_to_task_res_id.get(task_id):
-                    task_res = self.task_res_store[task_res_id]
-                    if task_res.task.delivered_at == "":
-                        task_res_found.append(task_res)
-            tmp_ret_dict = verify_found_taskres(
-                inquired_taskins_ids=task_ids,
-                found_taskins_dict=self.task_ins_store,
-                found_taskres_list=task_res_found,
+            # Check node availability
+            dst_node_ids = {
+                self.message_ins_store[message_id].metadata.dst_node_id
+                for message_id in message_ids
+            }
+            tmp_ret_dict = check_node_availability_for_in_message(
+                inquired_in_message_ids=message_ids,
+                found_in_message_dict=self.message_ins_store,
+                node_id_to_online_until={
+                    node_id: self.node_ids[node_id][0]
+                    for node_id in dst_node_ids
+                    if node_id in self.node_ids
+                },
                 current_time=current,
             )
             ret.update(tmp_ret_dict)
 
-            # Mark existing TaskRes to be returned as delivered
-            delivered_at = now().isoformat()
-            for task_res in task_res_found:
-                task_res.task.delivered_at = delivered_at
+            # Find all reply Messages
+            message_res_found: list[Message] = []
+            for message_id in message_ids:
+                # If Message exists and is not delivered, add it to the list
+                if message_res_id := self.message_ins_id_to_message_res_id.get(
+                    message_id
+                ):
+                    message_res = self.message_res_store[message_res_id]
+                    if message_res.metadata.delivered_at == "":
+                        message_res_found.append(message_res)
+            tmp_ret_dict = verify_found_message_replies(
+                inquired_message_ids=message_ids,
+                found_message_ins_dict=self.message_ins_store,
+                found_message_res_list=message_res_found,
+                current_time=current,
+            )
+            ret.update(tmp_ret_dict)
 
-            # Cleanup
-            self._force_delete_tasks_by_ids(set(ret.keys()))
+            # Mark existing reply Messages to be returned as delivered
+            delivered_at = now().isoformat()
+            for message_res in message_res_found:
+                message_res.metadata.delivered_at = delivered_at
 
         return list(ret.values())
 
-    def delete_tasks(self, task_ids: set[UUID]) -> None:
-        """Delete all delivered TaskIns/TaskRes pairs."""
-        task_ins_to_be_deleted: set[UUID] = set()
-        task_res_to_be_deleted: set[UUID] = set()
-
-        with self.lock:
-            for task_ins_id in task_ids:
-                # Find the task_id of the matching task_res
-                for task_res_id, task_res in self.task_res_store.items():
-                    if UUID(task_res.task.ancestry[0]) != task_ins_id:
-                        continue
-                    if task_res.task.delivered_at == "":
-                        continue
-
-                    task_ins_to_be_deleted.add(task_ins_id)
-                    task_res_to_be_deleted.add(task_res_id)
-
-            for task_id in task_ins_to_be_deleted:
-                del self.task_ins_store[task_id]
-                del self.task_ins_id_to_task_res_id[task_id]
-            for task_id in task_res_to_be_deleted:
-                del self.task_res_store[task_id]
-
-    def _force_delete_tasks_by_ids(self, task_ids: set[UUID]) -> None:
-        """Delete tasks based on a set of TaskIns IDs."""
-        if not task_ids:
+    def delete_messages(self, message_ins_ids: set[str]) -> None:
+        """Delete a Message and its reply based on provided Message IDs."""
+        if not message_ins_ids:
             return
 
         with self.lock:
-            for task_id in task_ids:
-                # Delete TaskIns
-                if task_id in self.task_ins_store:
-                    del self.task_ins_store[task_id]
-                # Delete TaskRes
-                if task_id in self.task_ins_id_to_task_res_id:
-                    task_res_id = self.task_ins_id_to_task_res_id.pop(task_id)
-                    del self.task_res_store[task_res_id]
+            for message_id in message_ins_ids:
+                # Delete Messages
+                if message_id in self.message_ins_store:
+                    del self.message_ins_store[message_id]
+                # Delete Message replies
+                if message_id in self.message_ins_id_to_message_res_id:
+                    message_res_id = self.message_ins_id_to_message_res_id.pop(
+                        message_id
+                    )
+                    del self.message_res_store[message_res_id]
 
-    def num_task_ins(self) -> int:
-        """Calculate the number of task_ins in store.
+    def get_message_ids_from_run_id(self, run_id: int) -> set[str]:
+        """Get all instruction Message IDs for the given run_id."""
+        message_id_list: set[str] = set()
+        with self.lock:
+            for message_id, message in self.message_ins_store.items():
+                if message.metadata.run_id == run_id:
+                    message_id_list.add(message_id)
 
-        This includes delivered but not yet deleted task_ins.
+        return message_id_list
+
+    def num_message_ins(self) -> int:
+        """Calculate the number of instruction Messages in store.
+
+        This includes delivered but not yet deleted.
         """
-        return len(self.task_ins_store)
+        return len(self.message_ins_store)
 
-    def num_task_res(self) -> int:
-        """Calculate the number of task_res in store.
+    def num_message_res(self) -> int:
+        """Calculate the number of reply Messages in store.
 
-        This includes delivered but not yet deleted task_res.
+        This includes delivered but not yet deleted.
         """
-        return len(self.task_res_store)
+        return len(self.message_res_store)
 
-    def create_node(
-        self, ping_interval: float, public_key: Optional[bytes] = None
-    ) -> int:
+    def create_node(self, heartbeat_interval: float) -> int:
         """Create, store in the link state, and return `node_id`."""
         # Sample a random int64 as node_id
-        node_id = generate_rand_int_from_bytes(NODE_ID_NUM_BYTES)
+        node_id = generate_rand_int_from_bytes(
+            NODE_ID_NUM_BYTES, exclude=[SUPERLINK_NODE_ID, 0]
+        )
 
         with self.lock:
             if node_id in self.node_ids:
                 log(ERROR, "Unexpected node registration failure.")
                 return 0
 
-            if public_key is not None:
-                if (
-                    public_key in self.public_key_to_node_id
-                    or node_id in self.public_key_to_node_id.values()
-                ):
-                    log(ERROR, "Unexpected node registration failure.")
-                    return 0
-
-                self.public_key_to_node_id[public_key] = node_id
-
-            self.node_ids[node_id] = (time.time() + ping_interval, ping_interval)
+            # Mark the node online until time.time() + heartbeat_interval
+            self.node_ids[node_id] = (
+                time.time() + heartbeat_interval,
+                heartbeat_interval,
+            )
             return node_id
 
-    def delete_node(self, node_id: int, public_key: Optional[bytes] = None) -> None:
+    def delete_node(self, node_id: int) -> None:
         """Delete a node."""
         with self.lock:
             if node_id not in self.node_ids:
                 raise ValueError(f"Node {node_id} not found")
 
-            if public_key is not None:
-                if (
-                    public_key not in self.public_key_to_node_id
-                    or node_id not in self.public_key_to_node_id.values()
-                ):
-                    raise ValueError("Public key or node_id not found")
-
-                del self.public_key_to_node_id[public_key]
+            # Remove node ID <> public key mappings
+            if pk := self.node_id_to_public_key.pop(node_id, None):
+                del self.public_key_to_node_id[pk]
 
             del self.node_ids[node_id]
 
@@ -382,6 +379,26 @@ class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
                 if online_until > current_time
             }
 
+    def set_node_public_key(self, node_id: int, public_key: bytes) -> None:
+        """Set `public_key` for the specified `node_id`."""
+        with self.lock:
+            if node_id not in self.node_ids:
+                raise ValueError(f"Node {node_id} not found")
+
+            if public_key in self.public_key_to_node_id:
+                raise ValueError("Public key already in use")
+
+            self.public_key_to_node_id[public_key] = node_id
+            self.node_id_to_public_key[node_id] = public_key
+
+    def get_node_public_key(self, node_id: int) -> Optional[bytes]:
+        """Get `public_key` for the specified `node_id`."""
+        with self.lock:
+            if node_id not in self.node_ids:
+                raise ValueError(f"Node {node_id} not found")
+
+            return self.node_id_to_public_key.get(node_id)
+
     def get_node_id(self, node_public_key: bytes) -> Optional[int]:
         """Retrieve stored `node_id` filtered by `node_public_keys`."""
         return self.public_key_to_node_id.get(node_public_key)
@@ -393,7 +410,8 @@ class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
         fab_version: Optional[str],
         fab_hash: Optional[str],
         override_config: UserConfig,
-        federation_options: ConfigsRecord,
+        federation_options: ConfigRecord,
+        flwr_aid: Optional[str],
     ) -> int:
         """Create a new run for the specified `fab_hash`."""
         # Sample a random int64 as run_id
@@ -417,9 +435,13 @@ class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
                             sub_status="",
                             details="",
                         ),
+                        flwr_aid=flwr_aid if flwr_aid else "",
                     ),
                 )
                 self.run_ids[run_id] = run_record
+                # Add run_id to the flwr_aid_to_run_ids mapping if flwr_aid is provided
+                if flwr_aid:
+                    self.flwr_aid_to_run_ids[flwr_aid].add(run_id)
 
                 # Record federation options. Leave empty if not passed
                 self.federation_options[run_id] = federation_options
@@ -427,29 +449,15 @@ class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
         log(ERROR, "Unexpected run creation failure.")
         return 0
 
-    def store_server_private_public_key(
-        self, private_key: bytes, public_key: bytes
-    ) -> None:
-        """Store `server_private_key` and `server_public_key` in the link state."""
+    def clear_supernode_auth_keys(self) -> None:
+        """Clear stored `node_public_keys` in the link state if any."""
         with self.lock:
-            if self.server_private_key is None and self.server_public_key is None:
-                self.server_private_key = private_key
-                self.server_public_key = public_key
-            else:
-                raise RuntimeError("Server private and public key already set")
-
-    def get_server_private_key(self) -> Optional[bytes]:
-        """Retrieve `server_private_key` in urlsafe bytes."""
-        return self.server_private_key
-
-    def get_server_public_key(self) -> Optional[bytes]:
-        """Retrieve `server_public_key` in urlsafe bytes."""
-        return self.server_public_key
+            self.node_public_keys.clear()
 
     def store_node_public_keys(self, public_keys: set[bytes]) -> None:
         """Store a set of `node_public_keys` in the link state."""
         with self.lock:
-            self.node_public_keys = public_keys
+            self.node_public_keys.update(public_keys)
 
     def store_node_public_key(self, public_key: bytes) -> None:
         """Store a `node_public_key` in the link state."""
@@ -458,15 +466,45 @@ class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
 
     def get_node_public_keys(self) -> set[bytes]:
         """Retrieve all currently stored `node_public_keys` as a set."""
-        return self.node_public_keys
-
-    def get_run_ids(self) -> set[int]:
-        """Retrieve all run IDs."""
         with self.lock:
+            return self.node_public_keys.copy()
+
+    def get_run_ids(self, flwr_aid: Optional[str]) -> set[int]:
+        """Retrieve all run IDs if `flwr_aid` is not specified.
+
+        Otherwise, retrieve all run IDs for the specified `flwr_aid`.
+        """
+        with self.lock:
+            if flwr_aid is not None:
+                # Return run IDs for the specified flwr_aid
+                return set(self.flwr_aid_to_run_ids.get(flwr_aid, ()))
             return set(self.run_ids.keys())
+
+    def _check_and_tag_inactive_run(self, run_ids: set[int]) -> None:
+        """Check if any runs are no longer active.
+
+        Marks runs with status 'starting' or 'running' as failed
+        if they have not sent a heartbeat before `active_until`.
+        """
+        current = now()
+        for record in (self.run_ids.get(run_id) for run_id in run_ids):
+            if record is None:
+                continue
+            with record.lock:
+                if record.run.status.status in (Status.STARTING, Status.RUNNING):
+                    if record.active_until < current.timestamp():
+                        record.run.status = RunStatus(
+                            status=Status.FINISHED,
+                            sub_status=SubStatus.FAILED,
+                            details=RUN_FAILURE_DETAILS_NO_HEARTBEAT,
+                        )
+                        record.run.finished_at = now().isoformat()
 
     def get_run(self, run_id: int) -> Optional[Run]:
         """Retrieve information about the run with the specified `run_id`."""
+        # Check if runs are still active
+        self._check_and_tag_inactive_run(run_ids={run_id})
+
         with self.lock:
             if run_id not in self.run_ids:
                 log(ERROR, "`run_id` is invalid")
@@ -475,6 +513,9 @@ class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
 
     def get_run_status(self, run_ids: set[int]) -> dict[int, RunStatus]:
         """Retrieve the statuses for the specified runs."""
+        # Check if runs are still active
+        self._check_and_tag_inactive_run(run_ids=run_ids)
+
         with self.lock:
             return {
                 run_id: self.run_ids[run_id].run.status
@@ -484,12 +525,16 @@ class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
 
     def update_run_status(self, run_id: int, new_status: RunStatus) -> bool:
         """Update the status of the run with the specified `run_id`."""
+        # Check if runs are still active
+        self._check_and_tag_inactive_run(run_ids={run_id})
+
         with self.lock:
             # Check if the run_id exists
             if run_id not in self.run_ids:
                 log(ERROR, "`run_id` is invalid")
                 return False
 
+        with self.run_ids[run_id].lock:
             # Check if the status transition is valid
             current_status = self.run_ids[run_id].run.status
             if not is_valid_transition(current_status, new_status):
@@ -511,14 +556,23 @@ class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
                 )
                 return False
 
-            # Update the status
+            # Initialize heartbeat_interval and active_until
+            # when switching to starting or running
+            current = now()
             run_record = self.run_ids[run_id]
+            if new_status.status in (Status.STARTING, Status.RUNNING):
+                run_record.heartbeat_interval = HEARTBEAT_MAX_INTERVAL
+                run_record.active_until = (
+                    current.timestamp() + run_record.heartbeat_interval
+                )
+
+            # Update the run status
             if new_status.status == Status.STARTING:
-                run_record.run.starting_at = now().isoformat()
+                run_record.run.starting_at = current.isoformat()
             elif new_status.status == Status.RUNNING:
-                run_record.run.running_at = now().isoformat()
+                run_record.run.running_at = current.isoformat()
             elif new_status.status == Status.FINISHED:
-                run_record.run.finished_at = now().isoformat()
+                run_record.run.finished_at = current.isoformat()
             run_record.run.status = new_status
             return True
 
@@ -535,7 +589,7 @@ class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
 
         return pending_run_id
 
-    def get_federation_options(self, run_id: int) -> Optional[ConfigsRecord]:
+    def get_federation_options(self, run_id: int) -> Optional[ConfigRecord]:
         """Retrieve the federation options for the specified `run_id`."""
         with self.lock:
             if run_id not in self.run_ids:
@@ -543,13 +597,61 @@ class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
                 return None
             return self.federation_options[run_id]
 
-    def acknowledge_ping(self, node_id: int, ping_interval: float) -> bool:
-        """Acknowledge a ping received from a node, serving as a heartbeat."""
+    def acknowledge_node_heartbeat(
+        self, node_id: int, heartbeat_interval: float
+    ) -> bool:
+        """Acknowledge a heartbeat received from a node, serving as a heartbeat.
+
+        A node is considered online as long as it sends heartbeats within
+        the tolerated interval: HEARTBEAT_PATIENCE × heartbeat_interval.
+        HEARTBEAT_PATIENCE = N allows for N-1 missed heartbeat before
+        the node is marked as offline.
+        """
         with self.lock:
             if node_id in self.node_ids:
-                self.node_ids[node_id] = (time.time() + ping_interval, ping_interval)
+                self.node_ids[node_id] = (
+                    time.time() + HEARTBEAT_PATIENCE * heartbeat_interval,
+                    heartbeat_interval,
+                )
                 return True
         return False
+
+    def acknowledge_app_heartbeat(self, run_id: int, heartbeat_interval: float) -> bool:
+        """Acknowledge a heartbeat received from a ServerApp for a given run.
+
+        A run with status `"running"` is considered alive as long as it sends heartbeats
+        within the tolerated interval: HEARTBEAT_PATIENCE × heartbeat_interval.
+        HEARTBEAT_PATIENCE = N allows for N-1 missed heartbeat before the run is
+        marked as `"completed:failed"`.
+        """
+        with self.lock:
+            # Search for the run
+            record = self.run_ids.get(run_id)
+
+            # Check if the run_id exists
+            if record is None:
+                log(ERROR, "`run_id` is invalid")
+                return False
+
+        with record.lock:
+            # Check if runs are still active
+            self._check_and_tag_inactive_run(run_ids={run_id})
+
+            # Check if the run is of status "running"/"starting"
+            current_status = record.run.status
+            if current_status.status not in (Status.RUNNING, Status.STARTING):
+                log(
+                    ERROR,
+                    'Cannot acknowledge heartbeat for run with status "%s"',
+                    current_status.status,
+                )
+                return False
+
+            # Update the `active_until` and `heartbeat_interval` for the given run
+            current = now().timestamp()
+            record.active_until = current + HEARTBEAT_PATIENCE * heartbeat_interval
+            record.heartbeat_interval = heartbeat_interval
+            return True
 
     def get_serverapp_context(self, run_id: int) -> Optional[Context]:
         """Get the context for the specified `run_id`."""
@@ -583,3 +685,30 @@ class InMemoryLinkState(LinkState):  # pylint: disable=R0902,R0904
             index = bisect_right(run.logs, (after_timestamp, ""))
             latest_timestamp = run.logs[-1][0] if index < len(run.logs) else 0.0
             return "".join(log for _, log in run.logs[index:]), latest_timestamp
+
+    def create_token(self, run_id: int) -> Optional[str]:
+        """Create a token for the given run ID."""
+        token = secrets.token_hex(FLWR_APP_TOKEN_LENGTH)  # Generate a random token
+        with self.lock_token_store:
+            if run_id in self.token_store:
+                return None  # Token already created for this run ID
+            self.token_store[run_id] = token
+            self.token_to_run_id[token] = run_id
+        return token
+
+    def verify_token(self, run_id: int, token: str) -> bool:
+        """Verify a token for the given run ID."""
+        with self.lock_token_store:
+            return self.token_store.get(run_id) == token
+
+    def delete_token(self, run_id: int) -> None:
+        """Delete the token for the given run ID."""
+        with self.lock_token_store:
+            token = self.token_store.pop(run_id, None)
+            if token is not None:
+                self.token_to_run_id.pop(token, None)
+
+    def get_run_id_by_token(self, token: str) -> Optional[int]:
+        """Get the run ID associated with a given token."""
+        with self.lock_token_store:
+            return self.token_to_run_id.get(token)

@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,24 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ==============================================================================
-"""Utility functions for the `start_driver`."""
+"""Utility functions for the `start_grid`."""
 
 
 import threading
+from typing import Any, Callable
+
+from flwr.common.typing import RunNotRunningException
 
 from ..client_manager import ClientManager
-from ..compat.driver_client_proxy import DriverClientProxy
-from ..driver import Driver
+from ..grid import Grid
+from .grid_client_proxy import GridClientProxy
 
 
 def start_update_client_manager_thread(
-    driver: Driver,
+    grid: Grid,
     client_manager: ClientManager,
-) -> tuple[threading.Thread, threading.Event]:
+) -> tuple[threading.Thread, threading.Event, threading.Event]:
     """Periodically update the nodes list in the client manager in a thread.
 
-    This function starts a thread that periodically uses the associated driver to
-    get all node_ids. Each node_id is then converted into a `DriverClientProxy`
+    This function starts a thread that periodically uses the associated grid to
+    get all node_ids. Each node_id is then converted into a `GridClientProxy`
     instance and stored in the `registered_nodes` dictionary with node_id as key.
 
     New nodes will be added to the ClientManager via `client_manager.register()`,
@@ -38,8 +41,8 @@ def start_update_client_manager_thread(
 
     Parameters
     ----------
-    driver : Driver
-        The Driver object to use.
+    grid : Grid
+        The Grid object to use.
     client_manager : ClientManager
         The ClientManager object to be updated.
 
@@ -49,54 +52,86 @@ def start_update_client_manager_thread(
         A thread that updates the ClientManager and handles the stop event.
     threading.Event
         An event that, when set, signals the thread to stop.
+    threading.Event
+        An event that, when set, signals the node registration done.
     """
     f_stop = threading.Event()
+    c_done = threading.Event()
     thread = threading.Thread(
         target=_update_client_manager,
         args=(
-            driver,
+            grid,
             client_manager,
             f_stop,
+            c_done,
         ),
         daemon=True,
     )
     thread.start()
 
-    return thread, f_stop
+    return thread, f_stop, c_done
 
 
 def _update_client_manager(
-    driver: Driver,
+    grid: Grid,
     client_manager: ClientManager,
     f_stop: threading.Event,
+    c_done: threading.Event,
 ) -> None:
     """Update the nodes list in the client manager."""
-    # Loop until the driver is disconnected
-    registered_nodes: dict[int, DriverClientProxy] = {}
+    # Loop until the grid is disconnected
+    registered_nodes: dict[int, GridClientProxy] = {}
+    lock = threading.RLock()
+
+    def update_registered_nodes() -> None:
+        with lock:
+            all_node_ids = set(grid.get_node_ids())
+            dead_nodes = set(registered_nodes).difference(all_node_ids)
+            new_nodes = all_node_ids.difference(registered_nodes)
+
+            # Unregister dead nodes
+            for node_id in dead_nodes:
+                client_proxy = registered_nodes[node_id]
+                client_manager.unregister(client_proxy)
+                del registered_nodes[node_id]
+
+            # Register new nodes
+            for node_id in new_nodes:
+                client_proxy = GridClientProxy(
+                    node_id=node_id,
+                    grid=grid,
+                    run_id=grid.run.run_id,
+                )
+                if client_manager.register(client_proxy):
+                    registered_nodes[node_id] = client_proxy
+                else:
+                    raise RuntimeError("Could not register node.")
+
+    # Get the wrapped method of ClientManager instance
+    def get_wrapped_method(method_name: str) -> Callable[..., Any]:
+        original_method = getattr(client_manager, method_name)
+
+        def wrapped_method(*args: Any, **kwargs: Any) -> Any:
+            # Update registered nodes before calling the original method
+            update_registered_nodes()
+            return original_method(*args, **kwargs)
+
+        return wrapped_method
+
+    # Wrap the ClientManager
+    for method_name in ["num_available", "all", "sample"]:
+        setattr(client_manager, method_name, get_wrapped_method(method_name))
+
+    c_done.set()
+
     while not f_stop.is_set():
-        all_node_ids = set(driver.get_node_ids())
-        dead_nodes = set(registered_nodes).difference(all_node_ids)
-        new_nodes = all_node_ids.difference(registered_nodes)
-
-        # Unregister dead nodes
-        for node_id in dead_nodes:
-            client_proxy = registered_nodes[node_id]
-            client_manager.unregister(client_proxy)
-            del registered_nodes[node_id]
-
-        # Register new nodes
-        for node_id in new_nodes:
-            client_proxy = DriverClientProxy(
-                node_id=node_id,
-                driver=driver,
-                anonymous=False,
-                run_id=driver.run.run_id,
-            )
-            if client_manager.register(client_proxy):
-                registered_nodes[node_id] = client_proxy
-            else:
-                raise RuntimeError("Could not register node.")
-
-        # Sleep for 3 seconds
+        # Sleep for 5 seconds
         if not f_stop.is_set():
-            f_stop.wait(3)
+            f_stop.wait(5)
+
+        try:
+            # Update registered nodes
+            update_registered_nodes()
+        except RunNotRunningException:
+            f_stop.set()
+            break

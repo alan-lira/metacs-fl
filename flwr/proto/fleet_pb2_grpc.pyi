@@ -5,6 +5,8 @@ isort:skip_file
 import abc
 import flwr.proto.fab_pb2
 import flwr.proto.fleet_pb2
+import flwr.proto.heartbeat_pb2
+import flwr.proto.message_pb2
 import flwr.proto.run_pb2
 import grpc
 
@@ -18,24 +20,24 @@ class FleetStub:
         flwr.proto.fleet_pb2.DeleteNodeRequest,
         flwr.proto.fleet_pb2.DeleteNodeResponse]
 
-    Ping: grpc.UnaryUnaryMultiCallable[
-        flwr.proto.fleet_pb2.PingRequest,
-        flwr.proto.fleet_pb2.PingResponse]
+    SendNodeHeartbeat: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.heartbeat_pb2.SendNodeHeartbeatRequest,
+        flwr.proto.heartbeat_pb2.SendNodeHeartbeatResponse]
 
-    PullTaskIns: grpc.UnaryUnaryMultiCallable[
-        flwr.proto.fleet_pb2.PullTaskInsRequest,
-        flwr.proto.fleet_pb2.PullTaskInsResponse]
-    """Retrieve one or more tasks, if possible
+    PullMessages: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.fleet_pb2.PullMessagesRequest,
+        flwr.proto.fleet_pb2.PullMessagesResponse]
+    """Retrieve one or more messages, if possible
 
-    HTTP API path: /api/v1/fleet/pull-task-ins
+    HTTP API path: /api/v1/fleet/pull-messages
     """
 
-    PushTaskRes: grpc.UnaryUnaryMultiCallable[
-        flwr.proto.fleet_pb2.PushTaskResRequest,
-        flwr.proto.fleet_pb2.PushTaskResResponse]
-    """Complete one or more tasks, if possible
+    PushMessages: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.fleet_pb2.PushMessagesRequest,
+        flwr.proto.fleet_pb2.PushMessagesResponse]
+    """Complete one or more messages, if possible
 
-    HTTP API path: /api/v1/fleet/push-task-res
+    HTTP API path: /api/v1/fleet/push-messages
     """
 
     GetRun: grpc.UnaryUnaryMultiCallable[
@@ -46,6 +48,21 @@ class FleetStub:
         flwr.proto.fab_pb2.GetFabRequest,
         flwr.proto.fab_pb2.GetFabResponse]
     """Get FAB"""
+
+    PushObject: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.message_pb2.PushObjectRequest,
+        flwr.proto.message_pb2.PushObjectResponse]
+    """Push Object"""
+
+    PullObject: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.message_pb2.PullObjectRequest,
+        flwr.proto.message_pb2.PullObjectResponse]
+    """Pull Object"""
+
+    ConfirmMessageReceived: grpc.UnaryUnaryMultiCallable[
+        flwr.proto.message_pb2.ConfirmMessageReceivedRequest,
+        flwr.proto.message_pb2.ConfirmMessageReceivedResponse]
+    """Confirm Message Received"""
 
 
 class FleetServicer(metaclass=abc.ABCMeta):
@@ -62,30 +79,30 @@ class FleetServicer(metaclass=abc.ABCMeta):
     ) -> flwr.proto.fleet_pb2.DeleteNodeResponse: ...
 
     @abc.abstractmethod
-    def Ping(self,
-        request: flwr.proto.fleet_pb2.PingRequest,
+    def SendNodeHeartbeat(self,
+        request: flwr.proto.heartbeat_pb2.SendNodeHeartbeatRequest,
         context: grpc.ServicerContext,
-    ) -> flwr.proto.fleet_pb2.PingResponse: ...
+    ) -> flwr.proto.heartbeat_pb2.SendNodeHeartbeatResponse: ...
 
     @abc.abstractmethod
-    def PullTaskIns(self,
-        request: flwr.proto.fleet_pb2.PullTaskInsRequest,
+    def PullMessages(self,
+        request: flwr.proto.fleet_pb2.PullMessagesRequest,
         context: grpc.ServicerContext,
-    ) -> flwr.proto.fleet_pb2.PullTaskInsResponse:
-        """Retrieve one or more tasks, if possible
+    ) -> flwr.proto.fleet_pb2.PullMessagesResponse:
+        """Retrieve one or more messages, if possible
 
-        HTTP API path: /api/v1/fleet/pull-task-ins
+        HTTP API path: /api/v1/fleet/pull-messages
         """
         pass
 
     @abc.abstractmethod
-    def PushTaskRes(self,
-        request: flwr.proto.fleet_pb2.PushTaskResRequest,
+    def PushMessages(self,
+        request: flwr.proto.fleet_pb2.PushMessagesRequest,
         context: grpc.ServicerContext,
-    ) -> flwr.proto.fleet_pb2.PushTaskResResponse:
-        """Complete one or more tasks, if possible
+    ) -> flwr.proto.fleet_pb2.PushMessagesResponse:
+        """Complete one or more messages, if possible
 
-        HTTP API path: /api/v1/fleet/push-task-res
+        HTTP API path: /api/v1/fleet/push-messages
         """
         pass
 
@@ -101,6 +118,30 @@ class FleetServicer(metaclass=abc.ABCMeta):
         context: grpc.ServicerContext,
     ) -> flwr.proto.fab_pb2.GetFabResponse:
         """Get FAB"""
+        pass
+
+    @abc.abstractmethod
+    def PushObject(self,
+        request: flwr.proto.message_pb2.PushObjectRequest,
+        context: grpc.ServicerContext,
+    ) -> flwr.proto.message_pb2.PushObjectResponse:
+        """Push Object"""
+        pass
+
+    @abc.abstractmethod
+    def PullObject(self,
+        request: flwr.proto.message_pb2.PullObjectRequest,
+        context: grpc.ServicerContext,
+    ) -> flwr.proto.message_pb2.PullObjectResponse:
+        """Pull Object"""
+        pass
+
+    @abc.abstractmethod
+    def ConfirmMessageReceived(self,
+        request: flwr.proto.message_pb2.ConfirmMessageReceivedRequest,
+        context: grpc.ServicerContext,
+    ) -> flwr.proto.message_pb2.ConfirmMessageReceivedResponse:
+        """Confirm Message Received"""
         pass
 
 

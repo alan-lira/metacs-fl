@@ -1,4 +1,4 @@
-# Copyright 2024 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,7 +39,8 @@ def get_norm(input_arrays: NDArrays) -> float:
 def add_gaussian_noise_inplace(input_arrays: NDArrays, std_dev: float) -> None:
     """Add Gaussian noise to each element of the input arrays."""
     for array in input_arrays:
-        array += np.random.normal(0, std_dev, array.shape)
+        noise = np.random.normal(0, std_dev, array.shape).astype(array.dtype)
+        array += noise
 
 
 def clip_inputs_inplace(input_arrays: NDArrays, clipping_norm: float) -> None:

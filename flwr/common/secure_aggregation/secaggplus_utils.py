@@ -1,4 +1,4 @@
-# Copyright 2023 Flower Labs GmbH. All Rights Reserved.
+# Copyright 2025 Flower Labs GmbH. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -93,8 +93,8 @@ def pseudo_rand_gen(
     output = []
     for dimension in dimensions_list:
         if len(dimension) == 0:
-            arr = np.array(gen.randint(0, num_range - 1), dtype=int)
+            arr = np.array(gen.randint(0, num_range - 1), dtype=np.int64)
         else:
-            arr = gen.randint(0, num_range - 1, dimension)
+            arr = gen.randint(0, num_range - 1, dimension, dtype=np.int64)
         output.append(arr)
     return output
