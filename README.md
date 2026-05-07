@@ -17,8 +17,31 @@ MetaCS-FL supports:
 
 ---
 
+## Reproducing published experiments
+
+This repository may evolve over time as the project receives improvements, fixes, and new features. The `main` branch is stable, but it will continue to evolve after each publication. Therefore, for exact reproducibility of published experiments, use the frozen release tag associated with the corresponding publication instead of relying on the default branch.
+
+### FGCS 2026 experiments
+
+To reproduce the experiments reported in the FGCS 2026 paper, use the frozen release tag `v0.2.0`:
+
+```bash
+git clone https://github.com/alan-lira/metacs-fl.git
+cd metacs-fl
+git checkout v0.2.0
+```
+
+When using the remote/Grid'5000 setup script, pass:
+
+```bash
+--branch v0.2.0
+```
+
+---
+
 ## Table of contents
 
+- [Reproducing the FGCS 2026 experiments](#reproducing-the-fgcs-2026-experiments)
 - [Recommended execution order](#recommended-execution-order)
 - [Requirements](#requirements)
   - [Python environment](#python-environment)
@@ -264,7 +287,7 @@ bash scripts/setup/setup_remote_metacsfl_node.sh \
   --remote-project-dir /root/metacs-fl \
   --repo-auth token \
   --prompt-github-token true \
-  --branch main \
+  --branch v0.2.0 \
   --force-reclone true \
   --install-powerjoular true \
   --install-metacsfl-package true \
@@ -278,22 +301,7 @@ bash scripts/setup/setup_remote_metacsfl_node.sh \
   --nodes-file scripts/nodes.g5k.txt \
   --remote-project-dir /root/metacs-fl \
   --repo-auth none \
-  --branch main \
-  --max-parallel-installs 8
-```
-
-For remote or Grid'5000 experiments, use the setup script instead of manually installing dependencies on every node:
-
-```bash
-bash scripts/setup/setup_remote_metacsfl_node.sh \
-  --nodes-file scripts/nodes.g5k.txt \
-  --remote-project-dir /root/metacs-fl \
-  --repo-auth token \
-  --prompt-github-token true \
-  --branch main \
-  --force-reclone true \
-  --install-powerjoular true \
-  --install-metacsfl-package true \
+  --branch v0.2.0 \
   --max-parallel-installs 8
 ```
 
@@ -987,7 +995,7 @@ bash scripts/setup/setup_remote_metacsfl_node.sh \
   --remote-project-dir /root/metacs-fl \
   --repo-auth token \
   --prompt-github-token true \
-  --branch main \
+  --branch v0.2.0 \
   --force-reclone true \
   --max-parallel-installs 8
 ```
@@ -1091,8 +1099,6 @@ The results folder was compressed as a `.tar.xz` archive using `tar` and `xz` wi
 ```bash
 tar -c fgcs_2026_results | xz -T0 -v > fgcs_2026_results.tar.xz
 ```
-
-
 
 The downloadable compressed archive has approximately **435.2 MiB**, while the uncompressed folder has approximately **4416.2 MiB**.
 
