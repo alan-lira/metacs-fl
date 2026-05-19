@@ -454,6 +454,7 @@ These are passed to `run_one_distributed_experiment.sh` and then to the setup sc
 
 | Parameter | Description | Default |
 |---|---|---|
+| `--output-dir DIR` | Base directory for all local campaign artifacts. If provided, the default roots become `DIR/campaign_runs`, `DIR/distributed_launch_logs`, `DIR/gathered_results`, `DIR/merged_results`, `DIR/server_only_logs`, and `DIR/server_only_results`. Explicit root arguments below override this default. | Not set |
 | `--campaign-root DIR` | Root for campaign state and logs. | `campaign_runs` |
 | `--distributed-log-root DIR` | Root for distributed launch logs. | `distributed_launch_logs` |
 | `--gather-root DIR` | Root for gathered distributed outputs. | `gathered_results` |
@@ -471,10 +472,10 @@ For campaign id:
 fgcs_2026_experiments_001
 ```
 
-the campaign runner creates:
+the campaign runner creates the campaign directory under `<campaign-root>`:
 
 ```txt
-campaign_runs/fgcs_2026_experiments_001/
+<campaign-root>/fgcs_2026_experiments_001/
 ├── campaign_manifest.csv
 ├── campaign_manifest.rows.usv
 ├── campaign_manifest.summary.json
@@ -496,19 +497,41 @@ campaign_runs/fgcs_2026_experiments_001/
 Distributed experiments also produce:
 
 ```txt
-distributed_launch_logs/<campaign_id>__<experiment_id>/
-gathered_results/<campaign_id>__<experiment_id>/
-merged_results/<campaign_id>__<experiment_id>/
+<distributed-log-root>/<campaign_id>__<experiment_id>/
+<gather-root>/<campaign_id>__<experiment_id>/
+<merge-root>/<campaign_id>__<experiment_id>/
 ```
 
 Server-only experiments produce:
 
 ```txt
-server_only_logs/<campaign_id>__<experiment_id>/
-server_only_results/<campaign_id>__<experiment_id>/
+<server-only-log-root>/<campaign_id>__<experiment_id>/
+<server-only-output-root>/<campaign_id>__<experiment_id>/
 ```
 
 if `remote_output_dir` is provided in the manifest.
+
+By default, these roots are:
+
+```txt
+campaign_runs
+distributed_launch_logs
+gathered_results
+merged_results
+server_only_logs
+server_only_results
+```
+
+If `--output-dir DIR` is provided and no explicit root overrides are provided, the paths become:
+
+```txt
+DIR/campaign_runs/<campaign_id>/
+DIR/distributed_launch_logs/<campaign_id>__<experiment_id>/
+DIR/gathered_results/<campaign_id>__<experiment_id>/
+DIR/merged_results/<campaign_id>__<experiment_id>/
+DIR/server_only_logs/<campaign_id>__<experiment_id>/
+DIR/server_only_results/<campaign_id>__<experiment_id>/
+```
 
 ---
 
@@ -527,9 +550,9 @@ bash scripts/execution/run_many_distributed_experiments.sh \
 This creates:
 
 ```txt
-campaign_runs/fgcs_2026_dry_run_001/campaign_manifest.csv
-campaign_runs/fgcs_2026_dry_run_001/campaign_manifest.rows.usv
-campaign_runs/fgcs_2026_dry_run_001/campaign_manifest.summary.json
+<campaign-root>/fgcs_2026_dry_run_001/campaign_manifest.csv
+<campaign-root>/fgcs_2026_dry_run_001/campaign_manifest.rows.usv
+<campaign-root>/fgcs_2026_dry_run_001/campaign_manifest.summary.json
 ```
 
 and exits without running experiments.
@@ -673,7 +696,36 @@ bash scripts/execution/run_many_distributed_experiments.sh \
 
 ---
 
-### 11.3 Run full campaign with setup enabled
+### 11.3 Run full campaign using a custom local output directory
+
+Use `--output-dir` when you want all campaign state, logs, gathered results, merged results, and server-only outputs under the same local base directory.
+
+```bash
+bash scripts/execution/run_many_distributed_experiments.sh \
+  --pack fgcs_2026_experiments \
+  --campaign-id fgcs_2026_experiments_001 \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --remote-venv-activate /root/metacs-fl/.venv/bin/activate \
+  --output-dir /mnt/d/results \
+  --install false \
+  --max-parallel-experiments 1 \
+  --max-parallel-remote-ops 8 \
+  --repetitions 1
+```
+
+This creates paths such as:
+
+```txt
+/mnt/d/results/campaign_runs/fgcs_2026_experiments_001/
+/mnt/d/results/distributed_launch_logs/fgcs_2026_experiments_001__<experiment_id>/
+/mnt/d/results/gathered_results/fgcs_2026_experiments_001__<experiment_id>/
+/mnt/d/results/merged_results/fgcs_2026_experiments_001__<experiment_id>/
+```
+
+---
+
+### 11.4 Run full campaign with setup enabled
 
 Use this for a fresh Grid'5000 allocation:
 
@@ -697,7 +749,7 @@ bash scripts/execution/run_many_distributed_experiments.sh \
 
 ---
 
-### 11.4 Run using an existing manifest
+### 11.5 Run using an existing manifest
 
 ```bash
 bash scripts/execution/run_many_distributed_experiments.sh \
@@ -713,7 +765,7 @@ bash scripts/execution/run_many_distributed_experiments.sh \
 
 ---
 
-### 11.5 Resume a campaign after interruption
+### 11.6 Resume a campaign after interruption
 
 Rerun the exact same command with the same campaign id:
 
@@ -733,7 +785,7 @@ Completed experiments will be skipped. Failed or interrupted experiments will be
 
 ---
 
-### 11.6 Force rerun everything
+### 11.7 Force rerun everything
 
 ```bash
 bash scripts/execution/run_many_distributed_experiments.sh \
@@ -746,7 +798,7 @@ bash scripts/execution/run_many_distributed_experiments.sh \
 
 ---
 
-### 11.7 Do not retry failed experiments
+### 11.8 Do not retry failed experiments
 
 ```bash
 bash scripts/execution/run_many_distributed_experiments.sh \
@@ -775,8 +827,8 @@ bash scripts/execution/run_many_distributed_experiments.sh \
 Inspect:
 
 ```bash
-cat campaign_runs/fgcs_2026_dry_run_001/campaign_manifest.csv
-cat campaign_runs/fgcs_2026_dry_run_001/campaign_manifest.summary.json
+cat <campaign-root>/fgcs_2026_dry_run_001/campaign_manifest.csv
+cat <campaign-root>/fgcs_2026_dry_run_001/campaign_manifest.summary.json
 ```
 
 ### 12.2 Then run the real campaign
@@ -815,39 +867,39 @@ bash scripts/execution/run_many_distributed_experiments.sh \
 Campaign-level logs:
 
 ```bash
-tail -f campaign_runs/<campaign_id>/logs/*.log
+tail -f <campaign-root>/<campaign_id>/logs/*.log
 ```
 
 Distributed launch logs:
 
 ```bash
-tail -f distributed_launch_logs/<campaign_id>__<experiment_id>/*.out
-tail -f distributed_launch_logs/<campaign_id>__<experiment_id>/*.err
+tail -f <distributed-log-root>/<campaign_id>__<experiment_id>/*.out
+tail -f <distributed-log-root>/<campaign_id>__<experiment_id>/*.err
 ```
 
 Server-only logs:
 
 ```bash
-tail -f server_only_logs/<campaign_id>__<experiment_id>/server_only.out
-tail -f server_only_logs/<campaign_id>__<experiment_id>/server_only.err
+tail -f <server-only-log-root>/<campaign_id>__<experiment_id>/server_only.out
+tail -f <server-only-log-root>/<campaign_id>__<experiment_id>/server_only.err
 ```
 
 Summary:
 
 ```bash
-cat campaign_runs/<campaign_id>/summaries/campaign_summary.csv
+cat <campaign-root>/<campaign_id>/summaries/campaign_summary.csv
 ```
 
 Completed markers:
 
 ```bash
-ls campaign_runs/<campaign_id>/state/completed/
+ls <campaign-root>/<campaign_id>/state/completed/
 ```
 
 Failed markers:
 
 ```bash
-ls campaign_runs/<campaign_id>/state/failed/
+ls <campaign-root>/<campaign_id>/state/failed/
 ```
 
 ---

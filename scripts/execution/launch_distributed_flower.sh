@@ -94,6 +94,13 @@ Options:
       Python executable to use on the machine running the FL process.
       Default: python3
 
+  --output-dir DIR
+      Base directory for local launcher artifacts.
+      If provided, default roots become:
+        DIR/distributed_launch_logs
+        DIR/gathered_results
+      Explicit --local-log-root or --local-gather-root override this default.
+
   --local-log-root DIR
       Root directory for local logs.
       Default: distributed_launch_logs
@@ -510,6 +517,9 @@ LOCAL_LOG_ROOT="distributed_launch_logs"
 LOCAL_GATHER_ROOT="gathered_results"
 
 GATHER_OUTPUTS="false"
+OUTPUT_DIR=""
+LOCAL_LOG_ROOT_EXPLICIT="false"
+LOCAL_GATHER_ROOT_EXPLICIT="false"
 
 MAX_PARALLEL_REMOTE_OPS="8"
 SSH_OPTIONS=""
@@ -625,15 +635,23 @@ while [[ "$#" -gt 0 ]]; do
       shift 2
       ;;
 
+    --output-dir)
+      require_value "$1" "${2:-}"
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+
     --local-log-root)
       require_value "$1" "${2:-}"
       LOCAL_LOG_ROOT="$2"
+      LOCAL_LOG_ROOT_EXPLICIT="true"
       shift 2
       ;;
 
     --local-gather-root)
       require_value "$1" "${2:-}"
       LOCAL_GATHER_ROOT="$2"
+      LOCAL_GATHER_ROOT_EXPLICIT="true"
       shift 2
       ;;
 
@@ -881,6 +899,16 @@ fi
 
 if [[ -z "${RUN_ID}" ]]; then
   RUN_ID="$(date +%Y%m%d_%H%M%S)"
+fi
+
+if [[ -n "${OUTPUT_DIR}" ]]; then
+  if [[ "${LOCAL_LOG_ROOT_EXPLICIT}" != "true" ]]; then
+    LOCAL_LOG_ROOT="${OUTPUT_DIR}/distributed_launch_logs"
+  fi
+
+  if [[ "${LOCAL_GATHER_ROOT_EXPLICIT}" != "true" ]]; then
+    LOCAL_GATHER_ROOT="${OUTPUT_DIR}/gathered_results"
+  fi
 fi
 
 LOCAL_LOG_DIR="${LOCAL_LOG_ROOT}/${RUN_ID}"

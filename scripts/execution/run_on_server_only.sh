@@ -39,6 +39,13 @@ Options:
       Run identifier.
       Default: current timestamp.
 
+  --output-dir DIR
+      Base directory for local server-only artifacts.
+      If provided, default roots become:
+        DIR/server_only_logs
+        DIR/server_only_results
+      Explicit --local-log-root or --local-output-root override this default.
+
   --local-log-root DIR
       Local log root.
       Default: server_only_logs
@@ -131,6 +138,9 @@ RUN_ID=""
 LOCAL_LOG_ROOT="server_only_logs"
 REMOTE_OUTPUT_DIR=""
 LOCAL_OUTPUT_ROOT="server_only_results"
+OUTPUT_DIR=""
+LOCAL_LOG_ROOT_EXPLICIT="false"
+LOCAL_OUTPUT_ROOT_EXPLICIT="false"
 CLEAN_LOCAL_OUTPUT="true"
 
 SSH_OPTIONS=""
@@ -186,9 +196,16 @@ while [[ "$#" -gt 0 ]]; do
       shift 2
       ;;
 
+    --output-dir)
+      require_value "$1" "${2:-}"
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+
     --local-log-root)
       require_value "$1" "${2:-}"
       LOCAL_LOG_ROOT="$2"
+      LOCAL_LOG_ROOT_EXPLICIT="true"
       shift 2
       ;;
 
@@ -201,6 +218,7 @@ while [[ "$#" -gt 0 ]]; do
     --local-output-root)
       require_value "$1" "${2:-}"
       LOCAL_OUTPUT_ROOT="$2"
+      LOCAL_OUTPUT_ROOT_EXPLICIT="true"
       shift 2
       ;;
 
@@ -334,6 +352,18 @@ fi
 
 if [[ "${#EXTRA_ARGS[@]}" -gt 0 ]]; then
   PY_ARGS+=("${EXTRA_ARGS[@]}")
+fi
+
+if [[ -n "${OUTPUT_DIR}" ]]; then
+  OUTPUT_DIR="${OUTPUT_DIR%/}"
+
+  if [[ "${LOCAL_LOG_ROOT_EXPLICIT}" != "true" ]]; then
+    LOCAL_LOG_ROOT="${OUTPUT_DIR}/server_only_logs"
+  fi
+
+  if [[ "${LOCAL_OUTPUT_ROOT_EXPLICIT}" != "true" ]]; then
+    LOCAL_OUTPUT_ROOT="${OUTPUT_DIR}/server_only_results"
+  fi
 fi
 
 LOCAL_LOG_DIR="${LOCAL_LOG_ROOT}/${RUN_ID}"

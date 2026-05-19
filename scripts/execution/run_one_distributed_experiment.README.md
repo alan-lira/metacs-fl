@@ -30,13 +30,7 @@ All examples below assume commands are executed from the project root folder.
 
 ## 1. Script location
 
-Recommended location:
-
-```txt
-scripts/execution/run_one_distributed_experiment.sh
-```
-
-Alternative location, if you prefer to group it with execution scripts:
+Location:
 
 ```txt
 scripts/execution/run_one_distributed_experiment.sh
@@ -200,6 +194,7 @@ and, for custom experiments:
 | `--install true\|false` | Whether to run setup before launching. | `false` |
 | `--remote-project-dir DIR` | Project directory on target machines. | `/root/metacs-fl` |
 | `--remote-venv-activate FILE` | Virtual environment activation script on target machines. | `<remote-project-dir>/.venv/bin/activate` |
+| `--output-dir DIR` | Base directory for local pipeline artifacts. If provided, default roots become `DIR/setup_logs`, `DIR/distributed_launch_logs`, `DIR/gathered_results`, and `DIR/merged_results`. Explicit root-specific options override this default. | Not set |
 
 ---
 
@@ -246,7 +241,7 @@ When setup is enabled, the wrapper passes:
 to the setup script. Therefore, setup logs are written to:
 
 ```txt
-setup_logs/<run-id>_setup/
+<setup-log-root>/<run-id>_setup/
 ```
 
 ---
@@ -275,8 +270,8 @@ setup_logs/<run-id>_setup/
 The wrapper passes the same `--run-id` to the launch script. Therefore, launch outputs are written under:
 
 ```txt
-distributed_launch_logs/<run-id>/
-gathered_results/<run-id>/
+<local-log-root>/<run-id>/
+<local-gather-root>/<run-id>/
 ```
 
 ---
@@ -354,6 +349,14 @@ cifar10_iid_test_001
 the pipeline creates or uses:
 
 ```txt
+<local-log-root>/cifar10_iid_test_001/
+<local-gather-root>/cifar10_iid_test_001/
+<merge-output-root>/cifar10_iid_test_001/
+```
+
+By default, these are:
+
+```txt
 distributed_launch_logs/cifar10_iid_test_001/
 gathered_results/cifar10_iid_test_001/
 merged_results/cifar10_iid_test_001/
@@ -362,7 +365,16 @@ merged_results/cifar10_iid_test_001/
 If setup is enabled, it also creates:
 
 ```txt
-setup_logs/cifar10_iid_test_001_setup/
+<setup-log-root>/cifar10_iid_test_001_setup/
+```
+
+If `--output-dir DIR` is provided and no root-specific overrides are used, these become:
+
+```txt
+DIR/setup_logs/cifar10_iid_test_001_setup/
+DIR/distributed_launch_logs/cifar10_iid_test_001/
+DIR/gathered_results/cifar10_iid_test_001/
+DIR/merged_results/cifar10_iid_test_001/
 ```
 
 The final summary prints all relevant output paths.
@@ -699,6 +711,38 @@ This produces:
 logs/distributed/cifar10_custom_roots/
 results/gathered/cifar10_custom_roots/
 results/merged/cifar10_custom_roots/
+```
+
+---
+
+### 9.11 Custom base output directory
+
+Use `--output-dir` when you want all local pipeline artifacts under the same base directory:
+
+```bash
+bash scripts/execution/run_one_distributed_experiment.sh \
+  --install false \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --run-id cifar10_output_dir_test \
+  --output-dir /mnt/d/results \
+  --custom-flower-executor-cfg experiments/my_run/flower_executor.cfg \
+  --custom-flower-server-cfg experiments/my_run/flower_server.cfg \
+  --custom-flower-client-cfg experiments/my_run/flower_client.cfg
+```
+
+This produces:
+
+```txt
+/mnt/d/results/distributed_launch_logs/cifar10_output_dir_test/
+/mnt/d/results/gathered_results/cifar10_output_dir_test/
+/mnt/d/results/merged_results/cifar10_output_dir_test/
+```
+
+If setup is enabled, setup logs are written to:
+
+```txt
+/mnt/d/results/setup_logs/cifar10_output_dir_test_setup/
 ```
 
 ---

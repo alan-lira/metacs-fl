@@ -83,6 +83,11 @@ Options:
       Maximum number of target nodes installed in parallel.
       Default: 4
 
+  --output-dir DIR
+      Base directory for local setup artifacts.
+      If provided, default setup log root becomes DIR/setup_logs.
+      Explicit --setup-log-root overrides this default.
+
   --setup-log-root DIR
       Local directory where per-target setup logs are written.
       Default: setup_logs
@@ -221,6 +226,8 @@ SSH_OPTIONS=""
 
 MAX_PARALLEL_INSTALLS="4"
 SETUP_LOG_ROOT="setup_logs"
+OUTPUT_DIR=""
+SETUP_LOG_ROOT_EXPLICIT="false"
 RUN_ID=""
 
 # ----------------------------------------------------------------------
@@ -319,9 +326,16 @@ while [[ "$#" -gt 0 ]]; do
       shift 2
       ;;
 
+    --output-dir)
+      require_value "$1" "${2:-}"
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+
     --setup-log-root)
       require_value "$1" "${2:-}"
       SETUP_LOG_ROOT="$2"
+      SETUP_LOG_ROOT_EXPLICIT="true"
       shift 2
       ;;
 
@@ -553,6 +567,14 @@ fi
 
 if [[ -z "${RUN_ID}" ]]; then
   RUN_ID="$(date +%Y%m%d_%H%M%S)"
+fi
+
+if [[ -n "${OUTPUT_DIR}" ]]; then
+  OUTPUT_DIR="${OUTPUT_DIR%/}"
+
+  if [[ "${SETUP_LOG_ROOT_EXPLICIT}" != "true" ]]; then
+    SETUP_LOG_ROOT="${OUTPUT_DIR}/setup_logs"
+  fi
 fi
 
 SETUP_LOG_DIR="${SETUP_LOG_ROOT}/${RUN_ID}"
