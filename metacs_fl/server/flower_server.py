@@ -21,8 +21,10 @@ from flwr.server.superlink.fleet.grpc_bidi.grpc_client_proxy import GrpcClientPr
 from metacs_fl.client_selector.metacsfl import MetaCSFL
 from metacs_fl.client_selector.ecsm import ECSM
 from metacs_fl.client_selector.divfl import DivFL
+from metacs_fl.client_selector.fedcab import FedCAB
 from metacs_fl.client_selector.oort import Oort
 from metacs_fl.client_selector.random import Random
+from metacs_fl.client_selector.rifles import RIFLES
 from metacs_fl.client_selector.sbacpad_2024 import SBACPAD2024
 from metacs_fl.metrics_aggregator.flower_weighted_average import aggregate_loss_by_weighted_average, \
     aggregate_metrics_by_weighted_average
@@ -97,6 +99,12 @@ class FlowerServer(Strategy):
             case "ECSM":
                 # Instantiate the ECSM's client selector.
                 client_selector = ECSM(server_strategy_settings, seed)
+            case "FedCAB":
+                # Instantiate the FedCAB's client selector.
+                client_selector = FedCAB(server_strategy_settings, seed)
+            case "RIFLES":
+                # Instantiate the RIFLES's client selector.
+                client_selector = RIFLES(server_strategy_settings, seed)
             case "MetaCS-FL":
                 # Instantiate the MetaCS-FL's client selector.
                 client_selector = MetaCSFL(server_strategy_settings, seed)
