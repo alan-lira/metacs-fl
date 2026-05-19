@@ -227,6 +227,7 @@ This is enabled by default.
 | `--python-bin BIN` | Python executable used to create the venv. | `python3` |
 | `--ssh-options "OPTIONS"` | Extra options passed to `ssh`. | Empty |
 | `--max-parallel-installs N` | Maximum number of parallel target installations. | `4` |
+| `--output-dir DIR` | Base directory for local setup artifacts. If provided, the default setup log root becomes `DIR/setup_logs`. Explicit `--setup-log-root` overrides this default. | Not set |
 | `--setup-log-root DIR` | Local directory where setup logs are written. | `setup_logs` |
 | `--run-id ID` | Explicit run id for setup logs. | Timestamp |
 
@@ -528,6 +529,29 @@ setup_logs/g5k_setup_test_001/
 
 ---
 
+### 8.12 Custom output directory
+
+Use this when you want all local setup logs under a specific base directory:
+
+```bash
+bash scripts/setup/setup_remote_metacsfl_node.sh \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --output-dir /mnt/d/results \
+  --run-id g5k_setup_test_001 \
+  --max-parallel-installs 8
+```
+
+This writes setup logs under:
+
+```txt
+/mnt/d/results/setup_logs/g5k_setup_test_001/
+```
+
+If `--setup-log-root` is also provided, it overrides the `--output-dir` default.
+
+---
+
 ## 9. Parallel installation
 
 The setup script installs on multiple targets in parallel.
@@ -572,13 +596,25 @@ For local mode, use:
 
 Each target gets its own local setup log.
 
-By default, logs are written to:
+Logs are written to:
 
 ```txt
-setup_logs/<run_id>/
+<setup-log-root>/<run_id>/
 ```
 
-Example:
+By default, `<setup-log-root>` is:
+
+```txt
+setup_logs
+```
+
+If `--output-dir DIR` is provided and `--setup-log-root` is not explicitly provided, `<setup-log-root>` becomes:
+
+```txt
+DIR/setup_logs
+```
+
+Example with the default root:
 
 ```txt
 setup_logs/20260506_221530/root_paradoxe-1.rennes.g5k.log
@@ -601,14 +637,14 @@ root_paradoxe-16.rennes.g5k.log
 You can follow logs while the setup is running:
 
 ```bash
-tail -f setup_logs/<run_id>/*.log
+tail -f <setup-log-root>/<run_id>/*.log
 ```
 
 If a target fails, the coordinator prints the log file to inspect:
 
 ```txt
 [LOCAL] ERROR: installation failed on root@paradoxe-2.rennes.g5k.
-[LOCAL] Check log: setup_logs/<run_id>/root_paradoxe-2.rennes.g5k.log
+[LOCAL] Check log: <setup-log-root>/<run_id>/root_paradoxe-2.rennes.g5k.log
 ```
 
 ---
@@ -856,9 +892,11 @@ bash scripts/setup/setup_remote_metacsfl_node.sh \
 3. Check setup logs:
 
 ```bash
-ls setup_logs/
-tail -f setup_logs/<run_id>/*.log
+ls <setup-log-root>/
+tail -f <setup-log-root>/<run_id>/*.log
 ```
+
+With the default root, replace `<setup-log-root>` with `setup_logs`.
 
 4. Launch the distributed execution:
 

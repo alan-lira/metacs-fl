@@ -120,6 +120,7 @@ bash scripts/execution/run_on_server_only.sh \
 | `--remote-venv-activate FILE` | Virtual environment activation script. | `<remote-project-dir>/.venv/bin/activate` |
 | `--python-bin BIN` | Python executable. | `python3` |
 | `--run-id ID` | Run identifier. | Timestamp |
+| `--output-dir DIR` | Base directory for local server-only artifacts. If provided, default roots become `DIR/server_only_logs` and `DIR/server_only_results`. Explicit `--local-log-root` or `--local-output-root` values override this default. | Not set |
 | `--local-log-root DIR` | Local log root. | `server_only_logs` |
 | `--remote-output-dir DIR` | Optional output directory to collect after execution. | Not set |
 | `--local-output-root DIR` | Local output root for collected output. | `server_only_results` |
@@ -141,16 +142,35 @@ scalability_metacsfl_015
 the script writes logs to:
 
 ```txt
-server_only_logs/scalability_metacsfl_015/
+<local-log-root>/scalability_metacsfl_015/
 ├── server_only.out
 ├── server_only.err
 └── server_only_manifest.txt
 ```
 
+By default, `<local-log-root>` is:
+
+```txt
+server_only_logs
+```
+
 If `--remote-output-dir` is provided, the script collects that directory into:
 
 ```txt
-server_only_results/scalability_metacsfl_015/
+<local-output-root>/scalability_metacsfl_015/
+```
+
+By default, `<local-output-root>` is:
+
+```txt
+server_only_results
+```
+
+If `--output-dir DIR` is provided and no explicit `--local-log-root` or `--local-output-root` is provided, the paths become:
+
+```txt
+DIR/server_only_logs/scalability_metacsfl_015/
+DIR/server_only_results/scalability_metacsfl_015/
 ```
 
 ---
@@ -186,7 +206,32 @@ bash scripts/execution/run_on_server_only.sh \
 
 ---
 
-### 6.3 Passing extra script arguments
+### 6.3 Server-only run with a custom local output directory
+
+Use `--output-dir` when you want all local server-only artifacts under a specific directory:
+
+```bash
+bash scripts/execution/run_on_server_only.sh \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --remote-venv-activate /root/metacs-fl/.venv/bin/activate \
+  --script experiments/static_client_availability/scalability_experiments/scalability_experiments.py \
+  --config-file experiments/static_client_availability/scalability_experiments/scalability_experiments_metacsfl_015.cfg \
+  --remote-output-dir results/static_client_availability/scalability_results/metacsfl_015 \
+  --output-dir /mnt/d/results \
+  --run-id scalability_metacsfl_015
+```
+
+This writes local logs and collected outputs to:
+
+```txt
+/mnt/d/results/server_only_logs/scalability_metacsfl_015/
+/mnt/d/results/server_only_results/scalability_metacsfl_015/
+```
+
+---
+
+### 6.4 Passing extra script arguments
 
 Use one `--extra-arg` per token:
 
@@ -243,6 +288,6 @@ If `--remote-output-dir` is set but the directory does not exist after the run, 
 Check:
 
 ```txt
-server_only_logs/<run-id>/server_only.out
-server_only_logs/<run-id>/server_only.err
+<local-log-root>/<run-id>/server_only.out
+<local-log-root>/<run-id>/server_only.err
 ```

@@ -136,6 +136,17 @@ Repository/setup options for distributed experiments:
       Default: true
 
 Output roots:
+  --output-dir DIR
+      Base directory for all local campaign artifacts.
+      If provided, default roots become:
+        DIR/campaign_runs
+        DIR/distributed_launch_logs
+        DIR/gathered_results
+        DIR/merged_results
+        DIR/server_only_logs
+        DIR/server_only_results
+      Explicit root arguments below override this default.
+
   --campaign-root DIR
       Default: campaign_runs
 
@@ -321,6 +332,13 @@ GATHER_ROOT="gathered_results"
 MERGE_ROOT="merged_results"
 SERVER_ONLY_LOG_ROOT="server_only_logs"
 SERVER_ONLY_OUTPUT_ROOT="server_only_results"
+OUTPUT_DIR=""
+CAMPAIGN_ROOT_EXPLICIT="false"
+DISTRIBUTED_LOG_ROOT_EXPLICIT="false"
+GATHER_ROOT_EXPLICIT="false"
+MERGE_ROOT_EXPLICIT="false"
+SERVER_ONLY_LOG_ROOT_EXPLICIT="false"
+SERVER_ONLY_OUTPUT_ROOT_EXPLICIT="false"
 
 # ----------------------------------------------------------------------
 # Parse args
@@ -508,39 +526,51 @@ while [[ "$#" -gt 0 ]]; do
       shift 2
       ;;
 
+    --output-dir)
+      require_value "$1" "${2:-}"
+      OUTPUT_DIR="$2"
+      shift 2
+      ;;
+
     --campaign-root)
       require_value "$1" "${2:-}"
       CAMPAIGN_ROOT="$2"
+      CAMPAIGN_ROOT_EXPLICIT="true"
       shift 2
       ;;
 
     --distributed-log-root)
       require_value "$1" "${2:-}"
       DISTRIBUTED_LOG_ROOT="$2"
+      DISTRIBUTED_LOG_ROOT_EXPLICIT="true"
       shift 2
       ;;
 
     --gather-root)
       require_value "$1" "${2:-}"
       GATHER_ROOT="$2"
+      GATHER_ROOT_EXPLICIT="true"
       shift 2
       ;;
 
     --merge-root)
       require_value "$1" "${2:-}"
       MERGE_ROOT="$2"
+      MERGE_ROOT_EXPLICIT="true"
       shift 2
       ;;
 
     --server-only-log-root)
       require_value "$1" "${2:-}"
       SERVER_ONLY_LOG_ROOT="$2"
+      SERVER_ONLY_LOG_ROOT_EXPLICIT="true"
       shift 2
       ;;
 
     --server-only-output-root)
       require_value "$1" "${2:-}"
       SERVER_ONLY_OUTPUT_ROOT="$2"
+      SERVER_ONLY_OUTPUT_ROOT_EXPLICIT="true"
       shift 2
       ;;
 
@@ -594,6 +624,16 @@ positive_int_check "--max-parallel-remote-ops" "${MAX_PARALLEL_REMOTE_OPS}"
 
 if [[ -z "${REMOTE_VENV_ACTIVATE}" ]]; then
   REMOTE_VENV_ACTIVATE="${REMOTE_PROJECT_DIR}/.venv/bin/activate"
+fi
+
+if [[ -n "${OUTPUT_DIR}" ]]; then
+  OUTPUT_DIR="${OUTPUT_DIR%/}"
+  [[ "${CAMPAIGN_ROOT_EXPLICIT}" == "true" ]] || CAMPAIGN_ROOT="${OUTPUT_DIR}/campaign_runs"
+  [[ "${DISTRIBUTED_LOG_ROOT_EXPLICIT}" == "true" ]] || DISTRIBUTED_LOG_ROOT="${OUTPUT_DIR}/distributed_launch_logs"
+  [[ "${GATHER_ROOT_EXPLICIT}" == "true" ]] || GATHER_ROOT="${OUTPUT_DIR}/gathered_results"
+  [[ "${MERGE_ROOT_EXPLICIT}" == "true" ]] || MERGE_ROOT="${OUTPUT_DIR}/merged_results"
+  [[ "${SERVER_ONLY_LOG_ROOT_EXPLICIT}" == "true" ]] || SERVER_ONLY_LOG_ROOT="${OUTPUT_DIR}/server_only_logs"
+  [[ "${SERVER_ONLY_OUTPUT_ROOT_EXPLICIT}" == "true" ]] || SERVER_ONLY_OUTPUT_ROOT="${OUTPUT_DIR}/server_only_results"
 fi
 
 # ----------------------------------------------------------------------

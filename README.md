@@ -17,31 +17,10 @@ MetaCS-FL supports:
 
 ---
 
-## Reproducing published experiments
-
-This repository may evolve over time as the project receives improvements, fixes, and new features. The `main` branch is stable, but it will continue to evolve after each publication. Therefore, for exact reproducibility of published experiments, use the frozen release tag associated with the corresponding publication instead of relying on the default branch.
-
-### FGCS 2026 experiments
-
-To reproduce the experiments reported in the FGCS 2026 paper, use the frozen release tag `v0.2.0`:
-
-```bash
-git clone https://github.com/alan-lira/metacs-fl.git
-cd metacs-fl
-git checkout v0.2.0
-```
-
-When using the remote/Grid'5000 setup script, pass:
-
-```bash
---branch v0.2.0
-```
-
----
-
 ## Table of contents
 
-- [Reproducing the FGCS 2026 experiments](#reproducing-the-fgcs-2026-experiments)
+- [Reproducing published experiments](#reproducing-published-experiments)
+  - [FGCS 2026 experiments](#fgcs-2026-experiments)
 - [Recommended execution order](#recommended-execution-order)
 - [Requirements](#requirements)
   - [Python environment](#python-environment)
@@ -52,6 +31,7 @@ When using the remote/Grid'5000 setup script, pass:
 - [3. Run toy smoke experiments](#3-run-toy-smoke-experiments)
 - [4. Smoke test decision](#4-smoke-test-decision)
   - [4.1 If the smoke test fails: inspect logs and fix environment/configs](#41-if-the-smoke-test-fails-inspect-logs-and-fix-environmentconfigs)
+    - [Check for out-of-memory (OOM) kills](#check-for-out-of-memory-oom-kills)
   - [4.2 If the smoke test passes: continue to the experiment campaign](#42-if-the-smoke-test-passes-continue-to-the-experiment-campaign)
 - [5. Generate or run the experiment campaign](#5-generate-or-run-the-experiment-campaign)
   - [5.1 Experiment packs](#51-experiment-packs)
@@ -82,6 +62,28 @@ When using the remote/Grid'5000 setup script, pass:
 - [Scientific Productions](#scientific-productions)
   - [1. MetaCS-FL: A Metaheuristic-Based Framework for Client Selection in Federated Learning Systems](#1-metacs-fl-a-metaheuristic-based-framework-for-client-selection-in-federated-learning-systems)
 - [License](#license)
+
+---
+
+## Reproducing published experiments
+
+This repository may evolve over time as the project receives improvements, fixes, and new features. The `main` branch is stable, but it will continue to evolve after each publication. Therefore, for exact reproducibility of published experiments, use the frozen release tag associated with the corresponding publication instead of relying on the default branch.
+
+### FGCS 2026 experiments
+
+To reproduce the experiments reported in the FGCS 2026 paper, use the frozen release tag `v0.2.0`:
+
+```bash
+git clone https://github.com/alan-lira/metacs-fl.git
+cd metacs-fl
+git checkout v0.2.0
+```
+
+When using the remote/Grid'5000 setup script, pass:
+
+```bash
+--branch v0.2.0
+```
 
 ---
 
@@ -445,6 +447,75 @@ If it prints `patched=false`, check whether the executor config uses supported o
 base_server_config_file
 base_client_config_file
 ```
+
+
+#### Check for out-of-memory (OOM) kills
+
+When running many Flower clients on the same physical node, an experiment can fail even when the MetaCS-FL configuration and Flower setup are correct. This can happen when the selected clients, model architecture, dataset, batch size, local epochs, or assigned local workload cause the node to run out of RAM.
+
+A common symptom is that the Flower server log stops during a training round, for example after:
+
+```txt
+[Server <id> | Round <r>] Starting the training phase...
+```
+
+and does not later show the aggregation message:
+
+```txt
+[Server <id> | Round <r> | Training Phase] Received <n> results and <m> failures.
+```
+
+Clients may then report gRPC connection errors such as:
+
+```txt
+StatusCode.UNAVAILABLE
+failed to connect to all addresses
+Connection refused
+```
+
+This does not necessarily mean that Flower timed out. It may mean that the Linux kernel killed one of the Python processes because the node ran out of memory.
+
+Check the kernel log with:
+
+```bash
+dmesg -T | grep -i -E "killed process|out of memory|oom"
+```
+
+If the node ran out of memory, the output may contain messages similar to:
+
+```txt
+oom-kill:constraint=CONSTRAINT_NONE,...,task=python3
+Out of memory: Killed process <pid> (python3) ...
+```
+
+The `anon-rss` value indicates how much resident anonymous memory the killed process was using. For example:
+
+```txt
+anon-rss:77538528kB
+```
+
+corresponds to roughly 74 GiB of RAM.
+
+OOM failures are more likely in local or single-node executions with many concurrent clients, especially with memory-intensive models such as recurrent, attention-based, or deep neural architectures.
+
+Possible mitigations:
+
+- reduce the number of clients selected per round;
+- reduce the number of clients executed on the same node;
+- distribute clients across more nodes;
+- reduce `batch_size`;
+- reduce the number of local `epochs`;
+- reduce the number of local samples/tasks assigned per selected client;
+- increase the delay between launching client processes, for example `process_wait_time`;
+- monitor memory usage while the experiment is running.
+
+Useful monitoring command:
+
+```bash
+watch -n 1 'free -h; ps -eo pid,ppid,rss,cmd --sort=-rss | head -20'
+```
+
+If the kernel log reports an OOM kill, treat the client/server gRPC error as a consequence of memory pressure, not as the primary cause. Reduce peak parallel memory usage before assuming a Flower timeout or configuration bug.
 
 After fixing the environment or configuration, re-run the toy smoke experiments before starting a full campaign.
 

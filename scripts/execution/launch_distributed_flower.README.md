@@ -362,6 +362,7 @@ bash scripts/execution/launch_distributed_flower.sh \
 | `--action ACTION` | Action passed to `main.py`. | `execute_fl_with_flower` |
 | `--repetitions N` | Number of repetitions. | `1` |
 | `--python-bin BIN` | Python executable to use. | `python3` |
+| `--output-dir DIR` | Base directory for local launcher artifacts. If provided, the default log and gather roots become `DIR/distributed_launch_logs` and `DIR/gathered_results`. Explicit `--local-log-root` or `--local-gather-root` values override this default. | Not set |
 | `--local-log-root DIR` | Root directory for local logs. | `distributed_launch_logs` |
 | `--local-gather-root DIR` | Root directory for gathered results. | `gathered_results` |
 | `--gather-outputs true\|false` | Value passed to `main.py --gather-outputs`. | `false` |
@@ -417,7 +418,7 @@ Use:
 In local mode, these files are copied to a local runtime config directory under:
 
 ```txt
-distributed_launch_logs/<run_id>/runtime_configs/
+<local-log-root>/<run_id>/runtime_configs/
 ```
 
 In remote and Grid'5000 modes, these files are copied to each unique remote node under:
@@ -622,15 +623,15 @@ Use a higher value for larger allocations:
 Each parallel stage writes per-target logs under:
 
 ```txt
-distributed_launch_logs/<run_id>/
+<local-log-root>/<run_id>/
 ```
 
 For example:
 
 ```txt
-distributed_launch_logs/<run_id>/verify_remote_root_paradoxe-1.rennes.g5k.log
-distributed_launch_logs/<run_id>/copy_runtime_files_root_paradoxe-1.rennes.g5k.log
-distributed_launch_logs/<run_id>/collect_results_root_paradoxe-1.rennes.g5k.log
+<local-log-root>/<run_id>/verify_remote_root_paradoxe-1.rennes.g5k.log
+<local-log-root>/<run_id>/copy_runtime_files_root_paradoxe-1.rennes.g5k.log
+<local-log-root>/<run_id>/collect_results_root_paradoxe-1.rennes.g5k.log
 ```
 
 ---
@@ -834,7 +835,30 @@ for remote/Grid'5000 executions.
 
 ---
 
-### 9.10 Custom Python binary
+### 9.10 Custom output directory
+
+Use this when you want all local launcher artifacts for a campaign under a specific base directory.
+
+```bash
+bash scripts/execution/launch_distributed_flower.sh \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --output-dir /mnt/d/results \
+  --repetitions 1
+```
+
+This creates logs and gathered results under:
+
+```txt
+/mnt/d/results/distributed_launch_logs/<run_id>
+/mnt/d/results/gathered_results/<run_id>
+```
+
+Explicit `--local-log-root` or `--local-gather-root` values override the corresponding root derived from `--output-dir`.
+
+---
+
+### 9.11 Custom Python binary
 
 Use this if the remote virtual environment expects a specific Python executable.
 
@@ -847,7 +871,7 @@ bash scripts/execution/launch_distributed_flower.sh \
 
 ---
 
-### 9.11 Custom SSH options
+### 9.12 Custom SSH options
 
 Use this when you need to pass options to SSH and SCP:
 
@@ -860,7 +884,7 @@ bash scripts/execution/launch_distributed_flower.sh \
 
 ---
 
-### 9.12 Custom rsync options
+### 9.13 Custom rsync options
 
 Use this when result collection needs additional rsync options:
 
@@ -926,7 +950,7 @@ client paradoxe-3.rennes.grid5000.fr
 This generated hostfile is stored locally under:
 
 ```txt
-distributed_launch_logs/<run_id>/nodes_runtime_<run_id>.txt
+<local-log-root>/<run_id>/nodes_runtime_<run_id>.txt
 ```
 
 and copied remotely to:
@@ -953,30 +977,51 @@ By default, the run id is the current timestamp:
 YYYYMMDD_HHMMSS
 ```
 
-The launcher creates:
+The launcher creates one log directory and one gathered-results directory:
+
+```txt
+<local-log-root>/<run_id>
+<local-gather-root>/<run_id>
+```
+
+By default, the local roots are:
+
+```txt
+distributed_launch_logs
+gathered_results
+```
+
+Therefore, with default roots, a run creates:
 
 ```txt
 distributed_launch_logs/<run_id>
 gathered_results/<run_id>
 ```
 
-Example:
+If `--output-dir DIR` is provided and no explicit `--local-log-root` or `--local-gather-root` is provided, the launcher uses:
 
 ```txt
-distributed_launch_logs/20260506_221530
-gathered_results/20260506_221530
+DIR/distributed_launch_logs/<run_id>
+DIR/gathered_results/<run_id>
+```
+
+For example:
+
+```txt
+/mnt/d/results/distributed_launch_logs/<run_id>
+/mnt/d/results/gathered_results/<run_id>
 ```
 
 The generated runtime hostfile is stored under:
 
 ```txt
-distributed_launch_logs/<run_id>/nodes_runtime_<run_id>.txt
+<local-log-root>/<run_id>/nodes_runtime_<run_id>.txt
 ```
 
 The local staged runtime config files are stored under:
 
 ```txt
-distributed_launch_logs/<run_id>/runtime_configs/
+<local-log-root>/<run_id>/runtime_configs/
 ```
 
 For remote/Grid'5000 executions, custom runtime config files are copied to:
@@ -1001,43 +1046,43 @@ Each launched process writes two files:
 In local mode, the launcher starts a single process:
 
 ```txt
-distributed_launch_logs/<run_id>/local_controller.out
-distributed_launch_logs/<run_id>/local_controller.err
+<local-log-root>/<run_id>/local_controller.out
+<local-log-root>/<run_id>/local_controller.err
 ```
 
 In remote/Grid'5000 mode, each node entry gets its own log files, for example:
 
 ```txt
-distributed_launch_logs/<run_id>/0_server_paradoxe-1.rennes.grid5000.fr.out
-distributed_launch_logs/<run_id>/0_server_paradoxe-1.rennes.grid5000.fr.err
-distributed_launch_logs/<run_id>/1_client_paradoxe-2.rennes.grid5000.fr.out
-distributed_launch_logs/<run_id>/1_client_paradoxe-2.rennes.grid5000.fr.err
+<local-log-root>/<run_id>/0_server_paradoxe-1.rennes.grid5000.fr.out
+<local-log-root>/<run_id>/0_server_paradoxe-1.rennes.grid5000.fr.err
+<local-log-root>/<run_id>/1_client_paradoxe-2.rennes.grid5000.fr.out
+<local-log-root>/<run_id>/1_client_paradoxe-2.rennes.grid5000.fr.err
 ```
 
 Parallel remote stages also write logs:
 
 ```txt
-distributed_launch_logs/<run_id>/verify_remote_<target>.log
-distributed_launch_logs/<run_id>/copy_runtime_files_<target>.log
-distributed_launch_logs/<run_id>/collect_results_<target>.log
+<local-log-root>/<run_id>/verify_remote_<target>.log
+<local-log-root>/<run_id>/copy_runtime_files_<target>.log
+<local-log-root>/<run_id>/collect_results_<target>.log
 ```
 
 Monitor stdout with:
 
 ```bash
-tail -f distributed_launch_logs/<run_id>/*.out
+tail -f <local-log-root>/<run_id>/*.out
 ```
 
 Monitor stderr with:
 
 ```bash
-tail -f distributed_launch_logs/<run_id>/*.err
+tail -f <local-log-root>/<run_id>/*.err
 ```
 
 Monitor parallel stage logs with:
 
 ```bash
-tail -f distributed_launch_logs/<run_id>/*.log
+tail -f <local-log-root>/<run_id>/*.log
 ```
 
 ---
@@ -1054,7 +1099,7 @@ execution_output_folder = ...
 For each declared `execution_output_folder`, it resolves the repetition index and copies result folders into:
 
 ```txt
-gathered_results/<run_id>/node_<node_name>/
+<local-gather-root>/<run_id>/node_<node_name>/
 ```
 
 Example for Grid'5000:
@@ -1068,15 +1113,15 @@ gathered_results/20260506_221530/node_root_paradoxe-3.rennes.g5k/
 In local mode, results are copied into:
 
 ```txt
-gathered_results/<run_id>/node_local/
+<local-gather-root>/<run_id>/node_local/
 ```
 
 The launcher also copies the runtime config files into the gather directory when available:
 
 ```txt
-gathered_results/<run_id>/flower_executor.runtime.cfg
-gathered_results/<run_id>/flower_server.runtime.cfg
-gathered_results/<run_id>/flower_client.runtime.cfg
+<local-gather-root>/<run_id>/flower_executor.runtime.cfg
+<local-gather-root>/<run_id>/flower_server.runtime.cfg
+<local-gather-root>/<run_id>/flower_client.runtime.cfg
 ```
 
 ---
@@ -1086,7 +1131,7 @@ gathered_results/<run_id>/flower_client.runtime.cfg
 Each run creates a manifest file:
 
 ```txt
-gathered_results/<run_id>/distributed_run_manifest.txt
+<local-gather-root>/<run_id>/distributed_run_manifest.txt
 ```
 
 The manifest records:
@@ -1221,7 +1266,7 @@ paradoxe-1
 Also check the gathered runtime client config:
 
 ```txt
-gathered_results/<run_id>/flower_client.runtime.cfg
+<local-gather-root>/<run_id>/flower_client.runtime.cfg
 ```
 
 The client config should point to the server runtime host:
@@ -1377,9 +1422,9 @@ Remote verification, runtime file copy, and result collection run in parallel.
 If you see failures during these stages, inspect the corresponding stage log:
 
 ```txt
-distributed_launch_logs/<run_id>/verify_remote_<target>.log
-distributed_launch_logs/<run_id>/copy_runtime_files_<target>.log
-distributed_launch_logs/<run_id>/collect_results_<target>.log
+<local-log-root>/<run_id>/verify_remote_<target>.log
+<local-log-root>/<run_id>/copy_runtime_files_<target>.log
+<local-log-root>/<run_id>/collect_results_<target>.log
 ```
 
 You can reduce parallelism with:
@@ -1425,13 +1470,13 @@ bash scripts/execution/launch_distributed_flower.sh \
 3. Monitor logs:
 
 ```bash
-tail -f distributed_launch_logs/<run_id>/*.out
-tail -f distributed_launch_logs/<run_id>/*.err
-tail -f distributed_launch_logs/<run_id>/*.log
+tail -f <local-log-root>/<run_id>/*.out
+tail -f <local-log-root>/<run_id>/*.err
+tail -f <local-log-root>/<run_id>/*.log
 ```
 
 4. Inspect gathered results:
 
 ```bash
-ls gathered_results/<run_id>/
+ls <local-gather-root>/<run_id>/
 ```
