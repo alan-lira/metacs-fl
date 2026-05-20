@@ -563,7 +563,7 @@ class FlowerClient(Client):
 
             p_fail = min(p_max, p_base + theta * workload_ratio)
 
-        where workload_ratio = assigned_tasks / max(AC_i).
+        where workload_ratio = assigned_examples / (max(AC_i) * samples_per_task).
         """
         if is_profiling_round:
             return False
