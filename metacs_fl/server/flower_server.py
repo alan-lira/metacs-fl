@@ -1316,18 +1316,21 @@ class FlowerServer(Strategy):
     def _update_clients_reliability_score_history(self,
                                                   current_round: int,
                                                   current_phase: str,
-                                                  completed_clients: dict | None = None,
-                                                  failure_threshold: int = 3) -> None:
+                                                  completed_clients: dict | None = None) -> None:
         # Get the necessary attributes.
         candidate_clients_history = self.get_attribute("_candidate_clients_history")
         selected_clients_history = self.get_attribute("_selected_clients_history")
         clients_reliability_score_history = self.get_attribute("_clients_reliability_score_history")
-        clients_consecutive_failures_history = self.get_attribute("_clients_consecutive_failures_history")
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
         clients_reliability_score = server_strategy_settings["clients_reliability_score"]
-        non_availability_penalty = clients_reliability_score["non_availability_penalty"]
-        non_completion_penalty = clients_reliability_score["non_completion_penalty"]
-        recency_weight = clients_reliability_score["recency_weight"]
+        non_availability_penalty = float(clients_reliability_score["non_availability_penalty"])
+        non_completion_penalty = float(clients_reliability_score["non_completion_penalty"])
+        # "memory_weight" is the parameter mu from the formulation:
+        # rs_i = mu * previous_rs_i + (1 - mu) * (1 - lambda_i).
+        memory_weight = float(clients_reliability_score["memory_weight"])
+        non_availability_penalty = max(0.0, min(1.0, non_availability_penalty))
+        non_completion_penalty = max(0.0, min(1.0, non_completion_penalty))
+        memory_weight = max(0.0, min(1.0, memory_weight))
         # Ensure completed_clients is a dict.
         if completed_clients is None:
             completed_clients = {}
@@ -1340,51 +1343,38 @@ class FlowerServer(Strategy):
         # Get the previous round reliability scores.
         prev_scores = clients_reliability_score_history.get(current_round - 1, {})
         # All clients that we may need to compute scores for.
+        # This includes clients with previous reliability scores, currently available clients,
+        # selected clients, and clients that completed the current phase.
         all_client_ids = (set(prev_scores.keys())
                         | set(available_clients.keys())
                         | set(selected_clients.keys())
                         | set(completed_clients.keys()))
-        all_client_ids = {cid for cid in all_client_ids if cid.startswith("client_")}
-        # Update each client.
-        for client_id in all_client_ids:
-            # Previous reliability score (default 1.0 for new clients).
-            prev_score = prev_scores.get(client_id, 1.0)
-            # Case 1 — Client was available this round.
+        all_client_ids = {client_id for client_id in all_client_ids
+                          if isinstance(client_id, str) and client_id.startswith("client_")}
+        # Update each client according to the reliability definition.
+        for client_id in sorted(all_client_ids):
+            # Previous reliability score (default 1.0 for newly joined clients).
+            prev_score = float(prev_scores.get(client_id, 1.0))
+            prev_score = max(0.0, min(1.0, prev_score))
             if client_id in available_clients:
-                # (A) Available but NOT selected => cannot fail → no penalty.
                 if client_id not in selected_clients:
-                    clients_consecutive_failures_history[client_id] = 0
+                    # Available but not selected: no penalty.
                     penalty = 0.0
                 else:
-                    # (B) Available AND selected.
-                    completed = completed_clients.get(client_id, False)
+                    completed = bool(completed_clients.get(client_id, False))
                     if completed:
-                        # SUCCESS => reset failure counter.
-                        clients_consecutive_failures_history[client_id] = 0
+                        # Selected and completed: no penalty.
                         penalty = 0.0
                     else:
-                        # FAILURE => increment counter.
-                        clients_consecutive_failures_history[client_id] += 1
-                        # Apply penalty ONLY if persistent failures.
-                        if clients_consecutive_failures_history[client_id] >= failure_threshold:
-                            penalty = non_completion_penalty
-                        else:
-                            penalty = 0.0  # ignore random failure
+                        # Selected but did not complete: completion penalty.
+                        penalty = non_completion_penalty
             else:
-                # Case 2 — Client NOT available at all this round.
-                clients_consecutive_failures_history[client_id] += 1
-                # Apply penalty ONLY if persistent unavailability.
-                if clients_consecutive_failures_history[client_id] >= failure_threshold:
-                    penalty = non_availability_penalty
-                else:
-                    penalty = 0.0
-            # Exponential moving average (EMA) update.
-            new_score = prev_score * (1 - recency_weight) + (1 - penalty) * recency_weight
-            current_scores[client_id] = new_score
+                # Joined/known client unavailable in this phase: availability penalty.
+                penalty = non_availability_penalty
+            new_score = (memory_weight * prev_score + (1.0 - memory_weight) * (1.0 - penalty))
+            current_scores[client_id] = max(0.0, min(1.0, new_score))
         # Store the updated client reliability scores.
         self._set_attribute("_clients_reliability_score_history", clients_reliability_score_history)
-        # Store the updated client consecutive failures.
-        self._set_attribute("_clients_consecutive_failures_history", clients_consecutive_failures_history)
 
     def _aggregate_evaluate_metrics(self,
                                     current_round: int,
@@ -1617,6 +1607,15 @@ class FlowerServer(Strategy):
                     len(results),
                     len(failures))
         log_message(logger, message, "INFO")
+        # Update the clients reliability score, if being monitored.
+        # This must happen before any early return so selected clients that fail to
+        # complete are penalized even when Flower reports no successful results.
+        phase = "train"
+        if server_strategy_settings.get("monitor_clients_reliability_score", False):
+            completed_clients = {"client_{0}".format(result.metrics["client_id"]): True
+                                 for _, result in results
+                                 if result.metrics and "client_id" in result.metrics}
+            self._update_clients_reliability_score_history(server_round, phase, completed_clients)
         # Do not aggregate if there are no results or if there are clients' failures and failures are not accepted.
         if not results or (failures and not accept_clients_failures):
             return None, {}
@@ -1658,10 +1657,6 @@ class FlowerServer(Strategy):
         self._append_round_data_to_history_files(server_round, phase)
         # Store the improved global parameters.
         self._set_attribute("_global_parameters", aggregated_model_parameters)
-        # Update the clients reliability score, if being monitored.
-        if server_strategy_settings.get("monitor_clients_reliability_score", False):
-            completed_clients = {"client_{0}".format(result.metrics["client_id"]): True for _, result in results}
-            self._update_clients_reliability_score_history(server_round, phase, completed_clients)
         # If the FL execution should stop on the next round, remove local model on clients (if requested).
         try:
             fl_execution_should_stop = self._fl_execution_should_stop(server_round + 1)
@@ -1832,6 +1827,15 @@ class FlowerServer(Strategy):
                     len(results),
                     len(failures))
         log_message(logger, message, "INFO")
+        # Update the clients reliability score, if being monitored.
+        # This must happen before any early return so selected clients that fail to
+        # complete are penalized even when Flower reports no successful results.
+        phase = "test"
+        if server_strategy_settings.get("monitor_clients_reliability_score", False):
+            completed_clients = {"client_{0}".format(result.metrics["client_id"]): True
+                                 for _, result in results
+                                 if result.metrics and "client_id" in result.metrics}
+            self._update_clients_reliability_score_history(server_round, phase, completed_clients)
         # Do not aggregate if there are no results or if there are clients' failures and failures are not accepted.
         if not results or (failures and not accept_clients_failures):
             return None, {}
@@ -1847,10 +1851,6 @@ class FlowerServer(Strategy):
             self._initialize_history_output_files(phase)
         # Append the communication round data to the testing history files.
         self._append_round_data_to_history_files(server_round, phase)
-        # Update the clients reliability score, if being monitored.
-        if server_strategy_settings.get("monitor_clients_reliability_score", False):
-            completed_clients = {"client_{0}".format(result.metrics["client_id"]): True for _, result in results}
-            self._update_clients_reliability_score_history(server_round, phase, completed_clients)
         # If the FL execution should stop on the next round, remove local model on clients (if requested).
         try:
             fl_execution_should_stop = self._fl_execution_should_stop(server_round + 1)

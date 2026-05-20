@@ -156,7 +156,7 @@ class FlowerExecutor:
 
     @staticmethod
     def _assign_clients_to_nodes(num_clients: int,
-                                 client_ips: list[str]) -> dict:
+                                 client_ips: list) -> dict:
         clients_by_ip = defaultdict(list)
         for client_id in range(num_clients):
             client_ip = client_ips[client_id % len(client_ips)]
@@ -164,7 +164,7 @@ class FlowerExecutor:
         return dict(clients_by_ip)
 
     def _get_clients_for_this_node(self,
-                                   clients_by_ip: dict) -> list[int]:
+                                   clients_by_ip: dict) -> list:
         local_client_ids = []
         for ip_address, client_ids in clients_by_ip.items():
             if self._is_this_node(ip_address):
@@ -212,7 +212,7 @@ class FlowerExecutor:
     def _write_node_manifest(output_folder: Path,
                              execution_name: str,
                              is_server_node: bool,
-                             local_client_ids: list[int],
+                             local_client_ids: list,
                              is_distributed_execution: bool) -> None:
         output_folder.mkdir(exist_ok=True, parents=True)
         manifest_file = output_folder.joinpath("distributed_node_manifest.txt")
@@ -233,7 +233,7 @@ class FlowerExecutor:
             print(format_exc(), file=sys_stdout, flush=True)
 
     @staticmethod
-    def _run_command_with_trace(command: list[str],
+    def _run_command_with_trace(command: list,
                                 description: str) -> None:
         print("[Output Collection] {0}: {1}".format(description, " ".join(command)),
               file=sys_stdout,
@@ -267,7 +267,7 @@ class FlowerExecutor:
                                       execution_settings: dict,
                                       is_distributed_execution: bool,
                                       is_server_node: bool,
-                                      local_client_ids: list[int]) -> None:
+                                      local_client_ids: list) -> None:
         gather_outputs = self._as_bool(execution_settings.get("gather_outputs", False))
         if not gather_outputs:
             return
@@ -363,8 +363,8 @@ class FlowerExecutor:
     def _apply_repetition_placeholder_to_settings(self,
                                                   execution_settings: dict,
                                                   repetition_idx: int,
-                                                  required_keys: list[str] | None = None,
-                                                  optional_keys: list[str] | None = None) -> None:
+                                                  required_keys: list | None = None,
+                                                  optional_keys: list | None = None) -> None:
         required_keys = required_keys or []
         optional_keys = optional_keys or []
         for key in required_keys:
@@ -491,6 +491,164 @@ class FlowerExecutor:
         data_line = str(client_id) + "," + ",".join(map(str, filtered_device_emulation_settings.values())) + "\n"
         with open(file=output_file, mode="a", encoding="utf-8") as o_f:
             o_f.write(data_line)
+
+    @staticmethod
+    def _as_bool(value: any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return bool(value)
+
+    @staticmethod
+    def _as_float_range(value: any,
+                        default: tuple) -> tuple:
+        if value is None:
+            return default
+        if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return default
+            if len(value) == 1:
+                v = float(value[0])
+                return v, v
+            return float(value[0]), float(value[1])
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return default
+            if "|" in value:
+                parts = value.split("|")
+            elif "," in value:
+                parts = value.split(",")
+            else:
+                v = float(value)
+                return v, v
+            parts = [p.strip() for p in parts if p.strip()]
+            if len(parts) == 0:
+                return default
+            if len(parts) == 1:
+                v = float(parts[0])
+                return v, v
+            return float(parts[0]), float(parts[1])
+        v = float(value)
+        return v, v
+
+    @staticmethod
+    def _parse_availability_profile_mix(value: any) -> dict:
+        """
+        Parse strings such as:
+            stable:0.25|intermittent:0.50|unstable:0.20|bursty_off:0.05
+
+        Returns a dict profile -> probability.
+        """
+        if value is None:
+            return {"intermittent": 1.0}
+        if isinstance(value, dict):
+            return {str(k): float(v) for k, v in value.items()}
+        value = str(value).strip()
+        if not value:
+            return {"intermittent": 1.0}
+        profile_mix = {}
+        for item in value.split("|"):
+            item = item.strip()
+            if not item:
+                continue
+            if ":" not in item:
+                raise ValueError("Invalid availability profile mix item '{0}'. "
+                                 "Expected format profile:probability.".format(item))
+            profile, probability = item.split(":", 1)
+            profile_mix[profile.strip()] = float(probability.strip())
+        total_probability = sum(profile_mix.values())
+        if total_probability <= 0.0:
+            raise ValueError("The availability profile mix must have positive total probability.")
+        # Normalize to avoid requiring exact sum = 1.0.
+        return {profile: probability / total_probability
+                for profile, probability in profile_mix.items()}
+
+    @staticmethod
+    def _generate_client_availability_settings(rng: Generator,
+                                               num_clients: int,
+                                               execution_settings: dict) -> dict:
+        """
+        Generate independent Markov availability and completion-failure settings
+        for each client.
+
+        Each client receives:
+          - availability_simulation_enabled
+          - availability_profile
+          - availability_initial_state
+          - availability_p_off
+          - availability_p_on
+          - availability_seed
+          - enable_client_completion_failure_simulation
+          - completion_failure_base_probability
+          - completion_failure_workload_sensitivity
+          - completion_failure_max_probability
+          - use_client_failure_probability_for_processing_failures
+        """
+        availability_simulation_enabled = FlowerExecutor._as_bool(execution_settings.get("enable_client_availability_simulation", False))
+        force_available_during_profiling = FlowerExecutor._as_bool(execution_settings.get("availability_force_available_during_profiling", True))
+        availability_history_size = int(execution_settings.get("availability_history_size", 100))
+        initial_available_probability = float(execution_settings.get("availability_initial_available_probability", 1.0))
+        enable_client_completion_failure_simulation = FlowerExecutor._as_bool(execution_settings.get("enable_client_completion_failure_simulation", False))
+        use_legacy_failure_probability_for_processing = FlowerExecutor._as_bool(execution_settings.get("use_client_failure_probability_for_processing_failures", False))
+        completion_failure_max_probability = float(execution_settings.get("completion_failure_max_probability", 0.30))
+        availability_seed_offset = int(execution_settings.get("availability_seed_offset", 100000))
+        profile_mix = FlowerExecutor._parse_availability_profile_mix(execution_settings.get("availability_profiles_mix",
+                                                                                            "stable:0.25|intermittent:0.50|unstable:0.20|bursty_off:0.05"))
+        profiles = list(profile_mix.keys())
+        profile_probabilities = [profile_mix[p] for p in profiles]
+        # Default ranges. These values create temporal persistence:
+        # - low p_off: available clients tend to stay available
+        # - low/medium p_on: unavailable clients may remain unavailable for bursts
+        default_ranges = {"stable": {"p_off": (0.01, 0.03), "p_on": (0.70, 0.95)},
+                          "intermittent": {"p_off": (0.05, 0.12), "p_on": (0.30, 0.60)},
+                          "unstable": {"p_off": (0.15, 0.30), "p_on": (0.20, 0.45)},
+                          "bursty_off": {"p_off": (0.08, 0.18), "p_on": (0.05, 0.20)}}
+        default_completion_failure_base = {"stable": 0.005,
+                                           "intermittent": 0.020,
+                                           "unstable": 0.060,
+                                           "bursty_off": 0.100}
+        default_completion_failure_workload_sensitivity = {"stable": 0.010,
+                                                           "intermittent": 0.030,
+                                                           "unstable": 0.060,
+                                                           "bursty_off": 0.080}
+        client_availability_settings = {}
+        for client_id in range(num_clients):
+            profile = rng.choice(profiles, p=profile_probabilities)
+            p_off_default = default_ranges.get(profile, default_ranges["intermittent"])["p_off"]
+            p_on_default = default_ranges.get(profile, default_ranges["intermittent"])["p_on"]
+            p_off_range = FlowerExecutor._as_float_range(execution_settings.get("availability_{0}_p_off_range".format(profile), None),
+                                                         p_off_default)
+            p_on_range = FlowerExecutor._as_float_range(execution_settings.get("availability_{0}_p_on_range".format(profile), None),
+                                                        p_on_default)
+            p_off = float(rng.uniform(p_off_range[0], p_off_range[1]))
+            p_on = float(rng.uniform(p_on_range[0], p_on_range[1]))
+            initial_available = bool(rng.random() < initial_available_probability)
+            completion_failure_base_probability = float(execution_settings.get("completion_failure_base_{0}".format(profile),
+                                                                               default_completion_failure_base.get(profile, default_completion_failure_base["intermittent"])))
+            completion_failure_workload_sensitivity = float(execution_settings.get("completion_failure_workload_sensitivity_{0}".format(profile),
+                                                                                   default_completion_failure_workload_sensitivity.get(profile,
+                                                                                                                                       default_completion_failure_workload_sensitivity["intermittent"])))
+            client_availability_settings[client_id] = {"availability_simulation_enabled": availability_simulation_enabled,
+                                                       "availability_profile": str(profile),
+                                                       "availability_initial_state": initial_available,
+                                                       "availability_p_off": p_off,
+                                                       "availability_p_on": p_on,
+                                                       "availability_seed": availability_seed_offset + client_id,
+                                                       "availability_history_size": availability_history_size,
+                                                       "availability_force_available_during_profiling": force_available_during_profiling,
+                                                       "enable_client_completion_failure_simulation": enable_client_completion_failure_simulation,
+                                                       "completion_failure_base_probability": completion_failure_base_probability,
+                                                       "completion_failure_workload_sensitivity": completion_failure_workload_sensitivity,
+                                                       "completion_failure_max_probability": completion_failure_max_probability,
+                                                       "use_client_failure_probability_for_processing_failures": use_legacy_failure_probability_for_processing,
+                                                       "client_completion_failure_probability": completion_failure_base_probability}
+        return client_availability_settings
 
     @staticmethod
     def _generate_client_failure_probabilities(rng: Generator,
@@ -1002,16 +1160,23 @@ class FlowerExecutor:
                         current_execution_devices[idx][1]["battery_stored_energy_in_joules"] = initial_remaining_battery_energy_in_joules
                     # Update the current execution devices.
                     self._set_attribute("_current_execution_devices", current_execution_devices)
-                # Generate the clients' failure probabilities.
+                # Generate the clients' legacy failure probabilities.
+                # Kept for backward compatibility with previous experiments.
                 rng = self.get_attribute("_rng")
                 num_clients = execution_settings["num_clients"]
                 poisson_failure_lambda_range = execution_settings.get("poisson_failure_lambda_range", [])
                 client_failure_probabilities = self._generate_client_failure_probabilities(rng,
                                                                                            num_clients,
                                                                                            poisson_failure_lambda_range)
+                # Generate the clients' intermittent availability settings.
+                client_availability_settings = self._generate_client_availability_settings(rng,
+                                                                                           num_clients,
+                                                                                           execution_settings)
                 current_execution_devices = self.get_attribute("_current_execution_devices")
                 for idx, _ in enumerate(current_execution_devices):
                     current_execution_devices[idx][1]["client_failure_probability"] = client_failure_probabilities[idx]
+                    current_execution_devices[idx][1].update(client_availability_settings[idx])
+                self._set_attribute("_current_execution_devices", current_execution_devices)
                 # Load the devices scores.
                 self._load_devices_scores()
                 # Write the devices scores to file.

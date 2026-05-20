@@ -41,20 +41,71 @@ class MetaCSFL:
         return getattr(self, attribute_name)
 
     @staticmethod
-    def _get_trimmed_task_assignment_capacities(task_assignment_capacities_list: list,
-                                                clients_reliability_score_history: dict) -> list:
+    def _scale_task_assignment_capacities(capacities: list,
+                                          samples_per_task: int) -> list:
+        return sorted(set([int(capacity * samples_per_task) for capacity in capacities]))
+
+    @staticmethod
+    def _get_latest_clients_reliability_scores(clients_reliability_score_history: dict) -> dict:
         if not clients_reliability_score_history:
-            latest_client_reliability_scores = {}
-        else:
-            latest_key = max(clients_reliability_score_history.keys())
-            latest_client_reliability_scores = clients_reliability_score_history[latest_key]
-        trimmed_task_assignment_capacities_list = []
-        for idx, capacities in enumerate(task_assignment_capacities_list):
-            client_id_str = "client_{0}".format(idx)
-            client_score = latest_client_reliability_scores.get(client_id_str, 1.0)  # Default to full capacity.
-            client_task_capacities_cutoff = int(len(capacities) * client_score)
-            trimmed_task_assignment_capacities_list.append(capacities[:client_task_capacities_cutoff])
-        return trimmed_task_assignment_capacities_list
+            return {}
+        latest_key = max(clients_reliability_score_history.keys())
+        return clients_reliability_score_history[latest_key]
+
+    def _get_trimmed_task_assignment_capacities(self,
+                                                candidate_client_ids: list,
+                                                task_assignment_capacities_list: list,
+                                                clients_reliability_score_history: dict,
+                                                required_num_tasks: int | None = None,
+                                                samples_per_task: int = 1) -> list:
+        latest_client_reliability_scores = self._get_latest_clients_reliability_scores(clients_reliability_score_history)
+        client_scores = []
+        task_assignment_capacities_cutoffs = []
+        for client_id, capacities in zip(candidate_client_ids, task_assignment_capacities_list):
+            client_score = latest_client_reliability_scores.get(client_id, 1.0)
+            client_score = max(0.0, min(1.0, float(client_score)))
+            client_scores.append(client_score)
+            # The reliability score restricts the number of admissible slots, not the slot values.
+            # Therefore, the filtered set is always a prefix of the original valid capacity list.
+            if len(capacities) == 0:
+                task_assignment_capacities_cutoffs.append(0)
+            else:
+                cutoff = int(len(capacities) * client_score)
+                cutoff = max(1, min(len(capacities), cutoff))
+                task_assignment_capacities_cutoffs.append(cutoff)
+        def build_trimmed_capacities(current_cutoffs: list) -> list:
+            return [capacities[:cutoff] for capacities, cutoff in zip(task_assignment_capacities_list, current_cutoffs)]
+        def required_workload_is_feasible(current_capacities_list: list) -> bool:
+            if required_num_tasks is None:
+                return True
+            scaled_capacities_list = [MetaCSFL._scale_task_assignment_capacities(capacities, samples_per_task)
+                                      for capacities in current_capacities_list]
+            if any(len(capacities) == 0 for capacities in scaled_capacities_list):
+                return False
+            if sum(max(capacities) for capacities in scaled_capacities_list) < required_num_tasks:
+                return False
+            all_possible_task_assignment_sums = get_all_possible_sums(scaled_capacities_list)
+            return required_num_tasks in all_possible_task_assignment_sums
+        trimmed_task_assignment_capacities_list = build_trimmed_capacities(task_assignment_capacities_cutoffs)
+        if required_workload_is_feasible(trimmed_task_assignment_capacities_list):
+            return trimmed_task_assignment_capacities_list
+        # If the restricted capacity slots cannot satisfy the configured workload,
+        # relax the restriction by restoring additional valid slots from the nominal capacity lists.
+        # Less penalized clients, i.e., clients with larger reliability scores, are relaxed first.
+        client_relaxation_order = sorted(range(len(candidate_client_ids)),
+                                         key=lambda idx: (-client_scores[idx], candidate_client_ids[idx]))
+        while True:
+            restriction_was_relaxed = False
+            for idx in client_relaxation_order:
+                if task_assignment_capacities_cutoffs[idx] < len(task_assignment_capacities_list[idx]):
+                    task_assignment_capacities_cutoffs[idx] += 1
+                    restriction_was_relaxed = True
+                    trimmed_task_assignment_capacities_list = build_trimmed_capacities(task_assignment_capacities_cutoffs)
+                    if required_workload_is_feasible(trimmed_task_assignment_capacities_list):
+                        return trimmed_task_assignment_capacities_list
+            if not restriction_was_relaxed:
+                break
+        return build_trimmed_capacities(task_assignment_capacities_cutoffs)
 
     @staticmethod
     def _get_latest_selection(selected_clients_history: dict,
@@ -1108,22 +1159,31 @@ class MetaCSFL:
         root_output_folder = kwargs["root_output_folder"]
         logger = kwargs["logger"]
         # Get the necessary properties of the candidate clients.
-        task_assignment_capacities_list = [client_map["client_task_assignment_capacities_{0}".format(current_phase)]
-                                           for _, client_map in candidate_clients.items()]
+        candidate_client_ids = list(candidate_clients.keys())
+        task_assignment_capacities_list = [candidate_clients[client_id]["client_task_assignment_capacities_{0}".format(current_phase)]
+                                           for client_id in candidate_client_ids]
+        nominal_scaled_task_assignment_capacities_list = [self._scale_task_assignment_capacities(capacities, samples_per_task)
+                                                          for capacities in task_assignment_capacities_list]
+        nominal_max_num_tasks = sum(max(capacities) for capacities in nominal_scaled_task_assignment_capacities_list)
+        if isinstance(num_tasks, float):
+            required_num_tasks = int(num_tasks * nominal_max_num_tasks)
+        else:
+            required_num_tasks = int(num_tasks)
+        required_num_tasks = max(1, min(required_num_tasks, nominal_max_num_tasks))
         if apply_clients_reliability_filter:
-            task_assignment_capacities_list = self._get_trimmed_task_assignment_capacities(task_assignment_capacities_list,
-                                                                                           clients_reliability_score_history)
+            task_assignment_capacities_list = self._get_trimmed_task_assignment_capacities(candidate_client_ids,
+                                                                                           task_assignment_capacities_list,
+                                                                                           clients_reliability_score_history,
+                                                                                           required_num_tasks,
+                                                                                           samples_per_task)
         self._set_attribute("_task_assignment_capacities_list", task_assignment_capacities_list)
-        scaled_task_assignment_capacities_list = [sorted(set(capacities * samples_per_task))
+        scaled_task_assignment_capacities_list = [self._scale_task_assignment_capacities(capacities, samples_per_task)
                                                   for capacities in task_assignment_capacities_list]
         # Calculate the maximum number of tasks that can be scheduled.
         max_num_tasks = sum(max(capacities) for capacities in scaled_task_assignment_capacities_list)
-        # Convert num_tasks → task count (fraction adjustment).
-        if isinstance(num_tasks, float):
-            # Always treat as fraction of total capacity.
-            num_tasks = int(num_tasks * max_num_tasks)
-        # Clamp to valid range.
-        num_tasks = max(1, min(num_tasks, max_num_tasks))
+        # Use the configured workload computed before reliability filtering. If the filter had to be relaxed,
+        # this preserves the original target workload instead of shrinking it after capacity restriction.
+        num_tasks = max(1, min(required_num_tasks, max_num_tasks))
         # Compute all the possible sums of task assignments, considering one assignment per client.
         all_possible_task_assignment_sums = get_all_possible_sums(scaled_task_assignment_capacities_list)
         # If the number of tasks to schedule is infeasible...
