@@ -12,6 +12,7 @@ from sys import stdout as sys_stdout, stderr as sys_stderr
 from time import perf_counter, sleep
 from threading import BrokenBarrierError
 from traceback import format_exc
+from typing import Sequence
 
 from metacs_fl.client_launcher.flower_client_launcher import FlowerClientLauncher
 from metacs_fl.devices.edge_devices import generate_edge_devices
@@ -28,12 +29,14 @@ class FlowerExecutor:
                  config_file: Path,
                  repetitions: int,
                  hostfile: Path | None = None,
-                 output_gathering_settings: dict | None = None) -> None:
+                 output_gathering_settings: dict | None = None,
+                 execution_blocks: str | Sequence | None = None) -> None:
         # Initialize the attributes.
         self._config_file = config_file
         self._repetitions = repetitions
         self._hostfile = hostfile
         self._output_gathering_settings = output_gathering_settings or {}
+        self._execution_blocks = self._parse_execution_blocks_argument(execution_blocks)
         self._current_execution = {}
         self._current_execution_devices = []
         self._rng = default_rng()
@@ -49,6 +52,76 @@ class FlowerExecutor:
         return getattr(self, attribute_name)
 
     @staticmethod
+    def _parse_execution_blocks_argument(execution_blocks: str | Sequence | None) -> list:
+        """
+        Parse the optional execution-block filter.
+
+        Accepted examples:
+            None
+            "A"
+            "A,B"
+            "Execution_A_N"
+            "Execution_A_N Settings"
+            ["Execution_A_N Settings", "Execution_B_N Settings"]
+
+        The returned values are raw selectors. They are normalized later after the
+        config file sections are known, so error messages can show the available
+        choices.
+        """
+        if execution_blocks is None:
+            return []
+        if isinstance(execution_blocks, str):
+            value = execution_blocks.strip()
+            if not value:
+                return []
+            # Prefer comma-separated values because full section names contain spaces.
+            # Also accept a single value wrapped in brackets, e.g. "[A,B]".
+            value = value.strip()
+            if value.startswith("[") and value.endswith("]"):
+                value = value[1:-1]
+            return [item.strip().strip("'\"") for item in value.split(",") if item.strip()]
+        return [str(item).strip().strip("'\"") for item in execution_blocks if str(item).strip()]
+
+    @staticmethod
+    def _normalize_execution_block_selector(selector: str) -> str:
+        """Normalize a user selector to the config section name format."""
+        selector = str(selector).strip().strip("[]").strip().strip("'\"")
+        if not selector:
+            raise ValueError("Empty execution block selector.")
+        if selector.endswith(" Settings"):
+            return selector
+        if selector.startswith("Execution_"):
+            if selector.endswith("_N"):
+                return "{0} Settings".format(selector)
+            return "{0}_N Settings".format(selector)
+        if selector.endswith("_N"):
+            return "Execution_{0} Settings".format(selector)
+        return "Execution_{0}_N Settings".format(selector)
+
+    @staticmethod
+    def _select_execution_sections(execution_sections: list,
+                                   execution_blocks: list) -> list:
+        """Return all execution sections or only the user-requested subset."""
+        if not execution_blocks:
+            return execution_sections
+        sections_by_lowercase = {section.lower(): section for section in execution_sections}
+        selected_sections = []
+        missing_sections = []
+        for selector in execution_blocks:
+            normalized_selector = FlowerExecutor._normalize_execution_block_selector(selector)
+            matched_section = sections_by_lowercase.get(normalized_selector.lower())
+            if matched_section is None:
+                missing_sections.append(selector)
+                continue
+            if matched_section not in selected_sections:
+                selected_sections.append(matched_section)
+        if missing_sections:
+            available_sections = ", ".join(execution_sections) if execution_sections else "<none>"
+            raise ValueError("Unknown execution block selector(s): {0}. Available execution blocks: {1}"
+                             .format(", ".join(missing_sections), available_sections))
+        return selected_sections
+
+    @staticmethod
     def _is_localhost_ip(ip_address: str) -> bool:
         return ip_address in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
@@ -62,7 +135,7 @@ class FlowerExecutor:
         return value.split(".")[0]
 
     @staticmethod
-    def _resolve_host_addresses(host: str) -> set[str]:
+    def _resolve_host_addresses(host: str) -> set:
         addresses = set()
         if not host:
             return addresses
@@ -74,7 +147,7 @@ class FlowerExecutor:
         return addresses
 
     @staticmethod
-    def _get_local_ip_addresses() -> set[str]:
+    def _get_local_ip_addresses() -> set:
         local_values = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
         try:
             hostname = gethostname()
@@ -839,6 +912,21 @@ class FlowerExecutor:
                                     late_join_clients_round_of_first_appearance)
                 o_f.write(data_line)
 
+    def _write_client_availability_profiles_to_file(self,
+                                                    root_output_folder: Path,
+                                                    output_file: Path = Path("clients_availability_profiles.csv")) -> None:
+        output_file = root_output_folder.joinpath(output_file)
+        output_file.parent.mkdir(exist_ok=True, parents=True)
+        current_execution_devices = self.get_attribute("_current_execution_devices")
+        with open(file=output_file, mode="w", encoding="utf-8") as o_f:
+            header_line = "client_id,availability_profile\n"
+            o_f.write(header_line)
+            for client_id, current_execution_device in enumerate(current_execution_devices):
+                device_settings = current_execution_device[1]
+                availability_profile = device_settings.get("availability_profile", "unknown")
+                data_line = "{0},{1}\n".format(client_id, availability_profile)
+                o_f.write(data_line)
+
     def _launch_flower_server(self,
                               server_id: int) -> FlowerServerLauncher:
         try:
@@ -1003,7 +1091,10 @@ class FlowerExecutor:
             sys_stderr.flush()
             raise SystemExit(1)
 
-    def execute_fl_with_flower(self) -> None:
+    def execute_fl_with_flower(self,
+                               execution_blocks: str | Sequence | None = None) -> None:
+        if execution_blocks is not None:
+            self._set_attribute("_execution_blocks", self._parse_execution_blocks_argument(execution_blocks))
         try:
             self._execute_fl_with_flower_impl()
         except Exception as e:
@@ -1021,6 +1112,10 @@ class FlowerExecutor:
         parser = ConfigParser()
         parser.read(config_file)
         execution_sections = [s for s in parser.sections() if s.startswith("Execution_") and s.endswith("_N Settings")]
+        execution_sections = self._select_execution_sections(execution_sections, self.get_attribute("_execution_blocks"))
+        if not execution_sections:
+            raise ValueError("No execution sections were found in config file: {0}".format(config_file))
+        print("Execution blocks selected: {0}".format(", ".join(execution_sections)))
         for execution_section in execution_sections:
             execution_settings = parse_config_section(config_file, execution_section)
             for repetition_idx in range(1, self._repetitions + 1):
@@ -1182,6 +1277,8 @@ class FlowerExecutor:
                 # Write the devices scores to file.
                 execution_output_folder = Path(execution_settings["execution_output_folder"])
                 self._write_devices_scores_to_file(execution_output_folder)
+                # Write the clients' availability profiles to file.
+                self._write_client_availability_profiles_to_file(execution_output_folder)
             # Print the start of the execution.
             print("\nStarting the execution '{0}'...".format(execution_name))
             # Start the execution timer.

@@ -157,6 +157,11 @@ def main() -> None:
                         required=False,
                         default=1,
                         help=SUPPRESS)
+        ap.add_argument("--execution-blocks",
+                        type=str,
+                        required=False,
+                        default=None,
+                        help=SUPPRESS)
         ap.add_argument("--hostfile",
                         type=Path,
                         required=False,
@@ -235,6 +240,7 @@ def main() -> None:
     elif action == "execute_fl_with_flower":
         config_file = Path(parsed_args.config_file)
         repetitions = int(parsed_args.repetitions)
+        execution_blocks = str(parsed_args.execution_blocks)
         hostfile = parsed_args.hostfile
         if hostfile is not None:
             hostfile = Path(hostfile)
@@ -256,7 +262,8 @@ def main() -> None:
         fe = FlowerExecutor(config_file,
                             repetitions,
                             hostfile=hostfile,
-                            output_gathering_settings=output_gathering_settings)
+                            output_gathering_settings=output_gathering_settings,
+                            execution_blocks=execution_blocks)
         fe.execute_fl_with_flower()
     elif action == "execute_fl_with_flower_simulation_engine":
         config_file = Path(parsed_args.config_file)

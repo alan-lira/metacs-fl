@@ -1322,12 +1322,13 @@ class FlowerServer(Strategy):
         selected_clients_history = self.get_attribute("_selected_clients_history")
         clients_reliability_score_history = self.get_attribute("_clients_reliability_score_history")
         server_strategy_settings = self.get_attribute("_server_strategy_settings")
-        clients_reliability_score = server_strategy_settings["clients_reliability_score"]
-        non_availability_penalty = float(clients_reliability_score["non_availability_penalty"])
-        non_completion_penalty = float(clients_reliability_score["non_completion_penalty"])
+        clients_reliability_score = server_strategy_settings.get("clients_reliability_score", {})
+        non_availability_penalty = float(clients_reliability_score.get("non_availability_penalty", 0.0))
+        non_completion_penalty = float(clients_reliability_score.get("non_completion_penalty", 0.0))
         # "memory_weight" is the parameter mu from the formulation:
         # rs_i = mu * previous_rs_i + (1 - mu) * (1 - lambda_i).
-        memory_weight = float(clients_reliability_score["memory_weight"])
+        # If not provided, use 1.0 so the score remains unchanged.
+        memory_weight = float(clients_reliability_score.get("memory_weight", 1.0))
         non_availability_penalty = max(0.0, min(1.0, non_availability_penalty))
         non_completion_penalty = max(0.0, min(1.0, non_completion_penalty))
         memory_weight = max(0.0, min(1.0, memory_weight))
@@ -1346,9 +1347,9 @@ class FlowerServer(Strategy):
         # This includes clients with previous reliability scores, currently available clients,
         # selected clients, and clients that completed the current phase.
         all_client_ids = (set(prev_scores.keys())
-                        | set(available_clients.keys())
-                        | set(selected_clients.keys())
-                        | set(completed_clients.keys()))
+                          | set(available_clients.keys())
+                          | set(selected_clients.keys())
+                          | set(completed_clients.keys()))
         all_client_ids = {client_id for client_id in all_client_ids
                           if isinstance(client_id, str) and client_id.startswith("client_")}
         # Update each client according to the reliability definition.
