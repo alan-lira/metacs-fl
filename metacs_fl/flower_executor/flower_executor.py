@@ -643,6 +643,37 @@ class FlowerExecutor:
                 for profile, probability in profile_mix.items()}
 
     @staticmethod
+    def _expand_availability_profile_mix_to_fixed_quotas(profile_mix: dict,
+                                                         num_clients: int) -> list:
+        """
+        Convert a probability mix into exactly num_clients profile labels.
+
+        Counts are computed with the largest-remainder method:
+          1. floor(probability * num_clients) for each profile
+          2. assign the remaining clients to the largest fractional remainders
+
+        Example for 100 clients and
+        stable:0.25|intermittent:0.50|unstable:0.20|bursty_off:0.05:
+          stable=25, intermittent=50, unstable=20, bursty_off=5
+        """
+        if num_clients <= 0:
+            return []
+        profiles = list(profile_mix.keys())
+        raw_counts = {profile: profile_mix[profile] * num_clients for profile in profiles}
+        counts = {profile: int(raw_counts[profile]) for profile in profiles}
+        remaining = num_clients - sum(counts.values())
+        # Deterministic tie-breaking keeps the config order when remainders are equal.
+        ranked_profiles = sorted(profiles,
+                                 key=lambda profile: (raw_counts[profile] - counts[profile], -profiles.index(profile)),
+                                 reverse=True)
+        for profile in ranked_profiles[:remaining]:
+            counts[profile] += 1
+        profile_labels = []
+        for profile in profiles:
+            profile_labels.extend([profile] * counts[profile])
+        return profile_labels
+
+    @staticmethod
     def _generate_client_availability_settings(rng: Generator,
                                                num_clients: int,
                                                execution_settings: dict) -> dict:
@@ -673,8 +704,9 @@ class FlowerExecutor:
         availability_seed_offset = int(execution_settings.get("availability_seed_offset", 100000))
         profile_mix = FlowerExecutor._parse_availability_profile_mix(execution_settings.get("availability_profiles_mix",
                                                                                             "stable:0.25|intermittent:0.50|unstable:0.20|bursty_off:0.05"))
-        profiles = list(profile_mix.keys())
-        profile_probabilities = [profile_mix[p] for p in profiles]
+        assigned_profiles = FlowerExecutor._expand_availability_profile_mix_to_fixed_quotas(profile_mix, num_clients)
+        # Shuffle the fixed quotas so profile assignment is not grouped by client ID.
+        rng.shuffle(assigned_profiles)
         # Default ranges. These values create temporal persistence:
         # - low p_off: available clients tend to stay available
         # - low/medium p_on: unavailable clients may remain unavailable for bursts
@@ -692,7 +724,7 @@ class FlowerExecutor:
                                                            "bursty_off": 0.080}
         client_availability_settings = {}
         for client_id in range(num_clients):
-            profile = rng.choice(profiles, p=profile_probabilities)
+            profile = assigned_profiles[client_id]
             p_off_default = default_ranges.get(profile, default_ranges["intermittent"])["p_off"]
             p_on_default = default_ranges.get(profile, default_ranges["intermittent"])["p_on"]
             p_off_range = FlowerExecutor._as_float_range(execution_settings.get("availability_{0}_p_off_range".format(profile), None),
