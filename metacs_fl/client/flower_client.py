@@ -323,7 +323,7 @@ class FlowerClient(Client):
                  callbacks_settings: dict,
                  device_emulation_settings: dict,
                  host_profile: dict,
-                 late_join_settings: dict,
+                 late_joining_settings: dict,
                  logger: Logger,
                  initialization_duration_in_seconds: float,
                  simulation_resources_settings: dict = None,
@@ -345,7 +345,7 @@ class FlowerClient(Client):
         self._model_settings = model_settings
         self._device_emulation_settings = device_emulation_settings
         self._host_profile = host_profile
-        self._late_join_settings = late_join_settings
+        self._late_joining_settings = late_joining_settings
         self._simulation_resources_settings = simulation_resources_settings
         self._root_output_folder = root_output_folder
         self._all_cpu_cores_available = all_cpu_cores_available
@@ -468,7 +468,7 @@ class FlowerClient(Client):
         or the legacy Bernoulli client_failure_probability.
 
         This method should be called inside get_properties after battery, latency,
-        and late-join checks, because those checks can also force availability to False.
+        and late-joining checks, because those checks can also force availability to False.
         """
         if not config.get("client_available", True):
             return
@@ -1009,13 +1009,13 @@ class FlowerClient(Client):
             # Set client unavailable, if client is unreachable...
             if current_latency_in_milliseconds == inf:
                 config.update({"client_available": False})
-        # Check if client is of 'late-join' type (have to wait X rounds before joining the system).
-        late_join_settings = self.get_attribute("_late_join_settings")
-        is_late_join_client = late_join_settings["is_late_join_client"]
-        if is_late_join_client:
+        # Check if client is of 'late-joining' type (have to wait X rounds before joining the system).
+        late_joining_settings = self.get_attribute("_late_joining_settings")
+        is_late_joining_client = late_joining_settings["is_late_joining_client"]
+        if is_late_joining_client:
             comm_round = config.get("comm_round", 0)
-            late_join_first_appearance_round = late_join_settings["late_join_first_appearance_round"]
-            if comm_round != 0 and comm_round < late_join_first_appearance_round:
+            late_joining_first_appearance_round = late_joining_settings["late_joining_first_appearance_round"]
+            if comm_round != 0 and comm_round < late_joining_first_appearance_round:
                 config.update({"client_available": False})
         # Profile the client performance, if requested.
         if "profile_performance" in config:

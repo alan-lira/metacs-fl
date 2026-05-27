@@ -658,7 +658,7 @@ metacsfl
 The pack excludes:
 
 ```txt
-dynamic_client_availability/late_join_clients_experiments
+dynamic_client_availability/late_joining_clients_experiments
 performance_experiments involving Emotion
 ```
 

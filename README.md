@@ -570,7 +570,7 @@ static_client_availability/sensitivity_experiments
 It excludes:
 
 ```txt
-dynamic_client_availability/late_join_clients_experiments
+dynamic_client_availability/late_joining_clients_experiments
 Emotion-specific experiments
 ```
 

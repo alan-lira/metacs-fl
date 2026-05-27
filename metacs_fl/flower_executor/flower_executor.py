@@ -503,7 +503,7 @@ class FlowerExecutor:
     @staticmethod
     def _get_personalized_settings_for_client(client_id: int,
                                               base_client_config_file: Path,
-                                              late_join_clients: set,
+                                              late_joining_clients: set,
                                               execution_dict: dict | None = None,
                                               current_execution_devices: list | None = None) -> dict:
         # Initialize the personalized_settings dictionary.
@@ -528,13 +528,13 @@ class FlowerExecutor:
             host_profiler = HostProfiler(Path(execution_output_folder))
             host_profile = host_profiler.profile_host_n_times(client_id, num_host_profiles)
             personalized_settings["_host_profile"] = host_profile
-            # Set the late-join settings.
-            is_late_join_client = client_id in late_join_clients
-            late_join_settings = {"is_late_join_client": is_late_join_client}
-            if is_late_join_client:
-                late_join_first_appearance_round = execution_settings["round_of_first_appearance_of_late_join_clients"]
-                late_join_settings.update({"late_join_first_appearance_round": late_join_first_appearance_round})
-            personalized_settings["_late_join_settings"] = late_join_settings
+            # Set the late-joining settings.
+            is_late_joining_client = client_id in late_joining_clients
+            late_joining_settings = {"is_late_joining_client": is_late_joining_client}
+            if is_late_joining_client:
+                late_joining_first_appearance_round = execution_settings["round_of_first_appearance_of_late_joining_clients"]
+                late_joining_settings.update({"late_joining_first_appearance_round": late_joining_first_appearance_round})
+            personalized_settings["_late_joining_settings"] = late_joining_settings
             # Override client gRPC settings according to the executor/nodes plan.
             grpc_settings = parse_config_section(base_client_config_file, "gRPC Settings")
             grpc_settings["server_ip_address"] = execution_settings.get("server_ip", grpc_settings["server_ip_address"])
@@ -874,28 +874,28 @@ class FlowerExecutor:
                 data_line = "{0},{1}\n".format(client_id, client_score)
                 o_f.write(data_line)
 
-    def _determine_late_join_clients(self,
-                                     num_clients: int,
-                                     late_join_clients_percentage: float,
-                                     late_join_clients_performance_profile: str) -> set:
-        if late_join_clients_percentage <= 0:
+    def _determine_late_joining_clients(self,
+                                        num_clients: int,
+                                        late_joining_clients_percentage: float,
+                                        late_joining_clients_performance_profile: str) -> set:
+        if late_joining_clients_percentage <= 0:
             return set()
-        num_late_join_clients = min(max(1, int(num_clients * late_join_clients_percentage)), num_clients)
-        # Initialize the list of late-join clients.
-        late_join_clients = []
+        num_late_joining_clients = min(max(1, int(num_clients * late_joining_clients_percentage)), num_clients)
+        # Initialize the list of late-joining clients.
+        late_joining_clients = []
         # Get the list of devices scores.
         devices_scores = self.get_attribute("_devices_scores")
         # Sort by ascending score.
         devices_scores.sort(key=lambda x: x[1])
-        # Match the user-defined performance profile for late-join clients.
-        match late_join_clients_performance_profile:
+        # Match the user-defined performance profile for late-joining clients.
+        match late_joining_clients_performance_profile:
             case "random":
                 rng = self.get_attribute("_rng")
-                late_join_clients = rng.choice(range(num_clients), size=num_late_join_clients, replace=False)
+                late_joining_clients = rng.choice(range(num_clients), size=num_late_joining_clients, replace=False)
             case "worst":
-                late_join_clients = [i for i, _ in devices_scores[:num_late_join_clients]]
+                late_joining_clients = [i for i, _ in devices_scores[:num_late_joining_clients]]
             case "best":
-                late_join_clients = [i for i, _ in reversed(devices_scores[-num_late_join_clients:])]
+                late_joining_clients = [i for i, _ in reversed(devices_scores[-num_late_joining_clients:])]
             case "medium":
                 scores = array([s for _, s in devices_scores])
                 p33 = percentile(a=scores, q=33)
@@ -903,45 +903,45 @@ class FlowerExecutor:
                 # Clients whose scores fall inside the middle percentile band.
                 medium_band = [(i, s) for (i, s) in devices_scores if p33 <= s <= p66]
                 # If we have enough, randomly choose from inside this band.
-                if len(medium_band) >= num_late_join_clients:
+                if len(medium_band) >= num_late_joining_clients:
                     rng = self.get_attribute("_rng")
-                    chosen = rng.choice(list(medium_band), size=num_late_join_clients, replace=False)
-                    late_join_clients = [int(i) for (i, _) in chosen]
+                    chosen = rng.choice(list(medium_band), size=num_late_joining_clients, replace=False)
+                    late_joining_clients = [int(i) for (i, _) in chosen]
                 else:
                     # Otherwise: include entire medium band, then expand outward closest to median score.
-                    late_join_clients = [i for (i, _) in medium_band]
-                    remaining = num_late_join_clients - len(late_join_clients)
+                    late_joining_clients = [i for (i, _) in medium_band]
+                    remaining = num_late_joining_clients - len(late_joining_clients)
                     # Sort by closeness to the median.
                     median_score = median(scores)
-                    remaining_pool = [(i, abs(s - median_score)) for (i, s) in devices_scores if i not in late_join_clients]
+                    remaining_pool = [(i, abs(s - median_score)) for (i, s) in devices_scores if i not in late_joining_clients]
                     remaining_pool.sort(key=lambda x: x[1])
-                    late_join_clients.extend([i for (i, _) in remaining_pool[:remaining]])
-        return {int(i) for i in late_join_clients}
+                    late_joining_clients.extend([i for (i, _) in remaining_pool[:remaining]])
+        return {int(i) for i in late_joining_clients}
 
-    def _write_late_join_clients_to_file(self,
-                                         late_join_clients: set[int],
-                                         late_join_clients_performance_profile: str,
-                                         late_join_clients_round_of_first_appearance: int,
+    def _write_late_joining_clients_to_file(self,
+                                            late_joining_clients: set[int],
+                                            late_joining_clients_performance_profile: str,
+                                            late_joining_clients_round_of_first_appearance: int,
                                          root_output_folder: Path,
-                                         output_file: Path = Path("late_join_clients_ids.csv")) -> None:
+                                         output_file: Path = Path("late_joining_clients_ids.csv")) -> None:
         output_file = root_output_folder.joinpath(output_file)
         output_file.parent.mkdir(exist_ok=True, parents=True)
         # Get the list of devices scores.
         devices_scores = self.get_attribute("_devices_scores")
         # Sort devices scores by ascending ID.
         devices_scores.sort(key=lambda x: x[0])
-        # Sort late-join clients by ascending score.
-        late_join_clients_sorted = sorted(late_join_clients, key=lambda client_id: devices_scores[client_id][1])
+        # Sort late-joining clients by ascending score.
+        late_joining_clients_sorted = sorted(late_joining_clients, key=lambda client_id: devices_scores[client_id][1])
         with open(file=output_file, mode="w", encoding="utf-8") as o_f:
             header_line = "client_id,client_score,performance_profile,round_of_first_appearance\n"
             o_f.write(header_line)
-            for client_id in late_join_clients_sorted:
+            for client_id in late_joining_clients_sorted:
                 client_score = devices_scores[client_id][1]
                 data_line = "{0},{1},{2},{3}\n" \
                             .format(client_id,
                                     client_score,
-                                    late_join_clients_performance_profile,
-                                    late_join_clients_round_of_first_appearance)
+                                    late_joining_clients_performance_profile,
+                                    late_joining_clients_round_of_first_appearance)
                 o_f.write(data_line)
 
     def _write_client_availability_profiles_to_file(self,
@@ -1071,7 +1071,7 @@ class FlowerExecutor:
         # Load the personalized_settings dictionary for this client.
         client_personalized_settings = self._get_personalized_settings_for_client(client_id,
                                                                                   base_client_config_file,
-                                                                                  self.get_attribute("_late_join_clients"),
+                                                                                  self.get_attribute("_late_joining_clients"),
                                                                                   current_execution,
                                                                                   current_execution_devices)
         # Append the client resources to the 'clients_resources.csv' file.
@@ -1310,28 +1310,29 @@ class FlowerExecutor:
                 execution_output_folder = Path(execution_settings["execution_output_folder"])
                 self._write_devices_scores_to_file(execution_output_folder)
                 # Write the clients' availability profiles to file.
-                self._write_client_availability_profiles_to_file(execution_output_folder)
+                if self._as_bool(execution_settings.get("enable_client_availability_simulation", False)):
+                    self._write_client_availability_profiles_to_file(execution_output_folder)
             # Print the start of the execution.
             print("\nStarting the execution '{0}'...".format(execution_name))
             # Start the execution timer.
             start = perf_counter()
             # Get the number of clients.
             num_clients = execution_settings["num_clients"]
-            # Determine the set of late-join clients.
-            late_join_clients_percentage = execution_settings.get("percentage_late_join_clients", 0.0)
-            late_join_clients_performance_profile = execution_settings.get("performance_profile_late_join_clients", "random")
-            late_join_clients_round_of_first_appearance = execution_settings.get("round_of_first_appearance_of_late_join_clients", 1)
-            late_join_clients = self._determine_late_join_clients(num_clients,
-                                                                  late_join_clients_percentage,
-                                                                  late_join_clients_performance_profile)
-            self._set_attribute("_late_join_clients", late_join_clients)
-            # Write the set of late-join clients, if any, to output file.
-            if len(late_join_clients) > 0:
+            # Determine the set of late-joining clients.
+            late_joining_clients_percentage = execution_settings.get("percentage_late_joining_clients", 0.0)
+            late_joining_clients_performance_profile = execution_settings.get("performance_profile_late_joining_clients", "random")
+            late_joining_clients_round_of_first_appearance = execution_settings.get("round_of_first_appearance_of_late_joining_clients", 1)
+            late_joining_clients = self._determine_late_joining_clients(num_clients,
+                                                                        late_joining_clients_percentage,
+                                                                        late_joining_clients_performance_profile)
+            self._set_attribute("_late_joining_clients", late_joining_clients)
+            # Write the set of late-joining clients, if any, to output file.
+            if len(late_joining_clients) > 0:
                 execution_output_folder = Path(execution_settings["execution_output_folder"])
-                self._write_late_join_clients_to_file(late_join_clients,
-                                                      late_join_clients_performance_profile,
-                                                      late_join_clients_round_of_first_appearance,
-                                                      execution_output_folder)
+                self._write_late_joining_clients_to_file(late_joining_clients,
+                                                         late_joining_clients_performance_profile,
+                                                         late_joining_clients_round_of_first_appearance,
+                                                         execution_output_folder)
             # Resolve the execution placement.
             hostfile = self.get_attribute("_hostfile")
             if hostfile is not None:

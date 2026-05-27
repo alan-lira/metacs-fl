@@ -318,7 +318,7 @@ class FlowerClientLauncher:
         callbacks_settings = self.get_attribute("_callbacks_settings")
         device_emulation_settings = self.get_attribute("_device_emulation_settings")
         host_profile = self.get_attribute("_host_profile")
-        late_join_settings = self.get_attribute("_late_join_settings")
+        late_joining_settings = self.get_attribute("_late_joining_settings")
         simulation_resources_settings = self.get_attribute("_simulation_resources_settings")
         root_output_folder = self.get_attribute("_root_output_folder")
         all_cpu_cores_available = self.get_attribute("_all_cpu_cores_available")
@@ -354,7 +354,7 @@ class FlowerClientLauncher:
                               callbacks_settings=callbacks_settings,
                               device_emulation_settings=device_emulation_settings,
                               host_profile=host_profile,
-                              late_join_settings=late_join_settings,
+                              late_joining_settings=late_joining_settings,
                               logger=logger,
                               initialization_duration_in_seconds=initialization_duration_in_seconds,
                               simulation_resources_settings = simulation_resources_settings,
