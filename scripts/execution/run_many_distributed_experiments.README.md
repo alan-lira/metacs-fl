@@ -397,6 +397,7 @@ but not both.
 |---|---|---|
 | `--max-parallel-experiments N` | Number of experiments to run in parallel. | `1` |
 | `--repetitions N` | Passed to distributed experiments. | `1` |
+| `--execution-blocks BLOCK` | Optional execution block selector passed to distributed rows through `run_one_distributed_experiment.sh` and `launch_distributed_flower.sh`, for example `Execution_1_N` or `Execution_2_N`. | Empty; run all blocks configured by the executor |
 | `--max-parallel-installs N` | Passed to setup through `run_one_distributed_experiment.sh`. | `4` |
 | `--max-parallel-remote-ops N` | Passed to distributed launcher through `run_one_distributed_experiment.sh`. | `8` |
 
@@ -407,6 +408,8 @@ For distributed Flower experiments, the recommended default is:
 ```
 
 because each distributed experiment typically consumes the full node allocation.
+
+`--execution-blocks` is applied only to `distributed_flower` rows. It is not added to `server_only_python` commands. The selected value is forwarded unchanged to the distributed launcher and then to `main.py`.
 
 ---
 
@@ -658,9 +661,12 @@ metacsfl
 The pack excludes:
 
 ```txt
+dynamic_client_availability/intermittent_client_availability_experiments
 dynamic_client_availability/late_joining_clients_experiments
-performance_experiments involving Emotion
+performance experiments involving Emotion
 ```
+
+Run excluded dynamic experiment families with a custom manifest. Their layout and example manifest rows are documented in `experiments/README.md`.
 
 ---
 
@@ -808,6 +814,26 @@ bash scripts/execution/run_many_distributed_experiments.sh \
   --remote-project-dir /root/metacs-fl \
   --rerun-failed false
 ```
+
+---
+
+### 11.9 Run one execution block for all distributed rows
+
+Use this when the executor configs referenced by the manifest define multiple named execution blocks and the campaign should run only one block:
+
+```bash
+bash scripts/execution/run_many_distributed_experiments.sh \
+  --manifest campaign_runs/dynamic_experiments_001/campaign_manifest.csv \
+  --campaign-id dynamic_experiments_001 \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --remote-venv-activate /root/metacs-fl/.venv/bin/activate \
+  --install false \
+  --execution-blocks Execution_1_N \
+  --max-parallel-experiments 1
+```
+
+The option affects only `distributed_flower` rows. Omit it when all blocks in each executor config should run.
 
 ---
 
