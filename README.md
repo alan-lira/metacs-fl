@@ -1,3 +1,14 @@
+<p align="center">
+  <img
+    src="figures/valente-memorial.png"
+    alt="Valente descansando ao meu lado"
+  >
+</p>
+
+<p align="center">
+  <em>Forever by my side, forever in my heart. Valente — 16/06/2026</em>
+</p>
+
 # MetaCS-FL
 
 **MetaCS-FL** is a metaheuristic-based client selection framework for Federated Learning (FL) systems. It targets heterogeneous Cross-Device FL scenarios, where clients may differ in computational capacity, energy behavior, communication performance, availability, data quantity, and data distribution.
