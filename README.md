@@ -199,11 +199,12 @@ Both training and testing costs include client-side computation and client-serve
 
 MetaCS-FL evaluates candidate schedules through a configurable weighted objective:
 
-$$
-\min F(\mathcal{X}) =
- w_1 M_r + w_2 \Sigma_r
- - w_3 D_r - w_4 K_r - w_5 U_r
-$$
+```math
+\min_{\mathcal{X}} F(\mathcal{X})
+=
+w_1 M_r + w_2 \Sigma_r
+- w_3 D_r - w_4 K_r - w_5 U_r
+```
 
 The components are:
 
