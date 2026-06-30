@@ -20,7 +20,7 @@ The merge script reads those per-node folders and produces a single consolidated
 merged_results/<RUN_ID>/
 ```
 
-The script is designed to preserve data safely. CSV files with matching relative paths are appended row-wise when their headers match, while conflicting files are copied into a conflict directory instead of being overwritten. 
+The script is designed to preserve data safely. CSV files with matching relative paths are appended row-wise when their headers match, while conflicting files are copied into a conflict directory instead of being overwritten.
 
 ---
 
@@ -140,7 +140,7 @@ The script takes two positional arguments:
 | `gathered_root` | Path to `gathered_results/<RUN_ID>` containing `node_*` folders. |
 | `output_root` | Path where the merged output should be written. |
 
-It also supports optional arguments such as `--node-prefix`, `--add-source-node`, `--deduplicate-rows`, and `--clean-output`. :contentReference[oaicite:1]{index=1}
+It also supports optional arguments such as `--node-prefix`, `--add-source-node`, `--deduplicate-rows`, and `--clean-output`.
 
 ---
 
@@ -195,7 +195,7 @@ _gather_metadata/
 Conflicting files are copied into:
 
 ```txt
-_merge_results/<RUN_ID>/_merge_conflicts/
+<output_root>/_merge_conflicts/
 ```
 
 The detailed merge report is written to:
@@ -204,7 +204,7 @@ The detailed merge report is written to:
 merge_report.json
 ```
 
-The script writes a JSON report containing the gathered root, output root, discovered node folders, merge options, copied metadata, per-file actions, and a summary of merge actions. 
+The script writes a JSON report containing the gathered root, output root, discovered node folders, merge options, copied metadata, per-file actions, and a summary of merge actions.
 
 ---
 
@@ -247,7 +247,7 @@ timestamp
 time
 ```
 
-This helps keep merged round-level and client-level metrics ordered after aggregation. :contentReference[oaicite:3]{index=3}
+This helps keep merged round-level and client-level metrics ordered after aggregation.
 
 ---
 
@@ -434,7 +434,7 @@ conflict_non_csv_name_conflict
 conflict_merge_exception
 ```
 
-The terminal output also prints a summary and the path to the report. :contentReference[oaicite:4]{index=4}
+The terminal output also prints a summary and the path to the report.
 
 ---
 
@@ -532,7 +532,7 @@ python3 scripts/post_execution/merge_distributed_outputs.py \
   --clean-output true
 ```
 
-The launch script gathers per-node results under `gathered_results/<RUN_ID>/node_<node_name>/`; the merge script then consolidates those node folders into one merged output. :contentReference[oaicite:5]{index=5}
+The launch script gathers per-node results under `gathered_results/<RUN_ID>/node_<node_name>/`; the merge script then consolidates those node folders into one merged output.
 
 ---
 

@@ -22,7 +22,7 @@ scripts/execution/launch_distributed_flower.sh
 scripts/post_execution/merge_distributed_outputs.py
 ```
 
-The setup script supports node files, repository authentication, parallel installation, and editable package installation. The launch script supports custom Flower configs, runtime gRPC patching, per-node gathering, and parallel remote operations. The merge script consolidates the gathered `node_*` folders into one merged output directory. 
+The setup script supports node files, repository authentication, parallel installation, and editable package installation. The launch script supports custom Flower configs, runtime gRPC patching, per-node gathering, and parallel remote operations. The merge script consolidates the gathered `node_*` folders into one merged output directory.
 
 All examples below assume commands are executed from the project root folder.
 
@@ -329,12 +329,25 @@ The wrapper also supports extra passthrough arguments.
 
 Use one `--setup-arg`, `--launch-arg`, or `--merge-arg` per token.
 
-Example:
+Example for forwarding a launcher path option:
 
 ```bash
 --launch-arg --remote-hostfile-dir \
 --launch-arg /tmp/metacs_runtime
 ```
+
+Example for running only one configured execution block:
+
+```bash
+--launch-arg --execution-blocks \
+--launch-arg Execution_1_N
+```
+
+The second example is equivalent to passing
+`--execution-blocks Execution_1_N` directly to
+`launch_distributed_flower.sh`. Repeat the pair with a different block name to
+select another configured block. Omit it to allow all configured execution
+blocks to run.
 
 ---
 

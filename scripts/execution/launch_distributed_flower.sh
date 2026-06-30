@@ -90,6 +90,11 @@ Options:
       Number of repetitions.
       Default: 1
 
+  --execution-blocks BLOCK
+      Optional execution block selector passed to main.py, for example:
+      Execution_1_N or Execution_2_N. If omitted, all configured execution
+      blocks in the executor config may run.
+
   --python-bin BIN
       Python executable to use on the machine running the FL process.
       Default: python3
@@ -511,6 +516,7 @@ REMOTE_HOSTFILE_DIR=""
 
 ACTION="execute_fl_with_flower"
 REPETITIONS="1"
+EXECUTION_BLOCKS=""
 PYTHON_BIN="python3"
 
 LOCAL_LOG_ROOT="distributed_launch_logs"
@@ -626,6 +632,12 @@ while [[ "$#" -gt 0 ]]; do
     --repetitions)
       require_value "$1" "${2:-}"
       REPETITIONS="$2"
+      shift 2
+      ;;
+
+    --execution-blocks)
+      require_value "$1" "${2:-}"
+      EXECUTION_BLOCKS="$2"
       shift 2
       ;;
 
@@ -1090,6 +1102,7 @@ echo "[LOCAL] Runtime flower_server.cfg: ${RUNTIME_FLOWER_SERVER_CFG:-<not overr
 echo "[LOCAL] Runtime flower_client.cfg: ${RUNTIME_FLOWER_CLIENT_CFG:-<not overridden>}"
 echo "[LOCAL] Action: ${ACTION}"
 echo "[LOCAL] Repetitions: ${REPETITIONS}"
+echo "[LOCAL] Execution blocks: ${EXECUTION_BLOCKS:-<all configured blocks>}"
 echo "[LOCAL] Python binary: ${PYTHON_BIN}"
 echo "[LOCAL] gather-outputs: ${GATHER_OUTPUTS}"
 echo "[LOCAL] Local log directory: ${LOCAL_LOG_DIR}"
@@ -1102,6 +1115,13 @@ if [[ "${MODE}" != "local" ]]; then
 fi
 
 echo
+
+MAIN_EXTRA_ARGS=()
+REMOTE_MAIN_EXTRA_ARGS=""
+if [[ -n "${EXECUTION_BLOCKS}" ]]; then
+  MAIN_EXTRA_ARGS+=(--execution-blocks "${EXECUTION_BLOCKS}")
+  REMOTE_MAIN_EXTRA_ARGS="--execution-blocks '${EXECUTION_BLOCKS}'"
+fi
 
 # ----------------------------------------------------------------------
 # Remote helper functions
@@ -1332,7 +1352,8 @@ if [[ "${MODE}" == "local" ]]; then
       --config-file "${RUNTIME_FLOWER_EXECUTOR_CFG}" \
       --repetitions "${REPETITIONS}" \
       --hostfile "${LOCAL_HOSTFILE}" \
-      --gather-outputs "${GATHER_OUTPUTS}"
+      --gather-outputs "${GATHER_OUTPUTS}" \
+      "${MAIN_EXTRA_ARGS[@]}"
   ) > "${LOCAL_LOG_DIR}/${SAFE_PROCESS_NAME}.out" \
     2> "${LOCAL_LOG_DIR}/${SAFE_PROCESS_NAME}.err" &
 
@@ -1359,7 +1380,8 @@ else
         --config-file '${RUNTIME_FLOWER_EXECUTOR_CFG}' \
         --repetitions '${REPETITIONS}' \
         --hostfile '${REMOTE_HOSTFILE}' \
-        --gather-outputs '${GATHER_OUTPUTS}'
+        --gather-outputs '${GATHER_OUTPUTS}' \
+        ${REMOTE_MAIN_EXTRA_ARGS}
     " > "${LOCAL_LOG_DIR}/${SAFE_PROCESS_NAME}.out" \
       2> "${LOCAL_LOG_DIR}/${SAFE_PROCESS_NAME}.err" &
 

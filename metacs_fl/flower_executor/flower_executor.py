@@ -12,6 +12,7 @@ from sys import stdout as sys_stdout, stderr as sys_stderr
 from time import perf_counter, sleep
 from threading import BrokenBarrierError
 from traceback import format_exc
+from typing import Sequence
 
 from metacs_fl.client_launcher.flower_client_launcher import FlowerClientLauncher
 from metacs_fl.devices.edge_devices import generate_edge_devices
@@ -28,12 +29,14 @@ class FlowerExecutor:
                  config_file: Path,
                  repetitions: int,
                  hostfile: Path | None = None,
-                 output_gathering_settings: dict | None = None) -> None:
+                 output_gathering_settings: dict | None = None,
+                 execution_blocks: str | Sequence | None = None) -> None:
         # Initialize the attributes.
         self._config_file = config_file
         self._repetitions = repetitions
         self._hostfile = hostfile
         self._output_gathering_settings = output_gathering_settings or {}
+        self._execution_blocks = self._parse_execution_blocks_argument(execution_blocks)
         self._current_execution = {}
         self._current_execution_devices = []
         self._rng = default_rng()
@@ -49,6 +52,76 @@ class FlowerExecutor:
         return getattr(self, attribute_name)
 
     @staticmethod
+    def _parse_execution_blocks_argument(execution_blocks: str | Sequence | None) -> list:
+        """
+        Parse the optional execution-block filter.
+
+        Accepted examples:
+            None
+            "A"
+            "A,B"
+            "Execution_A_N"
+            "Execution_A_N Settings"
+            ["Execution_A_N Settings", "Execution_B_N Settings"]
+
+        The returned values are raw selectors. They are normalized later after the
+        config file sections are known, so error messages can show the available
+        choices.
+        """
+        if execution_blocks is None:
+            return []
+        if isinstance(execution_blocks, str):
+            value = execution_blocks.strip()
+            if not value:
+                return []
+            # Prefer comma-separated values because full section names contain spaces.
+            # Also accept a single value wrapped in brackets, e.g. "[A,B]".
+            value = value.strip()
+            if value.startswith("[") and value.endswith("]"):
+                value = value[1:-1]
+            return [item.strip().strip("'\"") for item in value.split(",") if item.strip()]
+        return [str(item).strip().strip("'\"") for item in execution_blocks if str(item).strip()]
+
+    @staticmethod
+    def _normalize_execution_block_selector(selector: str) -> str:
+        """Normalize a user selector to the config section name format."""
+        selector = str(selector).strip().strip("[]").strip().strip("'\"")
+        if not selector:
+            raise ValueError("Empty execution block selector.")
+        if selector.endswith(" Settings"):
+            return selector
+        if selector.startswith("Execution_"):
+            if selector.endswith("_N"):
+                return "{0} Settings".format(selector)
+            return "{0}_N Settings".format(selector)
+        if selector.endswith("_N"):
+            return "Execution_{0} Settings".format(selector)
+        return "Execution_{0}_N Settings".format(selector)
+
+    @staticmethod
+    def _select_execution_sections(execution_sections: list,
+                                   execution_blocks: list) -> list:
+        """Return all execution sections or only the user-requested subset."""
+        if not execution_blocks:
+            return execution_sections
+        sections_by_lowercase = {section.lower(): section for section in execution_sections}
+        selected_sections = []
+        missing_sections = []
+        for selector in execution_blocks:
+            normalized_selector = FlowerExecutor._normalize_execution_block_selector(selector)
+            matched_section = sections_by_lowercase.get(normalized_selector.lower())
+            if matched_section is None:
+                missing_sections.append(selector)
+                continue
+            if matched_section not in selected_sections:
+                selected_sections.append(matched_section)
+        if missing_sections:
+            available_sections = ", ".join(execution_sections) if execution_sections else "<none>"
+            raise ValueError("Unknown execution block selector(s): {0}. Available execution blocks: {1}"
+                             .format(", ".join(missing_sections), available_sections))
+        return selected_sections
+
+    @staticmethod
     def _is_localhost_ip(ip_address: str) -> bool:
         return ip_address in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
@@ -62,7 +135,7 @@ class FlowerExecutor:
         return value.split(".")[0]
 
     @staticmethod
-    def _resolve_host_addresses(host: str) -> set[str]:
+    def _resolve_host_addresses(host: str) -> set:
         addresses = set()
         if not host:
             return addresses
@@ -74,7 +147,7 @@ class FlowerExecutor:
         return addresses
 
     @staticmethod
-    def _get_local_ip_addresses() -> set[str]:
+    def _get_local_ip_addresses() -> set:
         local_values = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
         try:
             hostname = gethostname()
@@ -156,7 +229,7 @@ class FlowerExecutor:
 
     @staticmethod
     def _assign_clients_to_nodes(num_clients: int,
-                                 client_ips: list[str]) -> dict:
+                                 client_ips: list) -> dict:
         clients_by_ip = defaultdict(list)
         for client_id in range(num_clients):
             client_ip = client_ips[client_id % len(client_ips)]
@@ -164,7 +237,7 @@ class FlowerExecutor:
         return dict(clients_by_ip)
 
     def _get_clients_for_this_node(self,
-                                   clients_by_ip: dict) -> list[int]:
+                                   clients_by_ip: dict) -> list:
         local_client_ids = []
         for ip_address, client_ids in clients_by_ip.items():
             if self._is_this_node(ip_address):
@@ -212,7 +285,7 @@ class FlowerExecutor:
     def _write_node_manifest(output_folder: Path,
                              execution_name: str,
                              is_server_node: bool,
-                             local_client_ids: list[int],
+                             local_client_ids: list,
                              is_distributed_execution: bool) -> None:
         output_folder.mkdir(exist_ok=True, parents=True)
         manifest_file = output_folder.joinpath("distributed_node_manifest.txt")
@@ -233,7 +306,7 @@ class FlowerExecutor:
             print(format_exc(), file=sys_stdout, flush=True)
 
     @staticmethod
-    def _run_command_with_trace(command: list[str],
+    def _run_command_with_trace(command: list,
                                 description: str) -> None:
         print("[Output Collection] {0}: {1}".format(description, " ".join(command)),
               file=sys_stdout,
@@ -267,7 +340,7 @@ class FlowerExecutor:
                                       execution_settings: dict,
                                       is_distributed_execution: bool,
                                       is_server_node: bool,
-                                      local_client_ids: list[int]) -> None:
+                                      local_client_ids: list) -> None:
         gather_outputs = self._as_bool(execution_settings.get("gather_outputs", False))
         if not gather_outputs:
             return
@@ -363,8 +436,8 @@ class FlowerExecutor:
     def _apply_repetition_placeholder_to_settings(self,
                                                   execution_settings: dict,
                                                   repetition_idx: int,
-                                                  required_keys: list[str] | None = None,
-                                                  optional_keys: list[str] | None = None) -> None:
+                                                  required_keys: list | None = None,
+                                                  optional_keys: list | None = None) -> None:
         required_keys = required_keys or []
         optional_keys = optional_keys or []
         for key in required_keys:
@@ -430,7 +503,7 @@ class FlowerExecutor:
     @staticmethod
     def _get_personalized_settings_for_client(client_id: int,
                                               base_client_config_file: Path,
-                                              late_join_clients: set,
+                                              late_joining_clients: set,
                                               execution_dict: dict | None = None,
                                               current_execution_devices: list | None = None) -> dict:
         # Initialize the personalized_settings dictionary.
@@ -455,13 +528,13 @@ class FlowerExecutor:
             host_profiler = HostProfiler(Path(execution_output_folder))
             host_profile = host_profiler.profile_host_n_times(client_id, num_host_profiles)
             personalized_settings["_host_profile"] = host_profile
-            # Set the late-join settings.
-            is_late_join_client = client_id in late_join_clients
-            late_join_settings = {"is_late_join_client": is_late_join_client}
-            if is_late_join_client:
-                late_join_first_appearance_round = execution_settings["round_of_first_appearance_of_late_join_clients"]
-                late_join_settings.update({"late_join_first_appearance_round": late_join_first_appearance_round})
-            personalized_settings["_late_join_settings"] = late_join_settings
+            # Set the late-joining settings.
+            is_late_joining_client = client_id in late_joining_clients
+            late_joining_settings = {"is_late_joining_client": is_late_joining_client}
+            if is_late_joining_client:
+                late_joining_first_appearance_round = execution_settings["round_of_first_appearance_of_late_joining_clients"]
+                late_joining_settings.update({"late_joining_first_appearance_round": late_joining_first_appearance_round})
+            personalized_settings["_late_joining_settings"] = late_joining_settings
             # Override client gRPC settings according to the executor/nodes plan.
             grpc_settings = parse_config_section(base_client_config_file, "gRPC Settings")
             grpc_settings["server_ip_address"] = execution_settings.get("server_ip", grpc_settings["server_ip_address"])
@@ -491,6 +564,196 @@ class FlowerExecutor:
         data_line = str(client_id) + "," + ",".join(map(str, filtered_device_emulation_settings.values())) + "\n"
         with open(file=output_file, mode="a", encoding="utf-8") as o_f:
             o_f.write(data_line)
+
+    @staticmethod
+    def _as_bool(value: any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return bool(value)
+
+    @staticmethod
+    def _as_float_range(value: any,
+                        default: tuple) -> tuple:
+        if value is None:
+            return default
+        if isinstance(value, (list, tuple)):
+            if len(value) == 0:
+                return default
+            if len(value) == 1:
+                v = float(value[0])
+                return v, v
+            return float(value[0]), float(value[1])
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return default
+            if "|" in value:
+                parts = value.split("|")
+            elif "," in value:
+                parts = value.split(",")
+            else:
+                v = float(value)
+                return v, v
+            parts = [p.strip() for p in parts if p.strip()]
+            if len(parts) == 0:
+                return default
+            if len(parts) == 1:
+                v = float(parts[0])
+                return v, v
+            return float(parts[0]), float(parts[1])
+        v = float(value)
+        return v, v
+
+    @staticmethod
+    def _parse_availability_profile_mix(value: any) -> dict:
+        """
+        Parse strings such as:
+            stable:0.25|intermittent:0.50|unstable:0.20|bursty_off:0.05
+
+        Returns a dict profile -> probability.
+        """
+        if value is None:
+            return {"intermittent": 1.0}
+        if isinstance(value, dict):
+            return {str(k): float(v) for k, v in value.items()}
+        value = str(value).strip()
+        if not value:
+            return {"intermittent": 1.0}
+        profile_mix = {}
+        for item in value.split("|"):
+            item = item.strip()
+            if not item:
+                continue
+            if ":" not in item:
+                raise ValueError("Invalid availability profile mix item '{0}'. "
+                                 "Expected format profile:probability.".format(item))
+            profile, probability = item.split(":", 1)
+            profile_mix[profile.strip()] = float(probability.strip())
+        total_probability = sum(profile_mix.values())
+        if total_probability <= 0.0:
+            raise ValueError("The availability profile mix must have positive total probability.")
+        # Normalize to avoid requiring exact sum = 1.0.
+        return {profile: probability / total_probability
+                for profile, probability in profile_mix.items()}
+
+    @staticmethod
+    def _expand_availability_profile_mix_to_fixed_quotas(profile_mix: dict,
+                                                         num_clients: int) -> list:
+        """
+        Convert a probability mix into exactly num_clients profile labels.
+
+        Counts are computed with the largest-remainder method:
+          1. floor(probability * num_clients) for each profile
+          2. assign the remaining clients to the largest fractional remainders
+
+        Example for 100 clients and
+        stable:0.25|intermittent:0.50|unstable:0.20|bursty_off:0.05:
+          stable=25, intermittent=50, unstable=20, bursty_off=5
+        """
+        if num_clients <= 0:
+            return []
+        profiles = list(profile_mix.keys())
+        raw_counts = {profile: profile_mix[profile] * num_clients for profile in profiles}
+        counts = {profile: int(raw_counts[profile]) for profile in profiles}
+        remaining = num_clients - sum(counts.values())
+        # Deterministic tie-breaking keeps the config order when remainders are equal.
+        ranked_profiles = sorted(profiles,
+                                 key=lambda profile: (raw_counts[profile] - counts[profile], -profiles.index(profile)),
+                                 reverse=True)
+        for profile in ranked_profiles[:remaining]:
+            counts[profile] += 1
+        profile_labels = []
+        for profile in profiles:
+            profile_labels.extend([profile] * counts[profile])
+        return profile_labels
+
+    @staticmethod
+    def _generate_client_availability_settings(rng: Generator,
+                                               num_clients: int,
+                                               execution_settings: dict) -> dict:
+        """
+        Generate independent Markov availability and completion-failure settings
+        for each client.
+
+        Each client receives:
+          - availability_simulation_enabled
+          - availability_profile
+          - availability_initial_state
+          - availability_p_off
+          - availability_p_on
+          - availability_seed
+          - enable_client_completion_failure_simulation
+          - completion_failure_base_probability
+          - completion_failure_workload_sensitivity
+          - completion_failure_max_probability
+          - use_client_failure_probability_for_processing_failures
+        """
+        availability_simulation_enabled = FlowerExecutor._as_bool(execution_settings.get("enable_client_availability_simulation", False))
+        force_available_during_profiling = FlowerExecutor._as_bool(execution_settings.get("availability_force_available_during_profiling", True))
+        availability_history_size = int(execution_settings.get("availability_history_size", 100))
+        initial_available_probability = float(execution_settings.get("availability_initial_available_probability", 1.0))
+        enable_client_completion_failure_simulation = FlowerExecutor._as_bool(execution_settings.get("enable_client_completion_failure_simulation", False))
+        use_legacy_failure_probability_for_processing = FlowerExecutor._as_bool(execution_settings.get("use_client_failure_probability_for_processing_failures", False))
+        completion_failure_max_probability = float(execution_settings.get("completion_failure_max_probability", 0.30))
+        availability_seed_offset = int(execution_settings.get("availability_seed_offset", 100000))
+        profile_mix = FlowerExecutor._parse_availability_profile_mix(execution_settings.get("availability_profiles_mix",
+                                                                                            "stable:0.25|intermittent:0.50|unstable:0.20|bursty_off:0.05"))
+        assigned_profiles = FlowerExecutor._expand_availability_profile_mix_to_fixed_quotas(profile_mix, num_clients)
+        # Shuffle the fixed quotas so profile assignment is not grouped by client ID.
+        rng.shuffle(assigned_profiles)
+        # Default ranges. These values create temporal persistence:
+        # - low p_off: available clients tend to stay available
+        # - low/medium p_on: unavailable clients may remain unavailable for bursts
+        default_ranges = {"stable": {"p_off": (0.01, 0.03), "p_on": (0.70, 0.95)},
+                          "intermittent": {"p_off": (0.05, 0.12), "p_on": (0.30, 0.60)},
+                          "unstable": {"p_off": (0.15, 0.30), "p_on": (0.20, 0.45)},
+                          "bursty_off": {"p_off": (0.08, 0.18), "p_on": (0.05, 0.20)}}
+        default_completion_failure_base = {"stable": 0.005,
+                                           "intermittent": 0.020,
+                                           "unstable": 0.060,
+                                           "bursty_off": 0.100}
+        default_completion_failure_workload_sensitivity = {"stable": 0.010,
+                                                           "intermittent": 0.030,
+                                                           "unstable": 0.060,
+                                                           "bursty_off": 0.080}
+        client_availability_settings = {}
+        for client_id in range(num_clients):
+            profile = assigned_profiles[client_id]
+            p_off_default = default_ranges.get(profile, default_ranges["intermittent"])["p_off"]
+            p_on_default = default_ranges.get(profile, default_ranges["intermittent"])["p_on"]
+            p_off_range = FlowerExecutor._as_float_range(execution_settings.get("availability_{0}_p_off_range".format(profile), None),
+                                                         p_off_default)
+            p_on_range = FlowerExecutor._as_float_range(execution_settings.get("availability_{0}_p_on_range".format(profile), None),
+                                                        p_on_default)
+            p_off = float(rng.uniform(p_off_range[0], p_off_range[1]))
+            p_on = float(rng.uniform(p_on_range[0], p_on_range[1]))
+            initial_available = bool(rng.random() < initial_available_probability)
+            completion_failure_base_probability = float(execution_settings.get("completion_failure_base_{0}".format(profile),
+                                                                               default_completion_failure_base.get(profile, default_completion_failure_base["intermittent"])))
+            completion_failure_workload_sensitivity = float(execution_settings.get("completion_failure_workload_sensitivity_{0}".format(profile),
+                                                                                   default_completion_failure_workload_sensitivity.get(profile,
+                                                                                                                                       default_completion_failure_workload_sensitivity["intermittent"])))
+            client_availability_settings[client_id] = {"availability_simulation_enabled": availability_simulation_enabled,
+                                                       "availability_profile": str(profile),
+                                                       "availability_initial_state": initial_available,
+                                                       "availability_p_off": p_off,
+                                                       "availability_p_on": p_on,
+                                                       "availability_seed": availability_seed_offset + client_id,
+                                                       "availability_history_size": availability_history_size,
+                                                       "availability_force_available_during_profiling": force_available_during_profiling,
+                                                       "enable_client_completion_failure_simulation": enable_client_completion_failure_simulation,
+                                                       "completion_failure_base_probability": completion_failure_base_probability,
+                                                       "completion_failure_workload_sensitivity": completion_failure_workload_sensitivity,
+                                                       "completion_failure_max_probability": completion_failure_max_probability,
+                                                       "use_client_failure_probability_for_processing_failures": use_legacy_failure_probability_for_processing,
+                                                       "client_completion_failure_probability": completion_failure_base_probability}
+        return client_availability_settings
 
     @staticmethod
     def _generate_client_failure_probabilities(rng: Generator,
@@ -611,28 +874,28 @@ class FlowerExecutor:
                 data_line = "{0},{1}\n".format(client_id, client_score)
                 o_f.write(data_line)
 
-    def _determine_late_join_clients(self,
-                                     num_clients: int,
-                                     late_join_clients_percentage: float,
-                                     late_join_clients_performance_profile: str) -> set:
-        if late_join_clients_percentage <= 0:
+    def _determine_late_joining_clients(self,
+                                        num_clients: int,
+                                        late_joining_clients_percentage: float,
+                                        late_joining_clients_performance_profile: str) -> set:
+        if late_joining_clients_percentage <= 0:
             return set()
-        num_late_join_clients = min(max(1, int(num_clients * late_join_clients_percentage)), num_clients)
-        # Initialize the list of late-join clients.
-        late_join_clients = []
+        num_late_joining_clients = min(max(1, int(num_clients * late_joining_clients_percentage)), num_clients)
+        # Initialize the list of late-joining clients.
+        late_joining_clients = []
         # Get the list of devices scores.
         devices_scores = self.get_attribute("_devices_scores")
         # Sort by ascending score.
         devices_scores.sort(key=lambda x: x[1])
-        # Match the user-defined performance profile for late-join clients.
-        match late_join_clients_performance_profile:
+        # Match the user-defined performance profile for late-joining clients.
+        match late_joining_clients_performance_profile:
             case "random":
                 rng = self.get_attribute("_rng")
-                late_join_clients = rng.choice(range(num_clients), size=num_late_join_clients, replace=False)
+                late_joining_clients = rng.choice(range(num_clients), size=num_late_joining_clients, replace=False)
             case "worst":
-                late_join_clients = [i for i, _ in devices_scores[:num_late_join_clients]]
+                late_joining_clients = [i for i, _ in devices_scores[:num_late_joining_clients]]
             case "best":
-                late_join_clients = [i for i, _ in reversed(devices_scores[-num_late_join_clients:])]
+                late_joining_clients = [i for i, _ in reversed(devices_scores[-num_late_joining_clients:])]
             case "medium":
                 scores = array([s for _, s in devices_scores])
                 p33 = percentile(a=scores, q=33)
@@ -640,45 +903,60 @@ class FlowerExecutor:
                 # Clients whose scores fall inside the middle percentile band.
                 medium_band = [(i, s) for (i, s) in devices_scores if p33 <= s <= p66]
                 # If we have enough, randomly choose from inside this band.
-                if len(medium_band) >= num_late_join_clients:
+                if len(medium_band) >= num_late_joining_clients:
                     rng = self.get_attribute("_rng")
-                    chosen = rng.choice(list(medium_band), size=num_late_join_clients, replace=False)
-                    late_join_clients = [int(i) for (i, _) in chosen]
+                    chosen = rng.choice(list(medium_band), size=num_late_joining_clients, replace=False)
+                    late_joining_clients = [int(i) for (i, _) in chosen]
                 else:
                     # Otherwise: include entire medium band, then expand outward closest to median score.
-                    late_join_clients = [i for (i, _) in medium_band]
-                    remaining = num_late_join_clients - len(late_join_clients)
+                    late_joining_clients = [i for (i, _) in medium_band]
+                    remaining = num_late_joining_clients - len(late_joining_clients)
                     # Sort by closeness to the median.
                     median_score = median(scores)
-                    remaining_pool = [(i, abs(s - median_score)) for (i, s) in devices_scores if i not in late_join_clients]
+                    remaining_pool = [(i, abs(s - median_score)) for (i, s) in devices_scores if i not in late_joining_clients]
                     remaining_pool.sort(key=lambda x: x[1])
-                    late_join_clients.extend([i for (i, _) in remaining_pool[:remaining]])
-        return {int(i) for i in late_join_clients}
+                    late_joining_clients.extend([i for (i, _) in remaining_pool[:remaining]])
+        return {int(i) for i in late_joining_clients}
 
-    def _write_late_join_clients_to_file(self,
-                                         late_join_clients: set[int],
-                                         late_join_clients_performance_profile: str,
-                                         late_join_clients_round_of_first_appearance: int,
+    def _write_late_joining_clients_to_file(self,
+                                            late_joining_clients: set[int],
+                                            late_joining_clients_performance_profile: str,
+                                            late_joining_clients_round_of_first_appearance: int,
                                          root_output_folder: Path,
-                                         output_file: Path = Path("late_join_clients_ids.csv")) -> None:
+                                         output_file: Path = Path("late_joining_clients_ids.csv")) -> None:
         output_file = root_output_folder.joinpath(output_file)
         output_file.parent.mkdir(exist_ok=True, parents=True)
         # Get the list of devices scores.
         devices_scores = self.get_attribute("_devices_scores")
         # Sort devices scores by ascending ID.
         devices_scores.sort(key=lambda x: x[0])
-        # Sort late-join clients by ascending score.
-        late_join_clients_sorted = sorted(late_join_clients, key=lambda client_id: devices_scores[client_id][1])
+        # Sort late-joining clients by ascending score.
+        late_joining_clients_sorted = sorted(late_joining_clients, key=lambda client_id: devices_scores[client_id][1])
         with open(file=output_file, mode="w", encoding="utf-8") as o_f:
             header_line = "client_id,client_score,performance_profile,round_of_first_appearance\n"
             o_f.write(header_line)
-            for client_id in late_join_clients_sorted:
+            for client_id in late_joining_clients_sorted:
                 client_score = devices_scores[client_id][1]
                 data_line = "{0},{1},{2},{3}\n" \
                             .format(client_id,
                                     client_score,
-                                    late_join_clients_performance_profile,
-                                    late_join_clients_round_of_first_appearance)
+                                    late_joining_clients_performance_profile,
+                                    late_joining_clients_round_of_first_appearance)
+                o_f.write(data_line)
+
+    def _write_client_availability_profiles_to_file(self,
+                                                    root_output_folder: Path,
+                                                    output_file: Path = Path("clients_availability_profiles.csv")) -> None:
+        output_file = root_output_folder.joinpath(output_file)
+        output_file.parent.mkdir(exist_ok=True, parents=True)
+        current_execution_devices = self.get_attribute("_current_execution_devices")
+        with open(file=output_file, mode="w", encoding="utf-8") as o_f:
+            header_line = "client_id,availability_profile\n"
+            o_f.write(header_line)
+            for client_id, current_execution_device in enumerate(current_execution_devices):
+                device_settings = current_execution_device[1]
+                availability_profile = device_settings.get("availability_profile", "unknown")
+                data_line = "{0},{1}\n".format(client_id, availability_profile)
                 o_f.write(data_line)
 
     def _launch_flower_server(self,
@@ -793,7 +1071,7 @@ class FlowerExecutor:
         # Load the personalized_settings dictionary for this client.
         client_personalized_settings = self._get_personalized_settings_for_client(client_id,
                                                                                   base_client_config_file,
-                                                                                  self.get_attribute("_late_join_clients"),
+                                                                                  self.get_attribute("_late_joining_clients"),
                                                                                   current_execution,
                                                                                   current_execution_devices)
         # Append the client resources to the 'clients_resources.csv' file.
@@ -845,7 +1123,10 @@ class FlowerExecutor:
             sys_stderr.flush()
             raise SystemExit(1)
 
-    def execute_fl_with_flower(self) -> None:
+    def execute_fl_with_flower(self,
+                               execution_blocks: str | Sequence | None = None) -> None:
+        if execution_blocks is not None:
+            self._set_attribute("_execution_blocks", self._parse_execution_blocks_argument(execution_blocks))
         try:
             self._execute_fl_with_flower_impl()
         except Exception as e:
@@ -863,6 +1144,10 @@ class FlowerExecutor:
         parser = ConfigParser()
         parser.read(config_file)
         execution_sections = [s for s in parser.sections() if s.startswith("Execution_") and s.endswith("_N Settings")]
+        execution_sections = self._select_execution_sections(execution_sections, self.get_attribute("_execution_blocks"))
+        if not execution_sections:
+            raise ValueError("No execution sections were found in config file: {0}".format(config_file))
+        print("Execution blocks selected: {0}".format(", ".join(execution_sections)))
         for execution_section in execution_sections:
             execution_settings = parse_config_section(config_file, execution_section)
             for repetition_idx in range(1, self._repetitions + 1):
@@ -1002,42 +1287,52 @@ class FlowerExecutor:
                         current_execution_devices[idx][1]["battery_stored_energy_in_joules"] = initial_remaining_battery_energy_in_joules
                     # Update the current execution devices.
                     self._set_attribute("_current_execution_devices", current_execution_devices)
-                # Generate the clients' failure probabilities.
+                # Generate the clients' legacy failure probabilities.
+                # Kept for backward compatibility with previous experiments.
                 rng = self.get_attribute("_rng")
                 num_clients = execution_settings["num_clients"]
                 poisson_failure_lambda_range = execution_settings.get("poisson_failure_lambda_range", [])
                 client_failure_probabilities = self._generate_client_failure_probabilities(rng,
                                                                                            num_clients,
                                                                                            poisson_failure_lambda_range)
+                # Generate the clients' intermittent availability settings.
+                client_availability_settings = self._generate_client_availability_settings(rng,
+                                                                                           num_clients,
+                                                                                           execution_settings)
                 current_execution_devices = self.get_attribute("_current_execution_devices")
                 for idx, _ in enumerate(current_execution_devices):
                     current_execution_devices[idx][1]["client_failure_probability"] = client_failure_probabilities[idx]
+                    current_execution_devices[idx][1].update(client_availability_settings[idx])
+                self._set_attribute("_current_execution_devices", current_execution_devices)
                 # Load the devices scores.
                 self._load_devices_scores()
                 # Write the devices scores to file.
                 execution_output_folder = Path(execution_settings["execution_output_folder"])
                 self._write_devices_scores_to_file(execution_output_folder)
+                # Write the clients' availability profiles to file.
+                if self._as_bool(execution_settings.get("enable_client_availability_simulation", False)):
+                    self._write_client_availability_profiles_to_file(execution_output_folder)
             # Print the start of the execution.
             print("\nStarting the execution '{0}'...".format(execution_name))
             # Start the execution timer.
             start = perf_counter()
             # Get the number of clients.
             num_clients = execution_settings["num_clients"]
-            # Determine the set of late-join clients.
-            late_join_clients_percentage = execution_settings.get("percentage_late_join_clients", 0.0)
-            late_join_clients_performance_profile = execution_settings.get("performance_profile_late_join_clients", "random")
-            late_join_clients_round_of_first_appearance = execution_settings.get("round_of_first_appearance_of_late_join_clients", 1)
-            late_join_clients = self._determine_late_join_clients(num_clients,
-                                                                  late_join_clients_percentage,
-                                                                  late_join_clients_performance_profile)
-            self._set_attribute("_late_join_clients", late_join_clients)
-            # Write the set of late-join clients, if any, to output file.
-            if len(late_join_clients) > 0:
+            # Determine the set of late-joining clients.
+            late_joining_clients_percentage = execution_settings.get("percentage_late_joining_clients", 0.0)
+            late_joining_clients_performance_profile = execution_settings.get("performance_profile_late_joining_clients", "random")
+            late_joining_clients_round_of_first_appearance = execution_settings.get("round_of_first_appearance_of_late_joining_clients", 1)
+            late_joining_clients = self._determine_late_joining_clients(num_clients,
+                                                                        late_joining_clients_percentage,
+                                                                        late_joining_clients_performance_profile)
+            self._set_attribute("_late_joining_clients", late_joining_clients)
+            # Write the set of late-joining clients, if any, to output file.
+            if len(late_joining_clients) > 0:
                 execution_output_folder = Path(execution_settings["execution_output_folder"])
-                self._write_late_join_clients_to_file(late_join_clients,
-                                                      late_join_clients_performance_profile,
-                                                      late_join_clients_round_of_first_appearance,
-                                                      execution_output_folder)
+                self._write_late_joining_clients_to_file(late_joining_clients,
+                                                         late_joining_clients_performance_profile,
+                                                         late_joining_clients_round_of_first_appearance,
+                                                         execution_output_folder)
             # Resolve the execution placement.
             hostfile = self.get_attribute("_hostfile")
             if hostfile is not None:

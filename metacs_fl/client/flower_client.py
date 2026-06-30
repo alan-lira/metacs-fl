@@ -36,6 +36,7 @@ from flwr.common import Code, EvaluateIns, EvaluateRes, FitIns, FitRes, GetParam
     GetPropertiesIns, GetPropertiesRes, NDArray, NDArrays, ndarrays_to_parameters, Parameters, parameters_to_ndarrays, \
     Status
 
+from metacs_fl.availability_simulator.availability_simulator import AvailabilitySimulator
 from metacs_fl.dataset_slicer.round_robin_dataset_slicer import RoundRobinDatasetSlicer
 from metacs_fl.energy_monitor.powerjoular_energy_monitor import PowerJoularEnergyMonitor
 from metacs_fl.energy_monitor.pyjoules_energy_monitor import PyJoulesEnergyMonitor
@@ -322,7 +323,7 @@ class FlowerClient(Client):
                  callbacks_settings: dict,
                  device_emulation_settings: dict,
                  host_profile: dict,
-                 late_join_settings: dict,
+                 late_joining_settings: dict,
                  logger: Logger,
                  initialization_duration_in_seconds: float,
                  simulation_resources_settings: dict = None,
@@ -344,7 +345,7 @@ class FlowerClient(Client):
         self._model_settings = model_settings
         self._device_emulation_settings = device_emulation_settings
         self._host_profile = host_profile
-        self._late_join_settings = late_join_settings
+        self._late_joining_settings = late_joining_settings
         self._simulation_resources_settings = simulation_resources_settings
         self._root_output_folder = root_output_folder
         self._all_cpu_cores_available = all_cpu_cores_available
@@ -416,6 +417,8 @@ class FlowerClient(Client):
                                                    self._device_emulation_settings["latency_jitter"],
                                                    self._device_emulation_settings["packet_loss_rate"],
                                                    phi_ar2)
+        # Initialize the availability simulator.
+        self._availability_simulator = self._initialize_availability_simulator()
 
     def _set_attribute(self,
                        attribute_name: str,
@@ -425,6 +428,171 @@ class FlowerClient(Client):
     def get_attribute(self,
                       attribute_name: str) -> any:
         return getattr(self, attribute_name)
+
+    @staticmethod
+    def _as_bool(value: any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+        return bool(value)
+
+    def _initialize_availability_simulator(self) -> AvailabilitySimulator:
+        device_emulation_settings = self.get_attribute("_device_emulation_settings")
+        client_id = self.get_attribute("_client_id")
+        availability_simulation_enabled = self._as_bool(device_emulation_settings.get("availability_simulation_enabled", False))
+        availability_initial_state = self._as_bool(device_emulation_settings.get("availability_initial_state", True))
+        availability_p_off = float(device_emulation_settings.get("availability_p_off", 0.0))
+        availability_p_on = float(device_emulation_settings.get("availability_p_on", 1.0))
+        availability_seed = int(device_emulation_settings.get("availability_seed", client_id))
+        availability_profile = str(device_emulation_settings.get("availability_profile", "disabled"))
+        availability_history_size = int(device_emulation_settings.get("availability_history_size", 100))
+        force_available_during_profiling = self._as_bool(device_emulation_settings.get("availability_force_available_during_profiling", True))
+        return AvailabilitySimulator(enabled=availability_simulation_enabled,
+                                     initial_available=availability_initial_state,
+                                     p_off=availability_p_off,
+                                     p_on=availability_p_on,
+                                     seed=availability_seed,
+                                     profile_name=availability_profile,
+                                     history_size=availability_history_size,
+                                     force_available_during_profiling=force_available_during_profiling)
+
+    def _update_client_availability_status(self,
+                                           config: dict) -> None:
+        """
+        Update config['client_available'] using either the new Markov availability simulator
+        or the legacy Bernoulli client_failure_probability.
+
+        This method should be called inside get_properties after battery, latency,
+        and late-joining checks, because those checks can also force availability to False.
+        """
+        if not config.get("client_available", True):
+            return
+        is_profiling_round = config.get("is_profiling_round", False)
+        comm_round = config.get("comm_round", 0)
+        device_emulation_settings = self.get_attribute("_device_emulation_settings")
+        availability_simulation_enabled = self._as_bool(device_emulation_settings.get("availability_simulation_enabled", False))
+        if availability_simulation_enabled:
+            availability_simulator = self.get_attribute("_availability_simulator")
+            client_available = availability_simulator.simulate_availability_change(comm_round=comm_round,
+                                                                                   is_profiling_round=is_profiling_round)
+            availability_state = availability_simulator.get_state_as_dict()
+            config.update({"client_available": bool(client_available),
+                           "availability_simulation_enabled": availability_state["availability_enabled"],
+                           "availability_profile": availability_state["availability_profile"],
+                           "availability_current_state": availability_state["availability_current_state"],
+                           "availability_p_off": availability_state["availability_p_off"],
+                           "availability_p_on": availability_state["availability_p_on"],
+                           "availability_history": availability_state["availability_history"]})
+            return
+        # Legacy behavior (old Bernoulli model).
+        if not is_profiling_round:
+            client_failure_probability = float(device_emulation_settings.get("client_failure_probability", 0.0))
+            client_id = self.get_attribute("_client_id")
+            phase = "get_properties"
+            seed = self._deterministic_seed(client_id, comm_round, phase)
+            rng = default_rng(seed)
+            if rng.random() < client_failure_probability:
+                config.update({"client_available": False})
+
+    def _get_completion_failure_workload_ratio(self,
+                                               phase: str,
+                                               phase_config: dict,
+                                               assigned_examples: int) -> float:
+        """
+        Estimate the assigned workload ratio for the selected client.
+
+        The server sends the workload to the client as a number of examples/samples.
+        MetaCS-FL task capacities are expressed in tasks, so the maximum nominal
+        task capacity is converted to samples using samples_per_task. The assigned
+        workload itself is not converted because it is already expressed in samples.
+        """
+        if assigned_examples is None:
+            return 0.0
+        try:
+            assigned_examples = int(assigned_examples)
+        except (TypeError, ValueError):
+            return 0.0
+        if assigned_examples <= 0:
+            return 0.0
+        try:
+            samples_per_task = int(phase_config.get("samples_per_task", 1))
+        except (TypeError, ValueError):
+            samples_per_task = 1
+        samples_per_task = max(1, samples_per_task)
+        task_assignment_capacities_settings = self.get_attribute("_task_assignment_capacities_settings")
+        client_task_assignment_capacities_train, client_task_assignment_capacities_test = \
+            get_task_assignment_capacities(self.get_attribute("_x_train"),
+                                           self.get_attribute("_x_test"),
+                                           task_assignment_capacities_settings,
+                                           samples_per_task)
+        if phase == "train":
+            capacities = client_task_assignment_capacities_train
+        else:
+            capacities = client_task_assignment_capacities_test
+        if not capacities:
+            return 0.0
+        max_capacity_tasks = max(capacities)
+        if max_capacity_tasks <= 0:
+            return 0.0
+        max_capacity_examples = max_capacity_tasks * samples_per_task
+        if max_capacity_examples <= 0:
+            return 0.0
+        workload_ratio = assigned_examples / max_capacity_examples
+        return max(0.0, min(1.0, float(workload_ratio)))
+
+    def _should_fail_processing(self,
+                                comm_round: int,
+                                phase: str,
+                                is_profiling_round: bool,
+                                phase_config: dict | None = None,
+                                assigned_examples: int | None = None) -> bool:
+        """
+        Simulate post-selection processing/completion failure.
+
+        Availability is handled by get_properties before selection. This method
+        applies after a client has been selected for training/testing and models
+        the probability that it fails to complete its assigned processing.
+
+        When enable_client_completion_failure_simulation is enabled, the failure
+        probability is profile- and workload-dependent:
+
+            p_fail = min(p_max, p_base + theta * workload_ratio)
+
+        where workload_ratio = assigned_examples / (max(AC_i) * samples_per_task).
+        """
+        if is_profiling_round:
+            return False
+        device_emulation_settings = self.get_attribute("_device_emulation_settings")
+        use_legacy_failure_probability_for_processing = self._as_bool(device_emulation_settings.get("use_client_failure_probability_for_processing_failures", False))
+        if use_legacy_failure_probability_for_processing:
+            failure_probability = float(device_emulation_settings.get("client_failure_probability", 0.0))
+        else:
+            completion_failure_simulation_enabled = self._as_bool(device_emulation_settings.get("enable_client_completion_failure_simulation", False))
+            if completion_failure_simulation_enabled:
+                base_probability = float(device_emulation_settings.get("completion_failure_base_probability", 0.0))
+                workload_sensitivity = float(device_emulation_settings.get("completion_failure_workload_sensitivity", 0.0))
+                max_probability = float(device_emulation_settings.get("completion_failure_max_probability", 1.0))
+                if phase_config is None:
+                    phase_config = {}
+                workload_ratio = self._get_completion_failure_workload_ratio(phase=phase,
+                                                                             phase_config=phase_config,
+                                                                             assigned_examples=assigned_examples)
+                failure_probability = base_probability + workload_sensitivity * workload_ratio
+                failure_probability = min(max_probability, failure_probability)
+            else:
+                failure_probability = float(device_emulation_settings.get("client_completion_failure_probability", 0.0))
+        failure_probability = max(0.0, min(1.0, float(failure_probability)))
+        if failure_probability <= 0.0:
+            return False
+        client_id = self.get_attribute("_client_id")
+        seed = self._deterministic_seed(client_id, comm_round, phase)
+        rng = default_rng(seed)
+        return rng.random() < failure_probability
 
     @staticmethod
     def _deterministic_seed(client_id: int,
@@ -841,13 +1009,13 @@ class FlowerClient(Client):
             # Set client unavailable, if client is unreachable...
             if current_latency_in_milliseconds == inf:
                 config.update({"client_available": False})
-        # Check if client is of 'late-join' type (have to wait X rounds before joining the system).
-        late_join_settings = self.get_attribute("_late_join_settings")
-        is_late_join_client = late_join_settings["is_late_join_client"]
-        if is_late_join_client:
+        # Check if client is of 'late-joining' type (have to wait X rounds before joining the system).
+        late_joining_settings = self.get_attribute("_late_joining_settings")
+        is_late_joining_client = late_joining_settings["is_late_joining_client"]
+        if is_late_joining_client:
             comm_round = config.get("comm_round", 0)
-            late_join_first_appearance_round = late_join_settings["late_join_first_appearance_round"]
-            if comm_round != 0 and comm_round < late_join_first_appearance_round:
+            late_joining_first_appearance_round = late_joining_settings["late_joining_first_appearance_round"]
+            if comm_round != 0 and comm_round < late_joining_first_appearance_round:
                 config.update({"client_available": False})
         # Profile the client performance, if requested.
         if "profile_performance" in config:
@@ -894,19 +1062,9 @@ class FlowerClient(Client):
             for n_samples, metrics in profile_test.items():
                 for k, v in metrics.items():
                     config["profile_test_{0}_{1}".format(n_samples, k)] = v
-        # Simulate if the client is unavailable for the current round (Bernoulli trial).
+        # Simulate if the client is unavailable for the current round.
         # The client will be available if the current round is for profiling purposes.
-        is_profiling_round = config.get("is_profiling_round", False)
-        if not is_profiling_round:
-            device_emulation_settings = self.get_attribute("_device_emulation_settings")
-            client_failure_probability = device_emulation_settings["client_failure_probability"]
-            client_id = self.get_attribute("_client_id")
-            comm_round = config.get("comm_round", 0)
-            phase = "get_properties"
-            seed = self._deterministic_seed(client_id, comm_round, phase)
-            rng = default_rng(seed)
-            if rng.random() < client_failure_probability:
-                config.update({"client_available": False})
+        self._update_client_availability_status(config)
         # Return the properties requested by the server.
         return GetPropertiesRes(status=Status(code=Code.OK, message="Success"), properties=config)
 
@@ -1574,19 +1732,13 @@ class FlowerClient(Client):
                           parameters=Parameters(tensor_type="", tensors=[]),
                           num_examples=0,
                           metrics={})
-        # Simulate if the client succeeded the training for the current round (Bernoulli trial).
-        # The client will succeed if the current round is for profiling purposes.
-        if not is_profiling_round:
-            device_emulation_settings = self.get_attribute("_device_emulation_settings")
-            client_failure_probability = device_emulation_settings["client_failure_probability"]
-            seed = self._deterministic_seed(client_id, comm_round, phase)
-            rng = default_rng(seed)
-            if rng.random() < client_failure_probability:
-                # Client has failed.
-                return FitRes(status=Status(code=Code.FIT_NOT_IMPLEMENTED, message="Client has failed"),
-                              parameters=Parameters(tensor_type="", tensors=[]),
-                              num_examples=0,
-                              metrics={})
+        # Simulate processing/completion failure, if enabled.
+        # Availability itself is handled by get_properties.
+        if self._should_fail_processing(comm_round, phase, is_profiling_round, fit_config, num_examples):
+            return FitRes(status=Status(code=Code.FIT_NOT_IMPLEMENTED, message="Client has failed"),
+                          parameters=Parameters(tensor_type="", tensors=[]),
+                          num_examples=0,
+                          metrics={})
         # Append the client upload metrics to the set of training metrics.
         training_metrics = training_metrics | client_up_metrics
         # Calculate the total time spent by this client during the training phase event of round r.
@@ -2083,19 +2235,13 @@ class FlowerClient(Client):
                                loss=0.0,
                                num_examples=0,
                                metrics={})
-        # Simulate if the client succeeded the testing for the current round (Bernoulli trial).
-        # The client will succeed if the current round is for profiling purposes.
-        if not is_profiling_round:
-            device_emulation_settings = self.get_attribute("_device_emulation_settings")
-            client_failure_probability = device_emulation_settings["client_failure_probability"]
-            seed = self._deterministic_seed(client_id, comm_round, phase)
-            rng = default_rng(seed)
-            if rng.random() < client_failure_probability:
-                # Client has failed.
-                return EvaluateRes(status=Status(code=Code.EVALUATE_NOT_IMPLEMENTED, message="Client has failed"),
-                                   loss=0.0,
-                                   num_examples=0,
-                                   metrics={})
+        # Simulate processing/completion failure, if enabled.
+        # Availability itself is handled by get_properties.
+        if self._should_fail_processing(comm_round, phase, is_profiling_round, evaluate_config, num_examples):
+            return EvaluateRes(status=Status(code=Code.EVALUATE_NOT_IMPLEMENTED, message="Client has failed"),
+                               loss=0.0,
+                               num_examples=0,
+                               metrics={})
         # Append the client upload metrics to the set of testing metrics.
         testing_metrics = testing_metrics | client_up_metrics
         # Calculate the total time spent by this client during the testing phase event of round r.

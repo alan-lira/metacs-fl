@@ -76,9 +76,12 @@ static_client_availability/sensitivity_experiments
 ### Excluded experiments
 
 ```txt
-dynamic_client_availability/late_join_clients_experiments
-Emotion experiments
+dynamic_client_availability/intermittent_client_availability_experiments
+dynamic_client_availability/late_joining_clients_experiments
+performance experiments involving Emotion
 ```
+
+The excluded dynamic families can still be run through a custom manifest or with `run_one_distributed_experiment.sh`. See `experiments/README.md` for their directory structure and example commands.
 
 ---
 

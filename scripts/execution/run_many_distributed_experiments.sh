@@ -83,6 +83,11 @@ Execution:
       Passed to distributed experiments.
       Default: 1
 
+  --execution-blocks BLOCK
+      Optional execution block selector passed to launch_distributed_flower.sh
+      and then to main.py, for example: Execution_1_N or Execution_2_N.
+      Default: empty (run all blocks defined in the executor config).
+
   --max-parallel-installs N
       Passed to setup via run_one_distributed_experiment.sh.
       Default: 4
@@ -307,6 +312,7 @@ RERUN_RUNNING="true"
 
 MAX_PARALLEL_EXPERIMENTS="1"
 REPETITIONS="1"
+EXECUTION_BLOCKS=""
 MAX_PARALLEL_INSTALLS="4"
 MAX_PARALLEL_REMOTE_OPS="8"
 
@@ -433,6 +439,12 @@ while [[ "$#" -gt 0 ]]; do
     --repetitions)
       require_value "$1" "${2:-}"
       REPETITIONS="$2"
+      shift 2
+      ;;
+
+    --execution-blocks)
+      require_value "$1" "${2:-}"
+      EXECUTION_BLOCKS="$2"
       shift 2
       ;;
 
@@ -751,6 +763,7 @@ echo "[CAMPAIGN] Internal rows file: ${ROWS_USV}"
 echo "[CAMPAIGN] Total experiments: ${TOTAL}"
 echo "[CAMPAIGN] State dir: ${STATE_DIR}"
 echo "[CAMPAIGN] Logs: ${LOG_DIR}"
+echo "[CAMPAIGN] Execution blocks: ${EXECUTION_BLOCKS:-<all configured blocks>}"
 
 if [[ "${DRY_RUN}" == "true" ]]; then
   echo "[CAMPAIGN] Dry run requested. No experiments will be executed."
@@ -899,6 +912,11 @@ run_manifest_row() {
 
       if [[ -n "${SSH_OPTIONS}" ]]; then
         CMD+=(--ssh-options "${SSH_OPTIONS}")
+      fi
+
+      if [[ -n "${EXECUTION_BLOCKS}" ]]; then
+        CMD+=(--launch-arg --execution-blocks)
+        CMD+=(--launch-arg "${EXECUTION_BLOCKS}")
       fi
 
       printf '[CMD]'
@@ -1059,6 +1077,7 @@ echo "[CAMPAIGN] Running markers: ${running_count}"
 echo "[CAMPAIGN] Manifest: ${MANIFEST}"
 echo "[CAMPAIGN] Summary CSV: ${SUMMARY_CSV}"
 echo "[CAMPAIGN] Logs: ${LOG_DIR}"
+echo "[CAMPAIGN] Execution blocks: ${EXECUTION_BLOCKS:-<all configured blocks>}"
 
 if [[ "${FAILED}" -ne 0 ]]; then
   exit 1

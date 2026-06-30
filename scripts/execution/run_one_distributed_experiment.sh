@@ -637,7 +637,16 @@ while [[ "$#" -gt 0 ]]; do
       ;;
 
     --launch-arg)
-      require_value "$1" "${2:-}"
+      # Allow passthrough arguments that themselves start with "--".
+      # Example:
+      #   --launch-arg --execution-blocks --launch-arg Execution_1_N
+      #
+      # Do not use require_value here because require_value intentionally
+      # rejects values beginning with "--", which is correct for normal
+      # options but not for passthrough arguments.
+      if [[ "$#" -lt 2 || -z "${2:-}" ]]; then
+        die "--launch-arg requires a value"
+      fi
       LAUNCH_EXTRA_ARGS+=("$2")
       shift 2
       ;;

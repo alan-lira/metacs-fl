@@ -361,6 +361,7 @@ bash scripts/execution/launch_distributed_flower.sh \
 | `--remote-hostfile-dir DIR` | Directory where the runtime hostfile is copied on remote nodes. | `<remote-project-dir>` |
 | `--action ACTION` | Action passed to `main.py`. | `execute_fl_with_flower` |
 | `--repetitions N` | Number of repetitions. | `1` |
+| `--execution-blocks BLOCK` | Optional execution block selector passed to `main.py`, for example `Execution_1_N` or `Execution_2_N`. When omitted, all execution blocks defined in the executor config may run. | Not set |
 | `--python-bin BIN` | Python executable to use. | `python3` |
 | `--output-dir DIR` | Base directory for local launcher artifacts. If provided, the default log and gather roots become `DIR/distributed_launch_logs` and `DIR/gathered_results`. Explicit `--local-log-root` or `--local-gather-root` values override this default. | Not set |
 | `--local-log-root DIR` | Root directory for local logs. | `distributed_launch_logs` |
@@ -370,6 +371,14 @@ bash scripts/execution/launch_distributed_flower.sh \
 | `--ssh-options "OPTIONS"` | Extra options passed to `ssh` and `scp`. | Empty |
 | `--rsync-options "OPTIONS"` | Extra options passed to `rsync`. | `-az` |
 | `--run-id ID` | Explicit run identifier. | Timestamp |
+
+`--execution-blocks` is useful when one executor configuration defines multiple named execution blocks and only one block should run in the current launch. The value is forwarded unchanged to:
+
+```txt
+main.py --execution-blocks <block>
+```
+
+Do not pass the option when every block in the executor configuration should run.
 
 ---
 
@@ -808,7 +817,26 @@ bash scripts/execution/launch_distributed_flower.sh \
 
 ---
 
-### 9.9 Custom run id
+### 9.9 Run one configured execution block
+
+Use `--execution-blocks` when the selected executor config contains multiple blocks but this launch should execute only one of them:
+
+```bash
+bash scripts/execution/launch_distributed_flower.sh \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --custom-flower-executor-cfg experiments/my_run/flower_executor.cfg \
+  --custom-flower-server-cfg experiments/my_run/flower_server.cfg \
+  --custom-flower-client-cfg experiments/my_run/flower_client.cfg \
+  --execution-blocks Execution_1_N \
+  --repetitions 1
+```
+
+The block name must match a block understood by `main.py` and the selected executor configuration. Omit the option to run all configured blocks.
+
+---
+
+### 9.10 Custom run id
 
 Use this when you want predictable output folder names.
 
@@ -835,7 +863,7 @@ for remote/Grid'5000 executions.
 
 ---
 
-### 9.10 Custom output directory
+### 9.11 Custom output directory
 
 Use this when you want all local launcher artifacts for a campaign under a specific base directory.
 
@@ -858,7 +886,7 @@ Explicit `--local-log-root` or `--local-gather-root` values override the corresp
 
 ---
 
-### 9.11 Custom Python binary
+### 9.12 Custom Python binary
 
 Use this if the remote virtual environment expects a specific Python executable.
 
@@ -871,7 +899,7 @@ bash scripts/execution/launch_distributed_flower.sh \
 
 ---
 
-### 9.12 Custom SSH options
+### 9.13 Custom SSH options
 
 Use this when you need to pass options to SSH and SCP:
 
@@ -884,7 +912,7 @@ bash scripts/execution/launch_distributed_flower.sh \
 
 ---
 
-### 9.13 Custom rsync options
+### 9.14 Custom rsync options
 
 Use this when result collection needs additional rsync options:
 
