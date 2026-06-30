@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <em>Forever by my side, forever in my heart. Valente $\text{✝︎}$ 16/06/2026</em>
+  <em>Forever by my side, forever in my heart. Valente ✝︎ 16/06/2026</em>
 </p>
 
 # MetaCS-FL
