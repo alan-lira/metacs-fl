@@ -6,21 +6,36 @@ The framework models client selection not only as the choice of which clients pa
 
 MetaCS-FL supports:
 
-- profiling-aware client selection;
-- time- and energy-aware scheduling;
-- multi-objective optimization;
-- metaheuristic refinement (implemented approaches: Large Neighborhood Search);
-- configurable client selection triggers;
+- cold-start profiling and history-based performance estimation;
+- synchronous FL with asynchronous profiling of late-joining clients;
+- intermittent availability, reconnection, and profile reuse;
+- reliability-aware client selection and workload allocation;
+- time-, energy-, fairness-, data-distribution-, and learning-aware scheduling;
+- privacy-preserving disclosure of local class distributions through Differential Privacy;
+- configurable, event-driven client-selection triggers and selection reuse;
+- metaheuristic refinement (currently implemented with Large Neighborhood Search);
 - distributed execution with Flower;
 - Grid'5000 and generic remote execution;
-- post-processing, merging, and analysis scripts for reproducible experiments.
+- campaign generation, resumption, output merging, and analysis for reproducible experiments.
 
 ---
 
 ## Table of contents
 
+- [Framework capabilities](#framework-capabilities)
+  - [System model and operating assumptions](#system-model-and-operating-assumptions)
+  - [Initialization and client profiling](#initialization-and-client-profiling)
+  - [Federated learning loop](#federated-learning-loop)
+  - [Client selection and workload assignment](#client-selection-and-workload-assignment)
+  - [Performance and energy modeling](#performance-and-energy-modeling)
+  - [Multi-objective optimization](#multi-objective-optimization)
+  - [Reliability and dynamic availability](#reliability-and-dynamic-availability)
+  - [Privacy-preserving data-distribution awareness](#privacy-preserving-data-distribution-awareness)
+  - [Event-driven optimization and solution reuse](#event-driven-optimization-and-solution-reuse)
+  - [Distributed execution and reproducibility](#distributed-execution-and-reproducibility)
 - [Reproducing published experiments](#reproducing-published-experiments)
   - [FGCS 2026 experiments](#fgcs-2026-experiments)
+  - [ICPADS 2026 experiments](#icpads-2026-experiments)
 - [Recommended execution order](#recommended-execution-order)
 - [Requirements](#requirements)
   - [Python environment](#python-environment)
@@ -34,40 +49,264 @@ MetaCS-FL supports:
     - [Check for out-of-memory (OOM) kills](#check-for-out-of-memory-oom-kills)
   - [4.2 If the smoke test passes: continue to the experiment campaign](#42-if-the-smoke-test-passes-continue-to-the-experiment-campaign)
 - [5. Generate or run the experiment campaign](#5-generate-or-run-the-experiment-campaign)
-  - [5.1 Experiment packs](#51-experiment-packs)
-  - [5.2 Generate experiment packs](#52-generate-experiment-packs)
-  - [5.3 Dry-run the FGCS 2026 pack](#53-dry-run-the-fgcs-2026-pack)
-  - [5.4 Run many experiments as a campaign](#54-run-many-experiments-as-a-campaign)
-  - [5.5 Resume the campaign](#55-resume-the-campaign)
+  - [5.1 Publication campaign inputs](#51-publication-campaign-inputs)
+  - [5.2 Generate the FGCS 2026 pack](#52-generate-the-fgcs-2026-pack)
+  - [5.3 Generate the ICPADS 2026 manifests](#53-generate-the-icpads-2026-manifests)
+  - [5.4 Dry-run the FGCS 2026 pack](#54-dry-run-the-fgcs-2026-pack)
+  - [5.5 Dry-run the ICPADS 2026 campaign](#55-dry-run-the-icpads-2026-campaign)
+  - [5.6 Run many experiments as a campaign](#56-run-many-experiments-as-a-campaign)
+  - [5.7 Resume a campaign](#57-resume-a-campaign)
 - [6. Merge distributed outputs](#6-merge-distributed-outputs)
 - [7. Run analysis scripts](#7-run-analysis-scripts)
-  - [7.1 DP impact analysis](#71-dp-impact-analysis)
-  - [7.2 Performance plots](#72-performance-plots)
-  - [7.3 Scalability analysis](#73-scalability-analysis)
-  - [7.4 Performance summary](#74-performance-summary)
+  - [7.1 FGCS 2026: DP impact analysis](#71-fgcs-2026-dp-impact-analysis)
+  - [7.2 FGCS 2026: static performance plots](#72-fgcs-2026-static-performance-plots)
+  - [7.3 ICPADS 2026: intermittent-availability plots](#73-icpads-2026-intermittent-availability-plots)
+  - [7.4 ICPADS 2026: late-joining plots](#74-icpads-2026-late-joining-plots)
+  - [7.5 FGCS 2026: scalability analysis](#75-fgcs-2026-scalability-analysis)
+  - [7.6 FGCS 2026: static performance summary](#76-fgcs-2026-static-performance-summary)
+  - [7.7 ICPADS 2026: intermittent-availability summary](#77-icpads-2026-intermittent-availability-summary)
+  - [7.8 ICPADS 2026: late-joining summary](#78-icpads-2026-late-joining-summary)
 - [8. Export plots, tables, and metrics](#8-export-plots-tables-and-metrics)
 - [Optional execution modes](#optional-execution-modes)
   - [Run one distributed experiment](#run-one-distributed-experiment)
   - [Run server-only experiments](#run-server-only-experiments)
   - [Launch distributed Flower directly](#launch-distributed-flower-directly)
 - [Quick command summary](#quick-command-summary)
+  - [Select the publication release](#select-the-publication-release)
   - [Setup](#setup)
   - [Smoke test](#smoke-test)
-  - [Full campaign dry-run](#full-campaign-dry-run)
-  - [Full campaign](#full-campaign)
-  - [Resume campaign](#resume-campaign)
+  - [Generate the FGCS 2026 manifest](#generate-the-fgcs-2026-manifest)
+  - [Generate the ICPADS 2026 manifests — quick reference](#generate-the-icpads-2026-manifests-quick-reference)
+  - [FGCS 2026 dry-run](#fgcs-2026-dry-run)
+  - [ICPADS 2026 dry-run](#icpads-2026-dry-run)
+  - [FGCS 2026 full campaign](#fgcs-2026-full-campaign)
+  - [ICPADS 2026 full campaign](#icpads-2026-full-campaign)
+  - [Resume a campaign — quick reference](#resume-a-campaign-quick-reference)
 - [Notes for Grid'5000](#notes-for-grid5000)
 - [Results](#results)
   - [FGCS 2026](#fgcs-2026)
+  - [ICPADS 2026](#icpads-2026)
+  - [Thesis](#thesis)
 - [Scientific Productions](#scientific-productions)
   - [1. MetaCS-FL: A Metaheuristic-Based Framework for Client Selection in Federated Learning Systems](#1-metacs-fl-a-metaheuristic-based-framework-for-client-selection-in-federated-learning-systems)
+  - [2. A Reliability-Aware Client Selection Framework for Federated Learning on Heterogeneous Resources under Dynamic Availability](#2-a-reliability-aware-client-selection-framework-for-federated-learning-on-heterogeneous-resources-under-dynamic-availability)
 - [License](#license)
+
+---
+
+## Framework capabilities
+
+MetaCS-FL is more than a client-ranking mechanism. It treats each training or testing phase as a **joint client-selection and workload-allocation problem**. The server decides both which clients should participate and how many local data slices each selected client should process. This allows a round to account simultaneously for resource heterogeneity, communication cost, energy use, deadline constraints, participation history, data distribution, learning behavior, and changing client availability.
+
+### System model and operating assumptions
+
+The framework targets **synchronous, centrally coordinated Cross-Device FL**. An execution has two main stages: an initialization phase and a repeated FL loop. The global model is coordinated by a central server, while raw training and testing data remain on the clients.
+
+The system model supports clients with heterogeneous:
+
+- processing capacity and local execution time;
+- download and upload performance;
+- computation, communication, and total energy consumption;
+- local dataset size and supported workload capacities;
+- class distributions and degrees of non-IID data;
+- participation histories and observed model utility;
+- availability, completion behavior, and connection time.
+
+Clients may disconnect temporarily, return later, or join after training has already started. The FL rounds remain synchronous; only the profiling and admission of late-joining clients occur asynchronously.
+
+> The current system model assumes a trusted server and honest clients. MetaCS-FL does not currently model Byzantine clients, poisoned updates, falsified profiles, or maliciously reported statistics. Differential Privacy is applied to disclosed class histograms, not to the complete training pipeline or model updates.
+
+### Initialization and client profiling
+
+<p align="center">
+  <img src="figures/metacs-fl-initialization-phase.png" alt="MetaCS-FL initialization phase" width="850">
+</p>
+
+<p align="center"><em>MetaCS-FL initialization phase: initial connection, synchronous cold-start profiling, global-model initialization, asynchronous profiling of late joiners, and profile reuse for returning clients.</em></p>
+
+The initialization phase establishes the information required for resource-aware selection:
+
+1. **Initial connection.** The server waits until the configured minimum number of clients is connected.
+2. **Cold-start profiling.** When no usable historical records exist, the initial clients synchronously profile a small local workload. The resulting measurements describe execution time, energy consumption, and communication behavior and are stored as fallback estimates.
+3. **Global-model initialization.** The server obtains the initial model parameters from a sampled client and initializes the global model.
+4. **Asynchronous late-join profiling.** Clients that connect after the initial group are profiled without blocking the ongoing FL loop. They become eligible for later rounds once their profiles are complete.
+5. **Returning-client profile reuse.** A temporarily disconnected client can reuse its stored profile after reconnecting, unless the configuration requires a refresh.
+
+Synchronous cold-start profiling lies on the initialization critical path and is therefore bounded by the slowest initial client. In contrast, late-join profiling runs outside the current round's critical path.
+
+### Federated learning loop
+
+<p align="center">
+  <img src="figures/metacs-fl-federated-learning-loop.png" alt="MetaCS-FL federated learning loop" width="950">
+</p>
+
+<p align="center"><em>MetaCS-FL federated learning loop: selection, local training, aggregation, distributed evaluation, and history updates.</em></p>
+
+For every communication round, the server evaluates the stopping criterion and, while training should continue, performs the following workflow:
+
+1. **Training selection.** MetaCS-FL chooses eligible clients and assigns a workload to each selected client using the available profiles and historical records.
+2. **Local training.** The server sends the current global model and client-specific instructions. Selected clients train on their assigned local data slices and return model parameters and training metrics.
+3. **Aggregation.** The server aggregates the completed local updates into the next global model.
+4. **Testing selection.** MetaCS-FL may independently choose clients and workloads for distributed model evaluation.
+5. **Local testing.** Selected clients evaluate the new global model on local data and return testing metrics.
+6. **History update.** The server records completion status, execution measurements, energy measurements, losses, participation, availability, and reliability information for future selections.
+
+The selection mechanism can therefore operate in both the training and testing phases, and it can produce different client sets or workload assignments for each phase.
+
+### Client selection and workload assignment
+
+Let the configured workload contain `t` tasks, where each task represents a slice of local data used to form mini-batches for training or testing. For every eligible client `i`, MetaCS-FL maintains a set of valid task capacities. A schedule is represented as:
+
+```text
+X = (x_1, x_2, ..., x_n)
+```
+
+where `x_i` is the number of tasks assigned to client `i`. An assignment of `x_i = 0` means that the client is not selected.
+
+This formulation allows MetaCS-FL to:
+
+- select only a subset of the available clients;
+- assign unequal workloads to heterogeneous clients;
+- keep assignments within each client's valid local-data capacities;
+- account for different task capacities in training and testing;
+- satisfy a configured total workload rather than forcing equal participation;
+- adapt assignments as reliability, availability, profiles, or data conditions change.
+
+Consequently, a fast and energy-efficient client may receive more tasks, while a slower, less reliable, or resource-constrained client may remain eligible but receive a smaller workload.
+
+### Performance and energy modeling
+
+For each candidate workload, MetaCS-FL estimates the time required by a client as the sum of:
+
+```text
+client time = download time + computation time + upload time
+```
+
+The corresponding energy estimate is calculated component by component from elapsed time and mean power:
+
+```text
+client energy = download energy + computation energy + upload energy
+```
+
+The optimization model uses two system-level quantities:
+
+- **makespan:** the completion time of the slowest selected client, representing the duration of the synchronous phase;
+- **total energy consumption:** the sum of the energy consumed by all selected clients.
+
+Both training and testing costs include client-side computation and client-server communication. A user-defined deadline can constrain the maximum admissible makespan. Global aggregation and server-side history bookkeeping are treated as lightweight server operations and are not included in the client time and energy model.
+
+### Multi-objective optimization
+
+MetaCS-FL evaluates candidate schedules through a configurable weighted objective:
+
+$$
+\min F(\mathcal{X}) =
+ w_1 M_r + w_2 \Sigma_r
+ - w_3 D_r - w_4 K_r - w_5 U_r
+$$
+
+The components are:
+
+| Component | Optimization direction | Purpose |
+|---|---:|---|
+| Makespan $M_r$ | Minimize | Reduce the duration of the synchronous training or testing phase. |
+| Total energy $\Sigma_r$ | Minimize | Reduce aggregate client energy consumption. |
+| Client diversity $D_r$ | Maximize | Encourage balanced participation over recent rounds instead of repeatedly choosing the same clients. |
+| Class-distribution score $K_r$ | Maximize | Improve class coverage while reducing imbalance in the assigned workload. |
+| Utility score $U_r$ | Maximize | Prefer assignments associated with stronger recent training behavior and local generalization. |
+
+The weights `w_1` through `w_5` let an experiment emphasize one objective, combine several objectives, or disable selected components. Time and energy are normalized before scalarization so that their physical units and scale differences do not dominate the remaining scores.
+
+Every solution must satisfy three principal constraints:
+
+- the phase makespan must not exceed the optional deadline;
+- the sum of all assigned tasks must equal the configured workload;
+- each assignment must belong to the client's current reliability-adjusted capacity set.
+
+### Reliability and dynamic availability
+
+MetaCS-FL maintains a server-side reliability score in `[0, 1]` for every client that has joined the system. New clients start with full reliability because no negative history exists. Before each selection, the score is updated from the previous score and the most recent observed behavior using an exponentially weighted moving average.
+
+The framework distinguishes between:
+
+- **availability failure:** a previously joined client is unavailable before selection;
+- **completion failure:** a selected client does not finish its assigned processing;
+- **successful behavior:** a client remains available or completes its assigned workload;
+- **neutral behavior:** a client is available but not selected.
+
+Availability and completion penalties are independently configurable, with completion failure normally receiving the stronger penalty because it can directly compromise a synchronous round.
+
+Reliability affects **how much work a client may receive**, not only whether it is selected. Lower reliability restricts the set of admissible workload capacities while keeping the client eligible. If these restrictions make the total workload infeasible, the framework can progressively restore valid capacities from the least penalized available clients until a feasible schedule exists.
+
+This mechanism supports both dynamic scenarios studied in the repository:
+
+- **intermittent availability:** clients repeatedly become unavailable and later reconnect;
+- **late joining:** new clients enter after the initial FL rounds and become selectable after asynchronous profiling.
+
+### Privacy-preserving data-distribution awareness
+
+To reason about non-IID data without collecting raw samples, MetaCS-FL can request a class histogram for each client's local training and testing splits. The client constructs the histogram locally and applies the Laplace mechanism before disclosure. The privacy parameter `epsilon` controls the amount of noise.
+
+The noisy counts are clipped to non-negative values, rounded, sent to the server, and cached. Because the histograms are produced when a client connects and can be reused across rounds, the framework avoids repeatedly querying intermittently available devices.
+
+These approximate statistics enable two data-aware objectives:
+
+- **class coverage:** how much of the available data for each class is represented by the assignment;
+- **class balance:** how closely the assigned workload approaches an even distribution across classes.
+
+The disclosed histograms are intentionally approximate. Noise can create a positive reported count for a class that is absent locally, especially under stronger privacy settings or small local datasets.
+
+### Event-driven optimization and solution reuse
+
+MetaCS-FL is event-driven rather than forced to recompute a selection in every phase of every round. At each selection point, the server:
+
+1. updates the eligible-client set;
+2. incorporates newly completed profiles from late joiners;
+3. updates reliability-aware capacities;
+4. evaluates configurable selection triggers;
+5. either runs a new optimization or reuses historical decisions.
+
+When no new selection is required, the most recent selected clients and assignments are retrieved directly. When a new selection is required but the candidate-client set is unchanged, the previous initial solution can be reused. A new initial solution is generated only when necessary, such as after a change in the available candidate set.
+
+In the current implementation:
+
+- **ECMTC** generates a deadline-feasible, energy-first initial schedule;
+- **Large Neighborhood Search (LNS)** refines the initial schedule according to the configured multi-objective function;
+- the search can stop after a time limit or iteration limit;
+- the best schedule is decoded into the selected client set and per-client task assignments.
+
+The framework is structured to support alternative initial-solution methods and metaheuristics, while LNS is the metaheuristic currently implemented and evaluated in this repository.
+
+Selection reuse reduces control-plane overhead. With direct access to stored history, retrieving an unchanged selection is constant-time, while a complete reselection includes both initial-solution generation and metaheuristic evaluation.
+
+### Distributed execution and reproducibility
+
+Beyond the selection algorithm, the repository provides the infrastructure needed to execute and analyze complete FL campaigns:
+
+- Flower-based distributed server and client execution;
+- one-command remote-node setup;
+- Grid'5000 and generic SSH-based deployment;
+- local toy smoke experiments before large campaigns;
+- distributed, server-only, and direct-launch execution modes;
+- static, intermittent-availability, and late-joining experiment configurations;
+- campaign-manifest generation, dry runs, status tracking, and resumption;
+- runtime configuration patching and execution-block selection;
+- merging of outputs produced across distributed nodes;
+- plotting, numerical summaries, LaTeX tables, CSV exports, and scalability analysis;
+- frozen release tags and archived result sets for the published experiments.
+
+Together, these components make MetaCS-FL both an optimization framework and an end-to-end experimental platform for studying resource-aware, learning-aware, and reliability-aware client selection under heterogeneous and dynamic FL conditions.
 
 ---
 
 ## Reproducing published experiments
 
 This repository may evolve over time as the project receives improvements, fixes, and new features. The `main` branch is stable, but it will continue to evolve after each publication. Therefore, for exact reproducibility of published experiments, use the frozen release tag associated with the corresponding publication instead of relying on the default branch.
+
+| Publication | Release tag | Experiment scope | Campaign input |
+|---|---|---|---|
+| FGCS 2026 | `v0.2.0` | Static client availability: performance, differential-privacy impact, scalability, and sensitivity | Generated `fgcs_2026_experiments` pack |
+| ICPADS 2026 | `v0.3.0` | Dynamic client availability: intermittent availability and late-joining clients | Generated combined and family-specific CSV manifests |
 
 ### FGCS 2026 experiments
 
@@ -85,6 +324,69 @@ When using the remote/Grid'5000 setup script, pass:
 --branch v0.2.0
 ```
 
+The FGCS 2026 campaign is generated from the pack:
+
+```txt
+fgcs_2026_experiments
+```
+
+It covers the selected static experiment families under:
+
+```txt
+experiments/static_client_availability/
+├── performance_experiments/
+├── dp_impact_experiments/
+├── scalability_experiments/
+└── sensitivity_experiments/
+```
+
+See [Generate the FGCS 2026 pack](#52-generate-the-fgcs-2026-pack), [run the FGCS campaign](#56-run-many-experiments-as-a-campaign), and download the archived outputs from [FGCS 2026 results](#fgcs-2026).
+
+### ICPADS 2026 experiments
+
+To reproduce the experiments reported in the ICPADS 2026 paper, use the frozen release tag `v0.3.0`:
+
+```bash
+git clone https://github.com/alan-lira/metacs-fl.git
+cd metacs-fl
+git checkout v0.3.0
+```
+
+When using the remote/Grid'5000 setup script, pass:
+
+```bash
+--branch v0.3.0
+```
+
+The ICPADS 2026 evaluation uses both dynamic client-availability families:
+
+```txt
+experiments/dynamic_client_availability/
+├── intermittent_client_availability_experiments/
+└── late_joining_clients_experiments/
+```
+
+The intermittent-availability experiments evaluate approaches under changing client-presence scenarios. The late-joining experiments evaluate populations in which a configured number of clients enter after training has begun, with entry-round and client-performance variants defined by execution blocks inside the executor configurations.
+
+For complete coverage, generate the combined manifest:
+
+```txt
+campaign_manifests/icpads_2026_experiments.csv
+```
+
+The same generator also produces family-specific manifests:
+
+```txt
+campaign_manifests/icpads_2026_intermittent.csv
+campaign_manifests/icpads_2026_late_joining.csv
+```
+
+Running the combined manifest **without** `--execution-blocks` runs all execution blocks defined in every selected dynamic executor configuration. Use `--execution-blocks <block>` only when intentionally reproducing a subset. Because the campaign-level selector applies to every manifest row, use separate family or block-specific campaigns when different rows require different selectors.
+
+See [Generate the ICPADS 2026 manifests](#53-generate-the-icpads-2026-manifests), [run the ICPADS campaign](#56-run-many-experiments-as-a-campaign), [analyze the dynamic outputs](#73-icpads-2026-intermittent-availability-plots), and download the archived outputs from [ICPADS 2026 results](#icpads-2026). The complete dynamic configuration layouts are documented in [`experiments/README.md`](experiments/README.md).
+
+---
+
 ---
 
 ## Recommended execution order
@@ -96,17 +398,23 @@ When using the remote/Grid'5000 setup script, pass:
    - [4.1 If the smoke test fails: inspect logs and fix environment/configs](#41-if-the-smoke-test-fails-inspect-logs-and-fix-environmentconfigs)
    - [4.2 If the smoke test passes: continue to the experiment campaign](#42-if-the-smoke-test-passes-continue-to-the-experiment-campaign)
 5. [Generate or run the experiment campaign](#5-generate-or-run-the-experiment-campaign)
-   - [5.1 Experiment packs](#51-experiment-packs)
-   - [5.2 Generate experiment packs](#52-generate-experiment-packs)
-   - [5.3 Dry-run the FGCS 2026 pack](#53-dry-run-the-fgcs-2026-pack)
-   - [5.4 Run many experiments as a campaign](#54-run-many-experiments-as-a-campaign)
-   - [5.5 Resume the campaign](#55-resume-the-campaign)
+   - [5.1 Publication campaign inputs](#51-publication-campaign-inputs)
+   - [5.2 Generate the FGCS 2026 pack](#52-generate-the-fgcs-2026-pack)
+   - [5.3 Generate the ICPADS 2026 manifests](#53-generate-the-icpads-2026-manifests)
+   - [5.4 Dry-run the FGCS 2026 pack](#54-dry-run-the-fgcs-2026-pack)
+   - [5.5 Dry-run the ICPADS 2026 campaign](#55-dry-run-the-icpads-2026-campaign)
+   - [5.6 Run many experiments as a campaign](#56-run-many-experiments-as-a-campaign)
+   - [5.7 Resume a campaign](#57-resume-a-campaign)
 6. [Merge distributed outputs](#6-merge-distributed-outputs)
 7. [Run analysis scripts](#7-run-analysis-scripts)
-   - [7.1 DP impact analysis](#71-dp-impact-analysis)
-   - [7.2 Performance plots](#72-performance-plots)
-   - [7.3 Scalability analysis](#73-scalability-analysis)
-   - [7.4 Performance summary](#74-performance-summary)
+   - [7.1 FGCS 2026: DP impact analysis](#71-fgcs-2026-dp-impact-analysis)
+   - [7.2 FGCS 2026: static performance plots](#72-fgcs-2026-static-performance-plots)
+   - [7.3 ICPADS 2026: intermittent-availability plots](#73-icpads-2026-intermittent-availability-plots)
+   - [7.4 ICPADS 2026: late-joining plots](#74-icpads-2026-late-joining-plots)
+   - [7.5 FGCS 2026: scalability analysis](#75-fgcs-2026-scalability-analysis)
+   - [7.6 FGCS 2026: static performance summary](#76-fgcs-2026-static-performance-summary)
+   - [7.7 ICPADS 2026: intermittent-availability summary](#77-icpads-2026-intermittent-availability-summary)
+   - [7.8 ICPADS 2026: late-joining summary](#78-icpads-2026-late-joining-summary)
 8. [Export plots, tables, and metrics](#8-export-plots-tables-and-metrics)
 
 ## Requirements
@@ -281,6 +589,16 @@ README:
 scripts/setup/setup_remote_metacsfl_node.README.md
 ```
 
+Choose the release tag for the publication being reproduced:
+
+```bash
+# FGCS 2026
+RELEASE_TAG=v0.2.0
+
+# ICPADS 2026
+RELEASE_TAG=v0.3.0
+```
+
 Example Grid'5000 setup:
 
 ```bash
@@ -289,7 +607,7 @@ bash scripts/setup/setup_remote_metacsfl_node.sh \
   --remote-project-dir /root/metacs-fl \
   --repo-auth token \
   --prompt-github-token true \
-  --branch v0.2.0 \
+  --branch "$RELEASE_TAG" \
   --force-reclone true \
   --install-powerjoular true \
   --install-metacsfl-package true \
@@ -303,7 +621,7 @@ bash scripts/setup/setup_remote_metacsfl_node.sh \
   --nodes-file scripts/nodes.g5k.txt \
   --remote-project-dir /root/metacs-fl \
   --repo-auth none \
-  --branch v0.2.0 \
+  --branch "$RELEASE_TAG" \
   --max-parallel-installs 8
 ```
 
@@ -544,15 +862,17 @@ Proceed to:
 
 ## 5. Generate or run the experiment campaign
 
-Use this stage to generate a manifest, dry-run it, execute a full experiment pack, or resume an interrupted campaign.
+Use this stage to generate publication-specific campaign inputs, validate them with a dry-run, execute the experiments with fault tolerance, or resume an interrupted campaign.
 
 [Back to recommended execution order](#recommended-execution-order)
 
 ---
 
-### 5.1 Experiment packs
+### 5.1 Publication campaign inputs
 
-The current full static campaign pack is:
+#### FGCS 2026 campaign input
+
+The FGCS 2026 static campaign uses the generated pack:
 
 ```txt
 fgcs_2026_experiments
@@ -570,8 +890,9 @@ static_client_availability/sensitivity_experiments
 It excludes:
 
 ```txt
+dynamic_client_availability/intermittent_client_availability_experiments
 dynamic_client_availability/late_joining_clients_experiments
-Emotion-specific experiments
+Emotion-specific performance experiments
 ```
 
 Distributed backend:
@@ -588,11 +909,30 @@ scalability_experiments
 sensitivity_experiments
 ```
 
+#### ICPADS 2026 campaign input
+
+The ICPADS 2026 campaign uses explicit CSV manifests covering:
+
+```txt
+dynamic_client_availability/intermittent_client_availability_experiments
+dynamic_client_availability/late_joining_clients_experiments
+```
+
+The manifest generator in [Section 5.3](#53-generate-the-icpads-2026-manifests) scans every matching dynamic executor configuration and writes:
+
+```txt
+campaign_manifests/icpads_2026_experiments.csv
+campaign_manifests/icpads_2026_intermittent.csv
+campaign_manifests/icpads_2026_late_joining.csv
+```
+
+All ICPADS rows use the `distributed_flower` backend. Each row references one executor config, its matching approach server config, and the shared `client.cfg` in the same dataset/distribution directory.
+
 [Back to recommended execution order](#recommended-execution-order)
 
 ---
 
-### 5.2 Generate experiment packs
+### 5.2 Generate the FGCS 2026 pack
 
 Experiment packs are generated separately from the campaign runner.
 
@@ -608,7 +948,7 @@ README:
 scripts/execution/generate_experiment_pack.README.md
 ```
 
-Example:
+Generate and validate the FGCS manifest:
 
 ```bash
 python3 scripts/execution/generate_experiment_pack.py \
@@ -624,9 +964,135 @@ The generated manifest defines exactly which experiments should run. This preven
 
 ---
 
-### 5.3 Dry-run the FGCS 2026 pack
+### 5.3 Generate the ICPADS 2026 manifests
 
-Use this to generate and validate the campaign manifest without executing experiments.
+The repository pack generator currently defines the FGCS pack. For ICPADS, use the following complete manifest generator. It scans both dynamic experiment families and creates one combined manifest plus one manifest per family.
+
+Run from the repository root while using tag `v0.3.0`:
+
+```bash
+python3 - <<'PY'
+from __future__ import annotations
+
+import csv
+import re
+from pathlib import Path
+
+ROOT = Path("experiments/dynamic_client_availability")
+OUTPUT = Path("campaign_manifests")
+
+FIELDS = [
+    "experiment_id",
+    "backend",
+    "group",
+    "num_clients",
+    "dataset",
+    "distribution",
+    "approach",
+    "executor_cfg",
+    "server_cfg",
+    "client_cfg",
+    "server_script",
+    "server_config",
+    "remote_output_dir",
+]
+
+
+def collect(family: str, prefix: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    family_root = ROOT / family
+
+    for client_cfg in sorted(family_root.glob("*_clients/*/*/client.cfg")):
+        base = client_cfg.parent
+        num_clients, dataset, distribution = base.parts[-3:]
+
+        for executor_cfg in sorted(base.glob("*.cfg")):
+            if executor_cfg.name == "client.cfg" or executor_cfg.name.endswith("_server.cfg"):
+                continue
+
+            if family == "intermittent_client_availability_experiments":
+                approach = executor_cfg.stem
+            else:
+                match = re.fullmatch(r"(.+)_([0-9]+)_late_clients", executor_cfg.stem)
+                if match is None:
+                    raise SystemExit(
+                        f"Unexpected late-joining executor name: {executor_cfg}"
+                    )
+                approach = match.group(1)
+
+            server_cfg = base / f"{approach}_server.cfg"
+            if not server_cfg.is_file():
+                raise SystemExit(
+                    f"Missing server config for {executor_cfg}: {server_cfg}"
+                )
+
+            rows.append(
+                {
+                    "experiment_id": (
+                        f"{prefix}__{num_clients}__{dataset}__"
+                        f"{distribution}__{executor_cfg.stem}"
+                    ),
+                    "backend": "distributed_flower",
+                    "group": family,
+                    "num_clients": num_clients,
+                    "dataset": dataset,
+                    "distribution": distribution,
+                    "approach": approach,
+                    "executor_cfg": str(executor_cfg),
+                    "server_cfg": str(server_cfg),
+                    "client_cfg": str(client_cfg),
+                    "server_script": "",
+                    "server_config": "",
+                    "remote_output_dir": "",
+                }
+            )
+
+    if not rows:
+        raise SystemExit(f"No experiment rows found under {family_root}")
+    return rows
+
+
+def write_manifest(path: Path, rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"Wrote {len(rows):>4} rows: {path}")
+
+
+intermittent = collect(
+    "intermittent_client_availability_experiments",
+    "intermittent",
+)
+late_joining = collect(
+    "late_joining_clients_experiments",
+    "late_joining",
+)
+combined = intermittent + late_joining
+
+write_manifest(OUTPUT / "icpads_2026_intermittent.csv", intermittent)
+write_manifest(OUTPUT / "icpads_2026_late_joining.csv", late_joining)
+write_manifest(OUTPUT / "icpads_2026_experiments.csv", combined)
+PY
+```
+
+Verify the generated files and row counts:
+
+```bash
+wc -l campaign_manifests/icpads_2026_*.csv
+head -n 3 campaign_manifests/icpads_2026_experiments.csv
+```
+
+Each CSV contains the exact header required by `run_many_distributed_experiments.sh`. The combined file is the publication-level ICPADS campaign input; the family-specific files are useful for independent scheduling, debugging, or execution-block filtering.
+
+[Back to recommended execution order](#recommended-execution-order)
+
+---
+
+### 5.4 Dry-run the FGCS 2026 pack
+
+Generate and validate the FGCS campaign manifest without executing experiments:
 
 ```bash
 bash scripts/execution/run_many_distributed_experiments.sh \
@@ -649,9 +1115,48 @@ campaign_runs/fgcs_2026_dry_run_001/campaign_manifest.rows.usv
 
 ---
 
-### 5.4 Run many experiments as a campaign
+### 5.5 Dry-run the ICPADS 2026 campaign
 
-Use this to execute a full experiment pack with fault tolerance.
+First generate the manifests as described in [Section 5.3](#53-generate-the-icpads-2026-manifests). Then validate the complete combined ICPADS campaign without executing it:
+
+```bash
+bash scripts/execution/run_many_distributed_experiments.sh \
+  --manifest campaign_manifests/icpads_2026_experiments.csv \
+  --campaign-id icpads_2026_dry_run_001 \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --dry-run true
+```
+
+This creates the campaign state structure and the normalized internal rows file under:
+
+```txt
+campaign_runs/icpads_2026_dry_run_001/
+```
+
+To validate each dynamic family separately, run:
+
+```bash
+bash scripts/execution/run_many_distributed_experiments.sh \
+  --manifest campaign_manifests/icpads_2026_intermittent.csv \
+  --campaign-id icpads_2026_intermittent_dry_run_001 \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --dry-run true
+
+bash scripts/execution/run_many_distributed_experiments.sh \
+  --manifest campaign_manifests/icpads_2026_late_joining.csv \
+  --campaign-id icpads_2026_late_joining_dry_run_001 \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --dry-run true
+```
+
+[Back to recommended execution order](#recommended-execution-order)
+
+---
+
+### 5.6 Run many experiments as a campaign
 
 Script:
 
@@ -681,7 +1186,7 @@ campaign_runs/<campaign_id>/
 
 Completed experiments are skipped if the same campaign is resumed.
 
-Run the FGCS 2026 campaign:
+#### Run the FGCS 2026 campaign
 
 ```bash
 bash scripts/execution/run_many_distributed_experiments.sh \
@@ -696,13 +1201,66 @@ bash scripts/execution/run_many_distributed_experiments.sh \
   --repetitions 1
 ```
 
+#### Run the complete ICPADS 2026 campaign
+
+Use the combined manifest and omit `--execution-blocks` so every execution block defined in every intermittent-availability and late-joining executor configuration is run:
+
+```bash
+bash scripts/execution/run_many_distributed_experiments.sh \
+  --manifest campaign_manifests/icpads_2026_experiments.csv \
+  --campaign-id icpads_2026_experiments_001 \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --remote-venv-activate /root/metacs-fl/.venv/bin/activate \
+  --install false \
+  --max-parallel-experiments 1 \
+  --max-parallel-remote-ops 8 \
+  --repetitions 1
+```
+
+To schedule the two dynamic families independently, use the family-specific manifests:
+
+```bash
+bash scripts/execution/run_many_distributed_experiments.sh \
+  --manifest campaign_manifests/icpads_2026_intermittent.csv \
+  --campaign-id icpads_2026_intermittent_001 \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --remote-venv-activate /root/metacs-fl/.venv/bin/activate \
+  --install false \
+  --max-parallel-experiments 1 \
+  --max-parallel-remote-ops 8 \
+  --repetitions 1
+
+bash scripts/execution/run_many_distributed_experiments.sh \
+  --manifest campaign_manifests/icpads_2026_late_joining.csv \
+  --campaign-id icpads_2026_late_joining_001 \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --remote-venv-activate /root/metacs-fl/.venv/bin/activate \
+  --install false \
+  --max-parallel-experiments 1 \
+  --max-parallel-remote-ops 8 \
+  --repetitions 1
+```
+
+To run only one named execution block from every row in a campaign, add, for example:
+
+```bash
+--execution-blocks Execution_1_N
+```
+
+Do not add that option when reproducing all configured ICPADS variants. Use separate campaigns if rows require different execution-block selectors.
+
 [Back to recommended execution order](#recommended-execution-order)
 
 ---
 
-### 5.5 Resume the campaign
+### 5.7 Resume a campaign
 
-If the campaign crashes or is interrupted, rerun the same command with the same campaign id:
+Rerun the same manifest or pack with the same campaign ID. Completed experiments are skipped; failed or interrupted experiments are retried by default.
+
+#### Resume FGCS 2026
 
 ```bash
 bash scripts/execution/run_many_distributed_experiments.sh \
@@ -716,7 +1274,21 @@ bash scripts/execution/run_many_distributed_experiments.sh \
   --max-parallel-remote-ops 8
 ```
 
-Completed experiments will be skipped. Failed or interrupted experiments will be retried by default.
+#### Resume the complete ICPADS 2026 campaign
+
+```bash
+bash scripts/execution/run_many_distributed_experiments.sh \
+  --manifest campaign_manifests/icpads_2026_experiments.csv \
+  --campaign-id icpads_2026_experiments_001 \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --remote-venv-activate /root/metacs-fl/.venv/bin/activate \
+  --install false \
+  --max-parallel-experiments 1 \
+  --max-parallel-remote-ops 8
+```
+
+When family-specific ICPADS campaigns are used, resume each one with its original manifest and campaign ID.
 
 [Back to recommended execution order](#recommended-execution-order)
 
@@ -786,11 +1358,13 @@ scripts/analysis/scalability_analysis.README.md
 scripts/analysis/summarize_performance_results.README.md
 ```
 
+The examples below show the publication-specific modes. Adjust datasets, distributions, client populations, trial counts, scenarios, tuples, and approaches to match the experiment subset being reproduced.
+
 [Back to recommended execution order](#recommended-execution-order)
 
 ---
 
-### 7.1 DP impact analysis
+### 7.1 FGCS 2026: DP impact analysis
 
 Script:
 
@@ -801,17 +1375,14 @@ scripts/analysis/plot_dp_impact_distributions.py
 Example:
 
 ```bash
-python3 scripts/analysis/plot_dp_impact_distributions.py \
-  --non-private-data-distribution-folder results/static_client_availability/dp_impact_results/no_privacy/data_distribution \
-  --differentially-private-data-distribution-folder results/static_client_availability/dp_impact_results/differential_privacy/data_distribution \
-  --root-analysis-folder analysis_results
+python3 scripts/analysis/plot_dp_impact_distributions.py   --non-private-data-distribution-folder results/static_client_availability/dp_impact_results/no_privacy/data_distribution   --differentially-private-data-distribution-folder results/static_client_availability/dp_impact_results/differential_privacy/data_distribution   --root-analysis-folder analysis_results/fgcs_2026
 ```
 
 [Back to recommended execution order](#recommended-execution-order)
 
 ---
 
-### 7.2 Performance plots
+### 7.2 FGCS 2026: static performance plots
 
 Script:
 
@@ -822,23 +1393,60 @@ scripts/analysis/plot_performance_results.py
 Example:
 
 ```bash
-python3 scripts/analysis/plot_performance_results.py \
-  --performance-results-folder results/static_client_availability/performance_results \
-  --root-analysis-folder analysis_results \
-  --experiment-tag performance \
-  --dataset-name cifar_10 \
-  --dataset-distribution iid \
-  --num-available-clients 100 \
-  --num-trials 3 \
-  --phase test \
-  --all-approaches fedavg,oort,mec,ecmtc,divfl,ecsm,metacsfl
+python3 scripts/analysis/plot_performance_results.py   --performance-results-folder results/static_client_availability/performance_results   --root-analysis-folder analysis_results/fgcs_2026   --experiment-tag performance   --dataset-name cifar_10   --dataset-distribution iid   --num-available-clients 100   --num-trials 3   --phase test   --all-approaches fedavg,oort,mec,ecmtc,divfl,ecsm,metacsfl
 ```
 
 [Back to recommended execution order](#recommended-execution-order)
 
 ---
 
-### 7.3 Scalability analysis
+### 7.3 ICPADS 2026: intermittent-availability plots
+
+Generate a combined figure for the configured availability scenarios and optionally keep one figure per scenario:
+
+```bash
+python3 scripts/analysis/plot_performance_results.py   --performance-results-folder results/dynamic_client_availability/intermittent_availability_results   --root-analysis-folder analysis_results/icpads_2026   --experiment-tag intermittent_availability   --dataset-name cifar_10   --dataset-distribution non_iid   --num-available-clients 100   --num-trials 3   --phase test   --all-approaches fedavg,oort,rifles,metacsfl   --availability-scenarios moderate,severe   --combine-availability-scenarios   --also-save-separate-scenarios
+```
+
+The script reads execution folders named:
+
+```txt
+<approach>_<scenario>_exec_<id>/
+```
+
+Change `--availability-scenarios` to the scenario suffixes present in the reproduced results.
+
+[Back to recommended execution order](#recommended-execution-order)
+
+---
+
+### 7.4 ICPADS 2026: late-joining plots
+
+Generate a combined figure for explicit late-joining tuples:
+
+```bash
+python3 scripts/analysis/plot_performance_results.py   --performance-results-folder results/dynamic_client_availability/late_joining_clients_results   --root-analysis-folder analysis_results/icpads_2026   --experiment-tag late_join_clients   --dataset-name fashion_mnist   --dataset-distribution iid   --num-available-clients 100   --num-trials 3   --phase test   --all-approaches fedavg,oort,rifles,metacsfl   --desired-latejoin-tuples '10:10:worst;25:25:best'   --combine-latejoin-tuples   --also-save-separate-scenarios
+```
+
+A tuple has the form:
+
+```txt
+<num_late_clients>:<entry_round>:<performance_type>
+```
+
+The script reads execution folders named:
+
+```txt
+<approach>_<num_late_clients>_late_clients_entry_round_<entry_round>_<performance_type>_performance_exec_<id>/
+```
+
+Use the tuple values represented by the execution blocks that were run.
+
+[Back to recommended execution order](#recommended-execution-order)
+
+---
+
+### 7.5 FGCS 2026: scalability analysis
 
 Script:
 
@@ -849,16 +1457,14 @@ scripts/analysis/scalability_analysis.py
 Example:
 
 ```bash
-python3 scripts/analysis/scalability_analysis.py \
-  --root-results-folder results/static_client_availability \
-  --root-analysis-folder analysis_results
+python3 scripts/analysis/scalability_analysis.py   --root-results-folder results/static_client_availability   --root-analysis-folder analysis_results/fgcs_2026
 ```
 
 [Back to recommended execution order](#recommended-execution-order)
 
 ---
 
-### 7.4 Performance summary
+### 7.6 FGCS 2026: static performance summary
 
 Script:
 
@@ -866,19 +1472,39 @@ Script:
 scripts/analysis/summarize_performance_results.py
 ```
 
-Example:
+Example with a saved LaTeX table:
 
 ```bash
-python3 scripts/analysis/summarize_performance_results.py \
-  --performance-results-folder results/static_client_availability/performance_results \
-  --dataset-name cifar_10 \
-  --dataset-distribution iid \
-  --num-available-clients 100 \
-  --num-trials 3 \
-  --phase test \
-  --all-approaches fedavg,oort,mec,ecmtc,divfl,ecsm,metacsfl \
-  --baseline fedavg
+python3 scripts/analysis/summarize_performance_results.py   --performance-results-folder results/static_client_availability/performance_results   --dataset-name cifar_10   --dataset-distribution iid   --num-available-clients 100   --num-trials 3   --phase test   --all-approaches fedavg,oort,mec,ecmtc,divfl,ecsm,metacsfl   --baseline fedavg   --latex-output-file analysis_results/fgcs_2026/tables/cifar10_iid_performance.tex
 ```
+
+[Back to recommended execution order](#recommended-execution-order)
+
+---
+
+### 7.7 ICPADS 2026: intermittent-availability summary
+
+The intermittent mode adds failure metrics and a dropout-focused table:
+
+```bash
+python3 scripts/analysis/summarize_performance_results.py   --performance-results-folder results/dynamic_client_availability/intermittent_availability_results   --dataset-name cifar_10   --dataset-distribution non_iid   --num-available-clients 100   --num-trials 3   --phase test   --all-approaches fedavg,oort,rifles,metacsfl   --baseline fedavg   --availability-scenarios moderate,severe   --samples-per-task 1   --latex-output-file analysis_results/icpads_2026/tables/intermittent_main.tex   --dropout-latex-output-file analysis_results/icpads_2026/tables/intermittent_dropout.tex
+```
+
+The main table includes the dynamic failure columns. The dropout table reports normalized client and sample failure impacts for each scenario.
+
+[Back to recommended execution order](#recommended-execution-order)
+
+---
+
+### 7.8 ICPADS 2026: late-joining summary
+
+The late-joining mode produces the main comparison table, a late-client engagement table, an engagement CSV, and composition plots:
+
+```bash
+python3 scripts/analysis/summarize_performance_results.py   --performance-results-folder results/dynamic_client_availability/late_joining_clients_results   --dataset-name fashion_mnist   --dataset-distribution iid   --num-available-clients 100   --num-trials 3   --phase test   --all-approaches fedavg,oort,rifles,metacsfl   --baseline fedavg   --desired-latejoin-tuples '10:10:worst;25:25:best'   --latejoin-samples-mode completed   --latex-output-file analysis_results/icpads_2026/tables/latejoin_main.tex   --latejoin-engagement-latex-output-file analysis_results/icpads_2026/tables/latejoin_engagement.tex   --latejoin-engagement-output-folder analysis_results/icpads_2026/latejoin_engagement
+```
+
+Late-join engagement analysis additionally uses `late_joining_clients_ids.csv`. Set the tuple list to the combinations represented by the reproduced results.
 
 [Back to recommended execution order](#recommended-execution-order)
 
@@ -886,23 +1512,41 @@ python3 scripts/analysis/summarize_performance_results.py \
 
 ## 8. Export plots, tables, and metrics
 
-Use the outputs generated by the analysis scripts to export figures, tables, summaries, and metrics.
-
-Typical final outputs are written under:
+Use the analysis scripts to export the publication figures, tables, summaries, and comparison metrics. A practical organization is:
 
 ```txt
 analysis_results/
+├── fgcs_2026/
+│   ├── performance/
+│   ├── tables/
+│   └── ...
+└── icpads_2026/
+    ├── intermittent_availability/
+    ├── late_join_clients/
+    ├── latejoin_engagement/
+    ├── tables/
+    └── ...
 ```
 
-This stage should include:
+Typical FGCS outputs include:
 
-- final DP impact plots;
-- performance plots;
+- differential-privacy impact plots;
+- static performance plots;
 - scalability plots or tables;
-- performance summary tables;
-- metrics and comparisons.
+- static performance summary and LaTeX tables;
+- sensitivity outputs produced by the corresponding experiment scripts.
 
-The exact files depend on which analysis scripts were executed and which experiment results are available.
+Typical ICPADS outputs include:
+
+- separate or combined intermittent-availability accuracy plots;
+- separate or combined late-joining accuracy plots;
+- main dynamic performance tables;
+- intermittent-availability dropout tables;
+- late-join engagement tables;
+- `latejoin_engagement_summary.csv`;
+- selected-client and sample-composition PDF plots.
+
+The exact filenames depend on the selected datasets, distributions, client populations, scenarios, late-joining tuples, and output options. See the script-specific READMEs under `scripts/analysis/` for the complete naming rules.
 
 [Back to recommended execution order](#recommended-execution-order)
 
@@ -1058,6 +1702,16 @@ run_many_distributed_experiments.sh
 
 ## Quick command summary
 
+### Select the publication release
+
+```bash
+# FGCS 2026
+RELEASE_TAG=v0.2.0
+
+# ICPADS 2026
+# RELEASE_TAG=v0.3.0
+```
+
 ### Setup
 
 ```bash
@@ -1066,7 +1720,7 @@ bash scripts/setup/setup_remote_metacsfl_node.sh \
   --remote-project-dir /root/metacs-fl \
   --repo-auth token \
   --prompt-github-token true \
-  --branch v0.2.0 \
+  --branch "$RELEASE_TAG" \
   --force-reclone true \
   --max-parallel-installs 8
 ```
@@ -1081,7 +1735,27 @@ bash scripts/execution/run_toy_smoke_experiments.sh \
   --campaign-id toy_smoke_preflight_001
 ```
 
-### Full campaign dry-run
+### Generate the FGCS 2026 manifest
+
+```bash
+python3 scripts/execution/generate_experiment_pack.py \
+  --pack fgcs_2026_experiments \
+  --experiments-root experiments \
+  --output campaign_runs/fgcs_2026_experiments_001/campaign_manifest.csv \
+  --validate true
+```
+
+### Generate the ICPADS 2026 manifests — quick reference
+
+Run the complete generator from [Section 5.3](#53-generate-the-icpads-2026-manifests). It creates:
+
+```txt
+campaign_manifests/icpads_2026_experiments.csv
+campaign_manifests/icpads_2026_intermittent.csv
+campaign_manifests/icpads_2026_late_joining.csv
+```
+
+### FGCS 2026 dry-run
 
 ```bash
 bash scripts/execution/run_many_distributed_experiments.sh \
@@ -1092,7 +1766,18 @@ bash scripts/execution/run_many_distributed_experiments.sh \
   --dry-run true
 ```
 
-### Full campaign
+### ICPADS 2026 dry-run
+
+```bash
+bash scripts/execution/run_many_distributed_experiments.sh \
+  --manifest campaign_manifests/icpads_2026_experiments.csv \
+  --campaign-id icpads_2026_dry_run_001 \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --dry-run true
+```
+
+### FGCS 2026 full campaign
 
 ```bash
 bash scripts/execution/run_many_distributed_experiments.sh \
@@ -1107,12 +1792,37 @@ bash scripts/execution/run_many_distributed_experiments.sh \
   --repetitions 1
 ```
 
-### Resume campaign
+### ICPADS 2026 full campaign
 
 ```bash
 bash scripts/execution/run_many_distributed_experiments.sh \
-  --manifest campaign_runs/fgcs_2026_experiments_001/campaign_manifest.csv \
-  --campaign-id fgcs_2026_experiments_001 \
+  --manifest campaign_manifests/icpads_2026_experiments.csv \
+  --campaign-id icpads_2026_experiments_001 \
+  --nodes-file scripts/nodes.g5k.txt \
+  --remote-project-dir /root/metacs-fl \
+  --remote-venv-activate /root/metacs-fl/.venv/bin/activate \
+  --install false \
+  --max-parallel-experiments 1 \
+  --max-parallel-remote-ops 8 \
+  --repetitions 1
+```
+
+Omitting `--execution-blocks` runs all execution blocks configured in the ICPADS executor files.
+
+### Resume a campaign — quick reference
+
+```bash
+# FGCS 2026
+MANIFEST=campaign_runs/fgcs_2026_experiments_001/campaign_manifest.csv
+CAMPAIGN_ID=fgcs_2026_experiments_001
+
+# ICPADS 2026
+MANIFEST=campaign_manifests/icpads_2026_experiments.csv
+CAMPAIGN_ID=icpads_2026_experiments_001
+
+bash scripts/execution/run_many_distributed_experiments.sh \
+  --manifest "$MANIFEST" \
+  --campaign-id "$CAMPAIGN_ID" \
   --nodes-file scripts/nodes.g5k.txt \
   --remote-project-dir /root/metacs-fl \
   --remote-venv-activate /root/metacs-fl/.venv/bin/activate \
@@ -1149,11 +1859,23 @@ ssh root@paradoxe-1.rennes.g5k
 
 ## Results
 
+The archive sizes below are the values reported for the original folders and compressed files. The exact byte counts are included because the displayed GB/MB values and "size on disk" can vary across operating systems and filesystems.
+
 ### FGCS 2026
 
 The FGCS 2026 experiment results are available for download here:
 
 - [Download `fgcs_2026_results.tar.xz`](https://osf.io/rejq9/files/sd4a6)
+
+Archive information:
+
+| Item | Value |
+|---|---:|
+| Uncompressed folder size | **3.94 GB** (**4,240,579,212 bytes**) |
+| Uncompressed size on disk | **4.20 GB** (**4,512,460,800 bytes**) |
+| Folder contents | **199,697 files**, **28,292 folders** |
+| Compressed archive size | **436 MB** (**457,653,660 bytes**) |
+| Compressed archive size on disk | **436 MB** (**457,654,272 bytes**) |
 
 To download the archive directly from a terminal, run one of the following commands:
 
@@ -1165,28 +1887,103 @@ curl -L -o fgcs_2026_results.tar.xz https://osf.io/sd4a6/download
 wget -O fgcs_2026_results.tar.xz https://osf.io/sd4a6/download
 ```
 
-The results folder was compressed as a `.tar.xz` archive using `tar` and `xz` with all available CPU threads enabled by `xz -T0`:
+The folder was compressed with `tar` and `xz`, using compression level 6 (`-6`) and all available CPU threads (`-T0`):
 
 ```bash
-tar -c fgcs_2026_results | xz -T0 -v > fgcs_2026_results.tar.xz
+tar -I 'xz -6 -T0' -cf fgcs_2026_results.tar.xz fgcs_2026_results/
 ```
 
-The downloadable compressed archive has approximately **435.2 MiB**, while the uncompressed folder has approximately **4416.2 MiB**.
-
-To extract the archive, run:
+To extract it into the current directory, run:
 
 ```bash
-xz -dc fgcs_2026_results.tar.xz | tar -xv
+tar -I xz -xf fgcs_2026_results.tar.xz
+```
+
+### ICPADS 2026
+
+The ICPADS 2026 experiment results are available for download here:
+
+- [Download `icpads_2026_results.tar.xz`](https://osf.io/hftaq/files/d2z4u)
+
+Archive information:
+
+| Item | Value |
+|---|---:|
+| Uncompressed folder size | **4.05 GB** (**4,359,250,348 bytes**) |
+| Uncompressed size on disk | **4.69 GB** (**5,037,154,304 bytes**) |
+| Folder contents | **508,864 files**, **73,913 folders** |
+| Compressed archive size | **593 MB** (**622,075,464 bytes**) |
+| Compressed archive size on disk | **593 MB** (**622,075,904 bytes**) |
+
+To download the archive directly from a terminal, run one of the following commands:
+
+```bash
+# Using curl
+curl -L -o icpads_2026_results.tar.xz https://osf.io/d2z4u/download
+
+# Or using wget
+wget -O icpads_2026_results.tar.xz https://osf.io/d2z4u/download
+```
+
+The folder was compressed with `tar` and `xz`, using compression level 6 (`-6`) and all available CPU threads (`-T0`):
+
+```bash
+tar -I 'xz -6 -T0' -cf icpads_2026_results.tar.xz icpads_2026_results/
+```
+
+To extract it into the current directory, run:
+
+```bash
+tar -I xz -xf icpads_2026_results.tar.xz
+```
+
+### Thesis
+
+The thesis experiment results are available for download here:
+
+- [Download `thesis_results.tar.xz`](https://osf.io/usxfd/files/ztj69)
+
+Archive information:
+
+| Item | Value |
+|---|---:|
+| Uncompressed folder size | **30.7 GB** (**33,047,529,112 bytes**) |
+| Uncompressed size on disk | **35.2 GB** (**37,878,882,304 bytes**) |
+| Folder contents | **3,587,430 files**, **516,282 folders** |
+| Compressed archive size | **3.90 GB** (**4,195,656,432 bytes**) |
+| Compressed archive size on disk | **3.90 GB** (**4,195,659,776 bytes**) |
+
+To download the archive directly from a terminal, run one of the following commands:
+
+```bash
+# Using curl
+curl -L -o thesis_results.tar.xz https://osf.io/ztj69/download
+
+# Or using wget
+wget -O thesis_results.tar.xz https://osf.io/ztj69/download
+```
+
+The folder was compressed with `tar` and `xz`, using compression level 6 (`-6`) and all available CPU threads (`-T0`):
+
+```bash
+tar -I 'xz -6 -T0' -cf thesis_results.tar.xz thesis_results/
+```
+
+To extract it into the current directory, run:
+
+```bash
+tar -I xz -xf thesis_results.tar.xz
 ```
 
 For reference, the generic commands are:
 
 ```bash
 # Compress a folder into a .tar.xz archive
-tar -c folder_name | xz -T0 -v > folder_name.tar.xz
+# -6 sets the xz compression level and -T0 uses all available CPU threads.
+tar -I 'xz -6 -T0' -cf folder_name.tar.xz folder_name/
 
-# Extract a .tar.xz archive with progress from tar
-xz -dc folder_name.tar.xz | tar -xv
+# Extract a .tar.xz archive into the current directory
+tar -I xz -xf folder_name.tar.xz
 ```
 
 [Back to table of contents](#table-of-contents)
@@ -1223,6 +2020,37 @@ Federated Learning (FL) enables collaborative training of distributed machine le
   howpublished = {HAL},
   hal_id       = {hal-05170215},
   url          = {https://hal.science/hal-05170215}
+}
+```
+
+### 2. A Reliability-Aware Client Selection Framework for Federated Learning on Heterogeneous Resources under Dynamic Availability
+
+#### Authors
+
+- Alan L. Nunes
+- Cristina Boeres
+- Lúcia M. A. Drummond
+- Laércio L. Pilla
+
+#### Affiliations
+
+- Computing Institute, Fluminense Federal University, Niterói, Brazil
+- University of Bordeaux, CNRS, Bordeaux INP, Inria, LaBRI, Talence, France
+
+#### Abstract
+
+Dynamic client availability challenges cross-device Federated Learning (FL) coordination, especially when devices differ in resources, data distributions, and reliability. This paper extends MetaCS-FL with a reliability-aware scheduling mechanism for synchronous cross-device FL. The proposed framework jointly selects clients and assigns workloads while balancing execution time, energy consumption, model performance, participation fairness, and reliability. Availability and completion history are used to define reliability-aware task capacity sets, allowing clients with unreliable recent behavior to remain eligible while receiving fewer tasks. We evaluate MetaCS-FL under late-joining and intermittent-availability scenarios with non-IID image- and text-classification data. The results show a training time and energy consumption reduction of up to 82.09% and 70.83%, respectively, compared to FedAvg, while preserving convergence to the target test accuracy.
+
+#### Citation
+
+```bibtex
+@misc{nunes2026reliabilityaware,
+  title        = {{A Reliability-Aware Client Selection Framework for Federated Learning on Heterogeneous Resources under Dynamic Availability}},
+  author       = {Nunes, Alan Lira and Boeres, Cristina and Drummond, Lúcia Maria de A. and Pilla, Laércio Lima},
+  year         = {2026},
+  howpublished = {HAL},
+  hal_id       = {hal-05663449},
+  url          = {https://hal.science/hal-05663449}
 }
 ```
 
