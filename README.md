@@ -155,13 +155,13 @@ The selection mechanism can therefore operate in both the training and testing p
 
 ### Client selection and workload assignment
 
-Let the configured workload contain `t` tasks, where each task represents a slice of local data used to form mini-batches for training or testing. For every eligible client `i`, MetaCS-FL maintains a set of valid task capacities. A schedule is represented as:
+Let the configured workload contain $t$ tasks, where each task represents a slice of local data used to form mini-batches for training or testing. For every eligible client $i$, MetaCS-FL maintains a set of valid task capacities. A schedule is represented as:
 
-```text
-X = (x_1, x_2, ..., x_n)
+```math
+\mathcal{X} = (x_1, x_2, \ldots, x_n)
 ```
 
-where `x_i` is the number of tasks assigned to client `i`. An assignment of `x_i = 0` means that the client is not selected.
+where $x_i$ is the number of tasks assigned to client $i$. An assignment of $x_i = 0$ means that the client is not selected.
 
 This formulation allows MetaCS-FL to:
 
@@ -216,7 +216,7 @@ The components are:
 | Class-distribution score $K_r$ | Maximize | Improve class coverage while reducing imbalance in the assigned workload. |
 | Utility score $U_r$ | Maximize | Prefer assignments associated with stronger recent training behavior and local generalization. |
 
-The weights `w_1` through `w_5` let an experiment emphasize one objective, combine several objectives, or disable selected components. Time and energy are normalized before scalarization so that their physical units and scale differences do not dominate the remaining scores.
+The weights $w_1$ through $w_5$ let an experiment emphasize one objective, combine several objectives, or disable selected components. Time and energy are normalized before scalarization so that their physical units and scale differences do not dominate the remaining scores.
 
 Every solution must satisfy three principal constraints:
 
@@ -226,7 +226,7 @@ Every solution must satisfy three principal constraints:
 
 ### Reliability and dynamic availability
 
-MetaCS-FL maintains a server-side reliability score in `[0, 1]` for every client that has joined the system. New clients start with full reliability because no negative history exists. Before each selection, the score is updated from the previous score and the most recent observed behavior using an exponentially weighted moving average.
+MetaCS-FL maintains a server-side reliability score in $[0, 1]$ for every client that has joined the system. New clients start with full reliability because no negative history exists. Before each selection, the score is updated from the previous score and the most recent observed behavior using an exponentially weighted moving average.
 
 The framework distinguishes between:
 
@@ -246,7 +246,7 @@ This mechanism supports both dynamic scenarios studied in the repository:
 
 ### Privacy-preserving data-distribution awareness
 
-To reason about non-IID data without collecting raw samples, MetaCS-FL can request a class histogram for each client's local training and testing splits. The client constructs the histogram locally and applies the Laplace mechanism before disclosure. The privacy parameter `epsilon` controls the amount of noise.
+To reason about non-IID data without collecting raw samples, MetaCS-FL can request a class histogram for each client's local training and testing splits. The client constructs the histogram locally and applies the Laplace mechanism before disclosure. The privacy parameter $epsilon$ controls the amount of noise.
 
 The noisy counts are clipped to non-negative values, rounded, sent to the server, and cached. Because the histograms are produced when a client connects and can be reused across rounds, the framework avoids repeatedly querying intermittently available devices.
 
