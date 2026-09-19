@@ -20,6 +20,7 @@ APPROACH_STYLE_MAP = {"fedavg": ("blue", "o", "FedAvg"),
                       "rifles": ("teal", "<", "RIFLES"),
                       "rifles_gh": ("teal", "<", "RIFLES-GH"),
                       "metacsfl": ("red", "s", "MetaCS-FL"),
+                      "metacsfl_no_reliability": ("navy", "D", "MetaCS-FL without Reliability Score"),
                       "metacsfl_no_privacy": ("orange", "*", "MetaCS-FL No Privacy")}
 
 
