@@ -322,6 +322,8 @@ The script also prints a per-approach summary containing:
 - percentage of failed clients;
 - percentage of completed tasks.
 
+In combined-only mode, this completion/failure/task summary is not printed because the script returns after saving the combined figure. Use `--also-save-separate-scenarios` to process the individual scenarios/tuples as well and print their per-approach summaries.
+
 ---
 
 ## 8. Approach styles
@@ -339,6 +341,7 @@ fedcab
 rifles
 rifles_gh
 metacsfl
+metacsfl_no_reliability
 metacsfl_no_privacy
 ```
 

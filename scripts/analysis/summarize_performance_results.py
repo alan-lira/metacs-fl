@@ -17,7 +17,7 @@ APPROACH_LABELS = {"fedavg": "FedAvg",
                    "rifles": "RIFLES",
                    "rifles_gh": "RIFLES-GH",
                    "metacsfl": "MetaCS-FL",
-                   "metacsfl_no_reliability": "MetaCS-FL without Reliability Score",
+                   "metacsfl_no_reliability": "MetaCS-FL (No-RS)",
                    "metacsfl_no_privacy": "MetaCS-FL No Privacy"}
 
 
@@ -31,7 +31,7 @@ APPROACH_STYLE_MAP = {"fedavg": ("blue", "o", "FedAvg"),
                       "rifles": ("teal", "<", "RIFLES"),
                       "rifles_gh": ("teal", "<", "RIFLES-GH"),
                       "metacsfl": ("red", "s", "MetaCS-FL"),
-                      "metacsfl_no_reliability": ("navy", "D", "MetaCS-FL without Reliability Score"),
+                      "metacsfl_no_reliability": ("navy", "D", "MetaCS-FL (No-RS)"),
                       "metacsfl_no_privacy": ("orange", "*", "MetaCS-FL No Privacy")}
 
 

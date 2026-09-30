@@ -1,7 +1,6 @@
 <p align="center">
   <img
     src="figures/valente-memorial.png"
-    alt="Valente descansando ao meu lado"
   >
 </p>
 
@@ -1921,11 +1920,11 @@ Archive information:
 
 | Item | Value |
 |---|---:|
-| Uncompressed folder size | **4.05 GB** (**4,359,250,348 bytes**) |
-| Uncompressed size on disk | **4.69 GB** (**5,037,154,304 bytes**) |
-| Folder contents | **508,864 files**, **73,913 folders** |
-| Compressed archive size | **593 MB** (**622,075,464 bytes**) |
-| Compressed archive size on disk | **593 MB** (**622,075,904 bytes**) |
+| Uncompressed folder size | **4.22 GB** (**4,536,191,164 bytes**) |
+| Uncompressed size on disk | **5.87 GB** (**6,299,578,368 bytes**) |
+| Folder contents | **535,664 files**, **77,693 folders** |
+| Compressed archive size | **630 MB** (**660,339,708 bytes**) |
+| Compressed archive size on disk | **630 MB** (**660,344,832 bytes**) |
 
 To download the archive directly from a terminal, run one of the following commands:
 
@@ -2004,7 +2003,7 @@ tar -I xz -xf folder_name.tar.xz
 
 ## Scientific Productions
 
-### 1. MetaCS-FL: A Metaheuristic-Based Framework for Client Selection in Federated Learning Systems
+### 1. - [MetaCS-FL: A Metaheuristic-Based Framework for Client Selection in Federated Learning Systems](https://doi.org/10.1016/j.future.2026.108707)
 
 #### Authors
 
@@ -2025,17 +2024,19 @@ Federated Learning (FL) enables collaborative training of distributed machine le
 #### Citation
 
 ```bibtex
-@misc{nunes2025metacsfl,
-  title        = {{MetaCS-FL: A Metaheuristic-Based Framework for Client Selection in Federated Learning Systems}},
-  author       = {Nunes, Alan L. and Boeres, Cristina and Pilla, Laércio L. and Drummond, Lúcia M. A.},
-  year         = {2025},
-  howpublished = {HAL},
-  hal_id       = {hal-05170215},
-  url          = {https://hal.science/hal-05170215}
+@article{nunes2026metacs,
+  author  = {Nunes, Alan L. and Boeres, Cristina and Pilla, Laércio L. and Drummond, Lúcia M. A.},
+  title   = {{MetaCS-FL: A Metaheuristic-Based Framework for Client Selection in Federated Learning Systems}},
+  journal = {Future Generation Computer Systems},
+  volume  = {185},
+  pages   = {108707},
+  year    = {2026},
+  issn    = {0167-739X},
+  doi     = {10.1016/j.future.2026.108707}
 }
 ```
 
-### 2. A Reliability-Aware Client Selection Framework for Federated Learning on Heterogeneous Resources under Dynamic Availability
+### 2. [A Reliability-Aware Client Selection Framework for Federated Learning on Heterogeneous Resources under Dynamic Availability](https://hal.science/hal-05663449/document)
 
 #### Authors
 
