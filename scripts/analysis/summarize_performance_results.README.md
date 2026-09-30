@@ -246,7 +246,7 @@ Use either an explicit tuple list or all three Cartesian-product options.
 | Parameter | Description |
 |---|---|
 | `--availability-scenarios` | Comma-separated scenarios, for example `moderate,severe`. The script reads `<approach>_<scenario>_exec_<id>`. Values such as `moderate_availability` are normalized to `moderate`. |
-| `--samples-per-task` | Overrides the number of samples represented by one scheduled task when calculating failed scheduled samples. Defaults: `cifar_10=1`, `fashion_mnist=1`, `emotion=10`; unknown datasets default to `1`. |
+| `--samples-per-task` | Overrides the number of samples represented by one scheduled task. It is used for intermittent-availability failed-sample accounting and for late-join analysis when `--latejoin-samples-mode proportional_scheduled` is selected. Defaults: `cifar_10=1`, `fashion_mnist=1`, `emotion=10`; unknown datasets default to `1`. |
 
 Do not combine `--availability-scenarios` with late-joining options.
 
@@ -280,7 +280,7 @@ These outputs are generated only for late-joining groups.
 |---|---|
 | `--no-latejoin-engagement-table` | Disable the extra late-join engagement terminal and LaTeX tables. |
 | `--latejoin-engagement-latex-output-file` | Save the late-join engagement LaTeX table to a `.tex` file. Requires LaTeX output to remain enabled. |
-| `--latejoin-engagement-output-folder` | Save the engagement CSV and two stacked-composition PDF plots to this folder. This export is independent of `--no-latejoin-engagement-table`. |
+| `--latejoin-engagement-output-folder` | Save the engagement CSV and two stacked-composition PDF plots to this folder. These exports are generated only while late-join engagement output is enabled, so `--no-latejoin-engagement-table` also disables them. |
 
 ---
 
@@ -421,7 +421,7 @@ Parent directories are created automatically.
 
 ### 10.2 Late-join engagement folder
 
-When `--latejoin-engagement-output-folder <folder>` is supplied, the script writes:
+When `--latejoin-engagement-output-folder <folder>` is supplied and late-join engagement output is enabled, the script writes:
 
 ```txt
 <folder>/latejoin_engagement_summary.csv
@@ -448,6 +448,7 @@ fedcab
 rifles
 rifles_gh
 metacsfl
+metacsfl_no_reliability
 metacsfl_no_privacy
 ```
 

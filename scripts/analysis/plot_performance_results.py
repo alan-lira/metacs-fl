@@ -2,7 +2,7 @@ from argparse import ArgumentParser
 from itertools import product
 import matplotlib.pyplot as plt
 from matplotlib.pyplot import figure, fill_between, gca, grid, legend, plot, savefig, text, tight_layout, xlabel, ylabel
-from matplotlib.patheffects import withStroke
+from matplotlib.lines import Line2D
 from matplotlib.ticker import FuncFormatter, FixedLocator
 from math import floor, ceil
 from numpy import arange
@@ -20,6 +20,7 @@ APPROACH_STYLE_MAP = {"fedavg": ("blue", "o", "FedAvg"),
                       "rifles": ("teal", "<", "RIFLES"),
                       "rifles_gh": ("teal", "<", "RIFLES-GH"),
                       "metacsfl": ("red", "s", "MetaCS-FL"),
+                      "metacsfl_no_reliability": ("navy", "D", "MetaCS-FL (No-RS)"),
                       "metacsfl_no_privacy": ("orange", "*", "MetaCS-FL No Privacy")}
 
 
@@ -243,17 +244,14 @@ def smart_format(value: float) -> str:
     return "{0:.2f}".format(value) if float("{0:.4f}".format(value)) == float("{0:.2f}".format(value)) else "{0:.4f}".format(value)
 
 
-def annotate(x,
-             y,
-             annotation_text,
-             color):
-    text(x, y, annotation_text,
-         ha="center",
-         va="bottom",
-         fontsize=9,
-         fontweight="bold",
-         color=color,
-         path_effects=[withStroke(linewidth=2.5, foreground="white")])
+def mark_curve_endpoint(ax,
+                        mean_std_df: DataFrame,
+                        color: str):
+    last = mean_std_df.iloc[-1]
+    ax.plot([last["comm_round"]], [last["mean_accuracy"]],
+            linestyle="None", marker="o", markersize=9,
+            markerfacecolor=color, markeredgecolor="white",
+            markeredgewidth=1.1, zorder=8)
 
 
 def plot_with_shaded_area(mean_std_df: DataFrame,
@@ -262,26 +260,13 @@ def plot_with_shaded_area(mean_std_df: DataFrame,
                           seen_x: dict,
                           marker: str = "o",
                           markersize: int = 3):
+    ax = gca()
     rounds = mean_std_df["comm_round"]
     mean = mean_std_df["mean_accuracy"]
     std = mean_std_df["std_accuracy"]
-    plot(rounds, mean, label=label, color=color, marker=marker, markersize=markersize)
-    fill_between(rounds, mean - std, mean + std, alpha=0.2, color=color)
-    y0, y1 = gca().get_ylim()
-    offset = (y1 - y0) * 0.02
-    last_x = rounds.iloc[-1]
-    last_y = mean.iloc[-1]
-    text_value = smart_format(last_y)
-    key = int(round(last_x))
-    seen_x.setdefault(key, [])
-    seen_x[key].append((last_y, color, text_value))
-    entries = sorted(seen_x[key], key=lambda t: t[0])
-    n = len(entries)
-    mid = (n - 1) / 2
-    current_entry = seen_x[key][-1]
-    current_index = entries.index(current_entry)
-    dy = (current_index - mid) * offset
-    annotate(last_x, last_y + dy, text_value, color)
+    ax.plot(rounds, mean, label=label, color=color, marker=marker, markersize=markersize)
+    ax.fill_between(rounds, mean - std, mean + std, alpha=0.2, color=color)
+    mark_curve_endpoint(ax, mean_std_df, color)
 
 
 def style_for_approach(key: str,
@@ -361,20 +346,6 @@ def collect_mean_std_for_experiment(results_folder: Path,
     return base_paths, mean_std
 
 
-def annotate_on_axis(ax,
-                     x,
-                     y,
-                     annotation_text,
-                     color):
-    ax.text(x, y, annotation_text,
-            ha="center",
-            va="bottom",
-            fontsize=9,
-            fontweight="bold",
-            color=color,
-            path_effects=[withStroke(linewidth=2.5, foreground="white")])
-
-
 def plot_with_shaded_area_on_axis(ax,
                                   mean_std_df: DataFrame,
                                   label: str,
@@ -387,41 +358,69 @@ def plot_with_shaded_area_on_axis(ax,
     std = mean_std_df["std_accuracy"]
     line, = ax.plot(rounds, mean, label=label, color=color, marker=marker, markersize=markersize)
     ax.fill_between(rounds, mean - std, mean + std, alpha=0.2, color=color)
-    y0, y1 = ax.get_ylim()
-    offset = (y1 - y0) * 0.02
-    last_x = rounds.iloc[-1]
-    last_y = mean.iloc[-1]
-    text_value = smart_format(last_y)
-    key = int(round(last_x))
-    seen_x.setdefault(key, [])
-    seen_x[key].append((last_y, color, text_value))
-    entries = sorted(seen_x[key], key=lambda t: t[0])
-    n = len(entries)
-    mid = (n - 1) / 2
-    current_entry = seen_x[key][-1]
-    current_index = entries.index(current_entry)
-    dy = (current_index - mid) * offset
-    annotate_on_axis(ax, last_x, last_y + dy, text_value, color)
+    mark_curve_endpoint(ax, mean_std_df, color)
     return line
+
+
+def place_final_accuracy_key(ax,
+                             mean_std: dict,
+                             all_approaches: list,
+                             columns: int = 2):
+    entries = []
+    for idx, key in enumerate(all_approaches):
+        df = mean_std.get(key)
+        if df is None or df.empty:
+            continue
+        color = style_for_approach(key, idx)[0]
+        entries.append((color, smart_format(float(df["mean_accuracy"].iloc[-1]))))
+    if not entries:
+        return None
+    columns = min(max(1, columns), len(entries))
+    nrows = ceil(len(entries) / columns)
+    column_first_indices = [r * columns + c
+                            for c in range(columns)
+                            for r in range(nrows)
+                            if r * columns + c < len(entries)]
+    handles = [Line2D([], [], linestyle="None", marker="o", markersize=7,
+                      markerfacecolor=entries[i][0], markeredgecolor="white",
+                      markeredgewidth=0.8) for i in column_first_indices]
+    values = [entries[i][1] for i in column_first_indices]
+    accuracy_key = ax.legend(handles, values, title="Final accuracy",
+                             loc="lower right", bbox_to_anchor=(0.995, 0.01),
+                             bbox_transform=ax.transAxes, ncol=columns,
+                             frameon=True, framealpha=0.93,
+                             facecolor="white", edgecolor="0.75",
+                             fontsize=8, title_fontsize=8,
+                             handlelength=0.8, handletextpad=0.25,
+                             columnspacing=0.8, labelspacing=0.24,
+                             borderpad=0.38)
+    accuracy_key.set_zorder(10)
+    return accuracy_key
+
+
+def accuracy_data_limits(mean_std: dict) -> tuple:
+    lower = []
+    upper = []
+    for df in mean_std.values():
+        lower.extend((df["mean_accuracy"] - df["std_accuracy"]).values)
+        upper.extend((df["mean_accuracy"] + df["std_accuracy"]).values)
+    if not lower:
+        return None
+    return min(lower), max(upper)
 
 
 def format_accuracy_axis(ax,
                          mean_std: dict,
                          phase: str,
-                         show_ylabel: bool = True):
+                         show_ylabel: bool = True,
+                         shared_accuracy_limits: tuple = None):
     all_x = []
-    all_y_low = []
-    all_y_high = []
     for df in mean_std.values():
         all_x.extend(df["comm_round"].values)
-        all_y_low.extend((df["mean_accuracy"] - df["std_accuracy"]).values)
-        all_y_high.extend((df["mean_accuracy"] + df["std_accuracy"]).values)
     if not all_x:
         return
     xmin = 0
     xmax = max(all_x)
-    ymin = min(all_y_low)
-    ymax = max(all_y_high)
     ax.set_xlim(xmin, xmax)
     if xmax <= xmin:
         x_step = 1
@@ -443,23 +442,65 @@ def format_accuracy_axis(ax,
     x_ticks = sorted(set(x_ticks))
     ax.xaxis.set_major_locator(FixedLocator(x_ticks))
     ax.set_xticks(x_ticks)
-    y_range = ymax - ymin
-    if y_range == 0:
-        y_range = 0.1
-    ymin -= 0.05 * y_range
-    ymax += 0.05 * y_range
-    ymin = max(0.0, floor(ymin * 10) / 10)
-    ymax = min(1.0, ceil(ymax * 10) / 10)
+    ymin, ymax = (shared_accuracy_limits if shared_accuracy_limits is not None else accuracy_data_limits(mean_std))
+    y_range = max(ymax - ymin, 0.01)
+    ymin = max(0.0, ymin - 0.025 * y_range)
+    ymax = min(1.0, ymax + 0.065 * y_range)
     ax.set_ylim(ymin, ymax)
     y_step = 0.05 if ymax - ymin <= 0.3 else 0.1
-    y_ticks = list(arange(ymin, ymax + 1e-9, y_step))
-    y_ticks = [t for t in y_ticks if t != 0]
+    first_tick = ceil((ymin - 1e-10) / y_step)
+    last_tick = floor((ymax + 1e-10) / y_step)
+    y_ticks = [round(i * y_step, 10)
+               for i in range(first_tick, last_tick + 1)
+               if i * y_step > 1e-10]
     ax.yaxis.set_major_locator(FixedLocator(y_ticks))
     ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: "{0:.2f}".format(y).rstrip("0").rstrip(".")))
     ax.set_xlabel("FL Round")
     if show_ylabel:
         ax.set_ylabel("{0} Accuracy".format(phase.capitalize() if phase == "test" else phase.capitalize() + "ing"))
     ax.grid(True)
+
+
+def place_compact_shared_legend(fig, axes, legend_handles, legend_labels):
+    fig.tight_layout(pad=0.65)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    top_title_pixels = max(ax.title.get_window_extent(renderer=renderer).y1 for ax in axes)
+    top_title_fraction = fig.transFigure.inverted().transform((0, top_title_pixels))[1]
+    fig.legend(legend_handles,
+               legend_labels,
+               loc="lower center",
+               bbox_to_anchor=(0.5, top_title_fraction + 0.008),
+               ncol=max(1, len(legend_labels)),
+               frameon=True,
+               framealpha=0.9)
+
+
+def place_compact_individual_legend(fig, ax, legend_handles, legend_labels):
+    if not legend_handles:
+        return
+    ncols = ceil(len(legend_handles) / 2)
+    legend_order = []
+    for col in range(ncols):
+        legend_order.append(col)
+        if col + ncols < len(legend_handles):
+            legend_order.append(col + ncols)
+    fig.tight_layout(pad=0.65)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    axes_top_pixels = ax.get_window_extent(renderer=renderer).y1
+    axes_top_fraction = fig.transFigure.inverted().transform((0, axes_top_pixels))[1]
+    fig.legend([legend_handles[i] for i in legend_order],
+               [legend_labels[i] for i in legend_order],
+               loc="lower center",
+               bbox_to_anchor=(0.5, axes_top_fraction + 0.002),
+               ncol=ncols,
+               frameon=True,
+               framealpha=0.9,
+               columnspacing=1.2,
+               handletextpad=0.4,
+               labelspacing=0.25,
+               borderpad=0.4)
 
 
 def process_combined_availability_figure(results_folder: Path,
@@ -499,6 +540,10 @@ def process_combined_availability_figure(results_folder: Path,
     fig, axes = plt.subplots(1, ncols, figsize=(5.6 * ncols, 4.2), sharey=True)
     if ncols == 1:
         axes = [axes]
+    all_scenario_dfs = {"{0}_{1}".format(scenario, key): df
+                        for scenario, scenario_means in scenario_data
+                        for key, df in scenario_means.items()}
+    shared_accuracy_limits = accuracy_data_limits(all_scenario_dfs)
     legend_handles = []
     legend_labels = []
     for ax_idx, (ax, (scenario, mean_std)) in enumerate(zip(axes, scenario_data)):
@@ -512,16 +557,11 @@ def process_combined_availability_figure(results_folder: Path,
                 legend_handles.append(line)
                 legend_labels.append(label)
         ax.set_title(str(scenario).capitalize())
-        format_accuracy_axis(ax, mean_std, phase, show_ylabel=(ax_idx == 0))
-    n_legend_cols = min(len(legend_labels), max(1, len(legend_labels)))
-    fig.legend(legend_handles,
-               legend_labels,
-               loc="upper center",
-               bbox_to_anchor=(0.5, 1.02),
-               ncol=n_legend_cols,
-               frameon=True,
-               framealpha=0.9)
-    fig.tight_layout(rect=[0, 0, 1, 0.88])
+        format_accuracy_axis(ax, mean_std, phase,
+                             show_ylabel=(ax_idx == 0),
+                             shared_accuracy_limits=shared_accuracy_limits)
+        place_final_accuracy_key(ax, mean_std, all_approaches)
+    place_compact_shared_legend(fig, axes, legend_handles, legend_labels)
     scenario_suffix = "_" + "_".join([str(s).strip() for s in availability_scenarios if str(s).strip()])
     figure_file = root_analysis_folder.joinpath("{0}/{1}ing_accuracy_{2}_{3}{4}_{5}_clients{6}_combined.pdf"
                                                 .format(experiment_tag,
@@ -590,7 +630,10 @@ def process_combined_latejoin_figure(results_folder: Path,
     fig, axes = plt.subplots(1, ncols, figsize=(5.6 * ncols, 4.2), sharey=True)
     if ncols == 1:
         axes = [axes]
-    # Keep a single shared legend across subplots. A dict prevents duplicate labels.
+    all_tuple_dfs = {"{0}_{1}".format(tuple_index, key): df
+                     for tuple_index, (_, tuple_means) in enumerate(tuple_data)
+                     for key, df in tuple_means.items()}
+    shared_accuracy_limits = accuracy_data_limits(all_tuple_dfs)
     legend_by_label = {}
     for ax_idx, (ax, (latejoin_tuple, mean_std)) in enumerate(zip(axes, tuple_data)):
         seen_x = {}
@@ -608,18 +651,13 @@ def process_combined_latejoin_figure(results_folder: Path,
             if label not in legend_by_label:
                 legend_by_label[label] = line
         ax.set_title(format_latejoin_title(latejoin_tuple))
-        format_accuracy_axis(ax, mean_std, phase, show_ylabel=(ax_idx == 0))
+        format_accuracy_axis(ax, mean_std, phase,
+                             show_ylabel=(ax_idx == 0),
+                             shared_accuracy_limits=shared_accuracy_limits)
+        place_final_accuracy_key(ax, mean_std, all_approaches)
     legend_labels = list(legend_by_label.keys())
     legend_handles = [legend_by_label[label] for label in legend_labels]
-    n_legend_cols = min(len(legend_labels), max(1, len(legend_labels)))
-    fig.legend(legend_handles,
-               legend_labels,
-               loc="upper center",
-               bbox_to_anchor=(0.5, 1.02),
-               ncol=n_legend_cols,
-               frameon=True,
-               framealpha=0.9)
-    fig.tight_layout(rect=[0, 0, 1, 0.88])
+    place_compact_shared_legend(fig, axes, legend_handles, legend_labels)
     tuple_suffix = "_".join([safe_label_for_tuple(t) for t in latejoin_tuples])
     figure_file = root_analysis_folder.joinpath("{0}/{1}ing_accuracy_{2}_{3}{4}_{5}_clients_{6}_combined_latejoin.pdf"
                                                 .format(experiment_tag,
@@ -666,62 +704,18 @@ def process_experiments_for_r(results_folder: Path,
     if not mean_std:
         print("[ERROR] No experiment produced usable data. Skipping plot for tuple {0}, scenario {1}.".format(latejoin_tuple, availability_scenario))
         return
-    figure(figsize=(7.2, 4.0))
+    fig, ax = plt.subplots(figsize=(7.2, 4.0))
     seen_x = {}
+    legend_handles = []
+    legend_labels = []
     for idx, (key, df) in enumerate(mean_std.items()):
         color, marker, label = style_for_approach(key, idx)
-        plot_with_shaded_area(df, label, color, seen_x, marker, 3)
-    ax = gca()
-    all_x = []
-    all_y_low = []
-    all_y_high = []
-    for df in mean_std.values():
-        all_x.extend(df["comm_round"].values)
-        all_y_low.extend((df["mean_accuracy"] - df["std_accuracy"]).values)
-        all_y_high.extend((df["mean_accuracy"] + df["std_accuracy"]).values)
-    xmin = 0
-    xmax = max(all_x)
-    ymin = min(all_y_low)
-    ymax = max(all_y_high)
-    ax.set_xlim(xmin, xmax)
-    if xmax <= xmin:
-        x_step = 1
-    else:
-        raw_step = (xmax - xmin) / 10
-        x_step = int(round(raw_step))
-        if x_step < 1:
-            x_step = 1
-        if x_step > 1 and x_step % 5 != 0:
-            x_step = int(round(x_step / 5) * 5)
-        if (xmax - xmin) <= 10:
-            x_step = 1
-    x_ticks = list(range(xmin, xmax + 1, max(x_step, 1)))
-    for required in (1, xmax):
-        if required not in x_ticks:
-            x_ticks.append(required)
-    if 0 in x_ticks:
-        x_ticks.remove(0)
-    x_ticks = sorted(set(x_ticks))
-    ax.xaxis.set_major_locator(FixedLocator(x_ticks))
-    ax.set_xticks(x_ticks)
-    y_range = ymax - ymin
-    if y_range == 0:
-        y_range = 0.1
-    ymin -= 0.05 * y_range
-    ymax += 0.05 * y_range
-    ymin = max(0.0, floor(ymin * 10) / 10)
-    ymax = min(1.0, ceil(ymax * 10) / 10)
-    ax.set_ylim(ymin, ymax)
-    y_step = 0.05 if ymax - ymin <= 0.3 else 0.1
-    y_ticks = list(arange(ymin, ymax + 1e-9, y_step))
-    y_ticks = [t for t in y_ticks if t != 0]
-    ax.yaxis.set_major_locator(FixedLocator(y_ticks))
-    ax.yaxis.set_major_formatter(FuncFormatter(lambda y, _: "{0:.2f}".format(y).rstrip("0").rstrip(".")))
-    xlabel("FL Round")
-    ylabel("{0} Accuracy".format(phase.capitalize() if phase == "test" else phase.capitalize() + "ing"))
-    legend(loc="lower right", frameon=True, framealpha=0.9)
-    grid(True)
-    tight_layout()
+        line = plot_with_shaded_area_on_axis(ax, df, label, color, seen_x, marker, 3)
+        legend_handles.append(line)
+        legend_labels.append(label)
+    format_accuracy_axis(ax, mean_std, phase)
+    place_final_accuracy_key(ax, mean_std, all_approaches)
+    place_compact_individual_legend(fig, ax, legend_handles, legend_labels)
     tuple_label = safe_label_for_tuple(latejoin_tuple)
     tuple_suffix = "" if tuple_label == "" else "_{0}".format(tuple_label)
     scenario_label = str(availability_scenario or "").strip()
@@ -735,7 +729,8 @@ def process_experiments_for_r(results_folder: Path,
                                                         num_available_clients,
                                                         scenario_suffix,
                                                         tuple_suffix))
-    savefig(figure_file, dpi=300, bbox_inches="tight")
+    fig.savefig(figure_file, dpi=300, bbox_inches="tight")
+    plt.close(fig)
     print("[INFO] Saved figure: {0}".format(figure_file))
     summary_rows = []
     for idx, key in enumerate(all_approaches):

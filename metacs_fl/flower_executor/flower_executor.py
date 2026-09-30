@@ -72,7 +72,7 @@ class FlowerExecutor:
             return []
         if isinstance(execution_blocks, str):
             value = execution_blocks.strip()
-            if not value:
+            if not value or value.lower() == "none":
                 return []
             # Prefer comma-separated values because full section names contain spaces.
             # Also accept a single value wrapped in brackets, e.g. "[A,B]".
